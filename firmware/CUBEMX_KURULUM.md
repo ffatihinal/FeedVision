@@ -187,11 +187,8 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
 
 ## 9. Kullanıcı kodunu yapıştır
 
-- `Core/Src/main.c` → bu repodaki **çalışan, güncel `main.c`** zaten tüm blokları
-  içeriyor — sıfırdan kuruyorsan oradaki `/* USER CODE BEGIN ... */` bloklarının
-  içeriğini aynı isimli bölümlere kopyala. (Eskiden ayrı bir "kaynak" dosyası
-  vardı, main.c'nin kendisiyle çift bakım gerektirdiği için kaldırıldı —
-  main.c artık kendi referansı.)
+- `Core/Src/main.c` → bu repodaki **çalışan, güncel `main.c`** referans — oradaki
+  `/* USER CODE BEGIN ... */` bloklarının içeriğini aynı isimli bölümlere kopyala.
 - `Core/Src/stm32g0xx_it.c` → `stm32g0xx_it_user_code.c` dosyasını oku; oraya
   **eklenecek bir şey yok**, sadece kontrol listesi var.
 - ⚠️ **Her blok sonrası `Cmd+S` ile kaydet.** CubeIDE'de autosave yok (PyCharm/VSCode'a alışkınsan bu tuzağa düşülüyor) — kaydetmeden Build alırsan eski/boş hali derlenir.
