@@ -6,15 +6,15 @@
   <style>
     body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 24px; }
     h1 { font-size: 28px; }
-    .kameralar { display: flex; gap: 24px; flex-wrap: wrap; }
-    .kamera-blok { flex: 1; min-width: 320px; }
+    .cameras { display: flex; gap: 24px; flex-wrap: wrap; }
+    .camera-block { flex: 1; min-width: 320px; }
     button {
       font-size: 20px; padding: 16px 24px; margin: 8px 8px 8px 0;
       border-radius: 8px; border: none; background: #2a6; color: white; cursor: pointer;
     }
     button:active { background: #184; }
     img { max-width: 100%; border-radius: 8px; border: 2px solid #333; display: none; }
-    img.acik { display: block; }
+    img.open { display: block; }
 
     /* --- Motor kontrol paneli --- */
     .panel {
@@ -22,119 +22,119 @@
       padding: 16px;
     }
     .panel h2 { margin-top: 0; font-size: 18px; }
-    .satir-grup { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-    .satir-grup label { font-size: 14px; color: #aaa; }
-    .satir-grup input, .satir-grup select {
+    .row-group { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    .row-group label { font-size: 14px; color: #aaa; }
+    .row-group input, .row-group select {
       font-size: 16px; padding: 8px; border-radius: 6px; border: 1px solid #444;
       background: #222; color: #eee; width: 100px;
     }
-    .satir-grup button { font-size: 15px; padding: 10px 16px; }
-    #durum-gostergesi {
+    .row-group button { font-size: 15px; padding: 10px 16px; }
+    #status-display {
       font-family: monospace; font-size: 13px; background: #000; padding: 10px;
       border-radius: 6px; color: #8f8; margin-top: 8px;
     }
-    .durum-nokta { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
-    .durum-nokta.bagli { background: #4c4; }
-    .durum-nokta.bagli-degil { background: #c44; }
+    .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+    .status-dot.connected { background: #4c4; }
+    .status-dot.disconnected { background: #c44; }
 
     /* --- Konsol paneli --- */
-    #konsol-baslik { margin-top: 32px; font-size: 16px; color: #9c9; }
-    #konsol {
+    #console-title { margin-top: 32px; font-size: 16px; color: #9c9; }
+    #console {
       margin-top: 8px; background: #000; border: 1px solid #333; border-radius: 8px;
       padding: 12px; height: 220px; overflow-y: auto;
       font-family: "SF Mono", Menlo, monospace; font-size: 13px; line-height: 1.5;
     }
-    #konsol .satir { white-space: pre-wrap; word-break: break-word; }
-    #konsol .zaman { color: #666; }
-    #konsol .buton { color: #6cf; }
-    #konsol .gorev { color: #ccc; }
-    #konsol .sonuc { color: #8f8; }
-    #konsol .hata { color: #f77; }
+    #console .line { white-space: pre-wrap; word-break: break-word; }
+    #console .time { color: #666; }
+    #console .button-name { color: #6cf; }
+    #console .task { color: #ccc; }
+    #console .result { color: #8f8; }
+    #console .error { color: #f77; }
   </style>
 </head>
 <body>
   <h1>FeedVision — Kamera Paneli</h1>
 
-  <div class="kameralar">
-    <div class="kamera-blok">
-      <button onclick="kameraAcKapa(1)">Kamera 1 Aç/Kapat</button>
+  <div class="cameras">
+    <div class="camera-block">
+      <button onclick="toggleCamera(1)">Kamera 1 Aç/Kapat</button>
       <br>
-      <img id="kamera1" src="/camera/1/stream">
+      <img id="camera1" src="/camera/1/stream">
     </div>
-    <div class="kamera-blok">
-      <button onclick="kameraAcKapa(2)">Kamera 2 Aç/Kapat</button>
+    <div class="camera-block">
+      <button onclick="toggleCamera(2)">Kamera 2 Aç/Kapat</button>
       <br>
-      <img id="kamera2" src="/camera/2/stream">
+      <img id="camera2" src="/camera/2/stream">
     </div>
   </div>
 
   <div class="panel">
     <h2>Motor Kontrolü (STM32 köprüsü)</h2>
 
-    <div class="satir-grup">
+    <div class="row-group">
       <label>Seri port:</label>
-      <select id="port-secim"></select>
-      <button onclick="portlariYenile()">Yenile</button>
-      <button onclick="baglan()">Bağlan</button>
-      <button onclick="baglantiyiKes()">Bağlantıyı Kes</button>
-      <span id="durum-nokta" class="durum-nokta bagli-degil"></span>
-      <span id="baglanti-metni">Bağlı değil</span>
+      <select id="port-select"></select>
+      <button onclick="refreshPorts()">Yenile</button>
+      <button onclick="connectSerial()">Bağlan</button>
+      <button onclick="disconnectSerial()">Bağlantıyı Kes</button>
+      <span id="status-dot" class="status-dot disconnected"></span>
+      <span id="connection-text">Bağlı değil</span>
     </div>
 
-    <div class="satir-grup">
+    <div class="row-group">
       <label>Step motor — Yön:</label>
-      <select id="step-yon"><option value="1">1</option><option value="0">0</option></select>
+      <select id="step-dir"><option value="1">1</option><option value="0">0</option></select>
       <label>Gecikme (µs):</label>
       <input id="step-delay" type="number" value="500">
       <label>Adım:</label>
-      <input id="step-adet" type="number" value="2000">
-      <button onclick="stepGonder()">Step At</button>
-      <button onclick="stepDurdur()">Durdur</button>
+      <input id="step-count" type="number" value="2000">
+      <button onclick="sendStep()">Step At</button>
+      <button onclick="stopStep()">Durdur</button>
     </div>
 
-    <div class="satir-grup">
+    <div class="row-group">
       <label>DC motor:</label>
-      <button onclick="dcGonder('ileri')">İleri</button>
-      <button onclick="dcGonder('geri')">Geri</button>
-      <button onclick="dcGonder('dur')">Dur</button>
-      <button onclick="sifirla()">Encoder Sıfırla</button>
+      <button onclick="sendDc('forward', 'İleri')">İleri</button>
+      <button onclick="sendDc('backward', 'Geri')">Geri</button>
+      <button onclick="sendDc('stop', 'Dur')">Dur</button>
+      <button onclick="resetEncoders()">Encoder Sıfırla</button>
     </div>
 
-    <div id="durum-gostergesi">Canlı durum bekleniyor…</div>
+    <div id="status-display">Canlı durum bekleniyor…</div>
   </div>
 
-  <div id="konsol-baslik">Konsol — her buton işleminin kaydı</div>
-  <div id="konsol"></div>
+  <div id="console-title">Konsol — her buton işleminin kaydı</div>
+  <div id="console"></div>
 
   <script>
     // --- Konsol yardımcı fonksiyonu ---
     // Her satır: [saat] BUTON: hangi butona basıldı | GÖREV: ne yapmaya çalışıyor | SONUÇ: ne oldu
-    function konsolaYaz(buton, gorev, sonuc, hataMi) {
-      const kutu = document.getElementById("konsol");
-      const saat = new Date().toLocaleTimeString("tr-TR");
-      const satir = document.createElement("div");
-      satir.className = "satir";
-      satir.innerHTML =
-        `<span class="zaman">[${saat}]</span> ` +
-        `<span class="buton">${buton}</span> — ` +
-        `<span class="gorev">Görev: ${gorev}</span> — ` +
-        `<span class="${hataMi ? 'hata' : 'sonuc'}">Sonuç: ${sonuc}</span>`;
-      kutu.appendChild(satir);
-      kutu.scrollTop = kutu.scrollHeight;  // en son satır her zaman görünsün
+    function logToConsole(buttonName, task, result, isError) {
+      const box = document.getElementById("console");
+      const time = new Date().toLocaleTimeString("tr-TR");
+      const line = document.createElement("div");
+      line.className = "line";
+      line.innerHTML =
+        `<span class="time">[${time}]</span> ` +
+        `<span class="button-name">${buttonName}</span> — ` +
+        `<span class="task">Görev: ${task}</span> — ` +
+        `<span class="${isError ? 'error' : 'result'}">Sonuç: ${result}</span>`;
+      box.appendChild(line);
+      box.scrollTop = box.scrollHeight;  // en son satır her zaman görünsün
     }
 
     // Buton her basıldığında görüntüyü göster/gizle + konsola yaz.
     // Not: MJPEG akışı <img> görünür olduğu sürece sunucudan sürekli kare
     // çeker; "kapatma" burada sadece görsel gizleme, sunucu tarafı akışı
-    // ileride gerçekten durdurmak istersek ayrı bir /camera/{id}/durdur
+    // ileride gerçekten durdurmak istersek ayrı bir /camera/{id}/stop
     // uç noktası eklenir (bugünkü MVP kapsamı dışında).
-    function kameraAcKapa(id) {
-      const img = document.getElementById("kamera" + id);
-      const simdiAcikMi = img.classList.toggle("acik");
-      const gorev = `Kamera ${id} görüntüsünü ${simdiAcikMi ? "göster (MJPEG akışını başlat)" : "gizle"}`;
+    function toggleCamera(id) {
+      const img = document.getElementById("camera" + id);
+      const isNowOpen = img.classList.toggle("open");
+      const task = `Kamera ${id} görüntüsünü ${isNowOpen ? "göster (MJPEG akışını başlat)" : "gizle"}`;
 
-      if (!simdiAcikMi) {
-        konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev, "Görüntü gizlendi.", false);
+      if (!isNowOpen) {
+        logToConsole(`Kamera ${id} Aç/Kapat`, task, "Görüntü gizlendi.", false);
         return;
       }
 
@@ -145,36 +145,36 @@
       // ne "load" ne "error" hiç tetiklenmeyebilir — bu yüzden 3 saniyelik
       // bir zaman aşımı (timeout) da ekliyoruz, konsol sonsuza kadar
       // "bekleniyor" demesin.
-      let sonuclandi = false;
-      const temizle = () => {
-        img.removeEventListener("load", yuklendi);
-        img.removeEventListener("error", hata);
-        clearTimeout(zamanAsimi);
+      let settled = false;
+      const cleanup = () => {
+        img.removeEventListener("load", onLoad);
+        img.removeEventListener("error", onError);
+        clearTimeout(timeoutId);
       };
-      const yuklendi = () => {
-        if (sonuclandi) return;
-        sonuclandi = true;
-        konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev, "Görüntü akışı başladı, kare geliyor.", false);
-        temizle();
+      const onLoad = () => {
+        if (settled) return;
+        settled = true;
+        logToConsole(`Kamera ${id} Aç/Kapat`, task, "Görüntü akışı başladı, kare geliyor.", false);
+        cleanup();
       };
-      const hata = () => {
-        if (sonuclandi) return;
-        sonuclandi = true;
-        konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev,
+      const onError = () => {
+        if (settled) return;
+        settled = true;
+        logToConsole(`Kamera ${id} Aç/Kapat`, task,
           "Görüntü yüklenemedi (kamera bağlı değil, izin verilmemiş veya sunucu akış veremiyor).", true);
-        temizle();
+        cleanup();
       };
-      const zamanAsimi = setTimeout(() => {
-        if (sonuclandi) return;
-        sonuclandi = true;
-        konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev,
+      const timeoutId = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        logToConsole(`Kamera ${id} Aç/Kapat`, task,
           "3 saniyede kare gelmedi (zaman aşımı) — kamera muhtemelen bulunamadı/erişilemiyor.", true);
-        temizle();
+        cleanup();
       }, 3000);
-      img.addEventListener("load", yuklendi);
-      img.addEventListener("error", hata);
+      img.addEventListener("load", onLoad);
+      img.addEventListener("error", onError);
 
-      konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev, "İstek gönderildi, sunucudan cevap bekleniyor…", false);
+      logToConsole(`Kamera ${id} Aç/Kapat`, task, "İstek gönderildi, sunucudan cevap bekleniyor…", false);
     }
 
     // ==========================================================================
@@ -182,123 +182,123 @@
     // ==========================================================================
 
     // --- Seri port listesi + bağlan/kes ---
-    async function portlariYenile() {
-      const gorev = "Bilgisayara takılı seri portları listele";
+    async function refreshPorts() {
+      const task = "Bilgisayara takılı seri portları listele";
       try {
-        const r = await fetch("/seri/portlar");
-        const veri = await r.json();
-        const secim = document.getElementById("port-secim");
-        secim.innerHTML = "";
-        veri.portlar.forEach(p => {
+        const r = await fetch("/serial/ports");
+        const data = await r.json();
+        const select = document.getElementById("port-select");
+        select.innerHTML = "";
+        data.ports.forEach(p => {
           const opt = document.createElement("option");
           opt.value = p; opt.textContent = p;
-          secim.appendChild(opt);
+          select.appendChild(opt);
         });
-        konsolaYaz("Yenile", gorev, `${veri.portlar.length} port bulundu.`, false);
+        logToConsole("Yenile", task, `${data.ports.length} port bulundu.`, false);
       } catch (e) {
-        konsolaYaz("Yenile", gorev, `İstek başarısız: ${e}`, true);
+        logToConsole("Yenile", task, `İstek başarısız: ${e}`, true);
       }
     }
 
-    async function baglan() {
-      const port = document.getElementById("port-secim").value;
-      const gorev = `STM32'ye ${port} portundan bağlan`;
+    async function connectSerial() {
+      const port = document.getElementById("port-select").value;
+      const task = `STM32'ye ${port} portundan bağlan`;
       if (!port) {
-        konsolaYaz("Bağlan", gorev, "Önce bir port seçmelisin (Yenile'ye bas).", true);
+        logToConsole("Bağlan", task, "Önce bir port seçmelisin (Yenile'ye bas).", true);
         return;
       }
       try {
-        const r = await fetch(`/seri/baglan?port=${encodeURIComponent(port)}`, { method: "POST" });
-        const veri = await r.json();
-        konsolaYaz("Bağlan", gorev,
-          veri.basarili ? "Bağlantı kuruldu." : `Bağlanamadı: ${veri.hata}`, !veri.basarili);
+        const r = await fetch(`/serial/connect?port=${encodeURIComponent(port)}`, { method: "POST" });
+        const data = await r.json();
+        logToConsole("Bağlan", task,
+          data.success ? "Bağlantı kuruldu." : `Bağlanamadı: ${data.error}`, !data.success);
       } catch (e) {
-        konsolaYaz("Bağlan", gorev, `İstek başarısız: ${e}`, true);
+        logToConsole("Bağlan", task, `İstek başarısız: ${e}`, true);
       }
     }
 
-    async function baglantiyiKes() {
-      const gorev = "STM32 bağlantısını kapat";
-      await fetch("/seri/kes", { method: "POST" });
-      konsolaYaz("Bağlantıyı Kes", gorev, "Bağlantı kapatıldı.", false);
+    async function disconnectSerial() {
+      const task = "STM32 bağlantısını kapat";
+      await fetch("/serial/disconnect", { method: "POST" });
+      logToConsole("Bağlantıyı Kes", task, "Bağlantı kapatıldı.", false);
     }
 
     // --- Motor komutları ---
-    async function stepGonder() {
-      const dir = parseInt(document.getElementById("step-yon").value);
+    async function sendStep() {
+      const dir = parseInt(document.getElementById("step-dir").value);
       const delay = parseInt(document.getElementById("step-delay").value);
-      const steps = parseInt(document.getElementById("step-adet").value);
-      const gorev = `Step motoru sür: yön=${dir}, gecikme=${delay}µs, adım=${steps}`;
+      const steps = parseInt(document.getElementById("step-count").value);
+      const task = `Step motoru sür: yön=${dir}, gecikme=${delay}µs, adım=${steps}`;
       const r = await fetch("/motor/step", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dir, delay, steps }),
       });
-      const veri = await r.json();
-      konsolaYaz("Step At", gorev,
-        veri.gonderildi ? "Komut STM32'ye gönderildi." : "Gönderilemedi (bağlı değil).", !veri.gonderildi);
+      const data = await r.json();
+      logToConsole("Step At", task,
+        data.sent ? "Komut STM32'ye gönderildi." : "Gönderilemedi (bağlı değil).", !data.sent);
     }
 
-    async function stepDurdur() {
-      const gorev = "Step motoru anında durdur";
+    async function stopStep() {
+      const task = "Step motoru anında durdur";
       const r = await fetch("/motor/stop", { method: "POST" });
-      const veri = await r.json();
-      konsolaYaz("Durdur", gorev,
-        veri.gonderildi ? "Komut gönderildi." : "Gönderilemedi (bağlı değil).", !veri.gonderildi);
+      const data = await r.json();
+      logToConsole("Durdur", task,
+        data.sent ? "Komut gönderildi." : "Gönderilemedi (bağlı değil).", !data.sent);
     }
 
-    async function dcGonder(yon) {
-      const gorev = `DC motoru "${yon}" yönüne sür`;
+    async function sendDc(dir, label) {
+      const task = `DC motoru "${label}" yönüne sür`;
       const r = await fetch("/motor/dc", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dir: yon }),
+        body: JSON.stringify({ dir }),
       });
-      const veri = await r.json();
-      konsolaYaz(yon.charAt(0).toUpperCase() + yon.slice(1), gorev,
-        veri.gonderildi ? "Komut gönderildi." : "Gönderilemedi (bağlı değil).", !veri.gonderildi);
+      const data = await r.json();
+      logToConsole(label, task,
+        data.sent ? "Komut gönderildi." : "Gönderilemedi (bağlı değil).", !data.sent);
     }
 
-    async function sifirla() {
-      const gorev = "İki encoder sayacını da sıfırla";
-      const r = await fetch("/motor/sifirla", { method: "POST" });
-      const veri = await r.json();
-      konsolaYaz("Encoder Sıfırla", gorev,
-        veri.gonderildi ? "Komut gönderildi." : "Gönderilemedi (bağlı değil).", !veri.gonderildi);
+    async function resetEncoders() {
+      const task = "İki encoder sayacını da sıfırla";
+      const r = await fetch("/motor/reset", { method: "POST" });
+      const data = await r.json();
+      logToConsole("Encoder Sıfırla", task,
+        data.sent ? "Komut gönderildi." : "Gönderilemedi (bağlı değil).", !data.sent);
     }
 
     // --- Canlı durum (WebSocket) ---
     // Sayfa yenilenmeden STM32'nin durumu (encoder, kalan adım vb.) sürekli akar.
-    let oncekiBaglantiDurumu = null;
-    function websocketBaslat() {
+    let previousConnectionState = null;
+    function startWebSocket() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${proto}://${location.host}/ws/durum`);
+      const ws = new WebSocket(`${proto}://${location.host}/ws/status`);
       ws.onmessage = (ev) => {
-        const veri = JSON.parse(ev.data);
-        const nokta = document.getElementById("durum-nokta");
-        const metin = document.getElementById("baglanti-metni");
-        nokta.className = "durum-nokta " + (veri.baglantida_mi ? "bagli" : "bagli-degil");
-        metin.textContent = veri.baglantida_mi ? "Bağlı" : (veri.son_hata || "Bağlı değil");
+        const data = JSON.parse(ev.data);
+        const dot = document.getElementById("status-dot");
+        const text = document.getElementById("connection-text");
+        dot.className = "status-dot " + (data.is_connected ? "connected" : "disconnected");
+        text.textContent = data.is_connected ? "Bağlı" : (data.last_error || "Bağlı değil");
 
         // Bağlantı durumu değiştiğinde (kopma/kurulma) konsola bir kere yaz —
         // her 100ms'de tekrar tekrar yazmasın diye önceki durumla kıyaslıyoruz.
-        if (oncekiBaglantiDurumu !== veri.baglantida_mi) {
-          oncekiBaglantiDurumu = veri.baglantida_mi;
-          konsolaYaz("Canlı Durum (WebSocket)", "STM32 bağlantı durumunu izle",
-            veri.baglantida_mi ? "Bağlantı kuruldu, durum akışı başladı." : "Bağlantı yok/koptu.",
-            !veri.baglantida_mi);
+        if (previousConnectionState !== data.is_connected) {
+          previousConnectionState = data.is_connected;
+          logToConsole("Canlı Durum (WebSocket)", "STM32 bağlantı durumunu izle",
+            data.is_connected ? "Bağlantı kuruldu, durum akışı başladı." : "Bağlantı yok/koptu.",
+            !data.is_connected);
         }
 
-        document.getElementById("durum-gostergesi").textContent =
-          Object.keys(veri.durum).length ? JSON.stringify(veri.durum) : "Henüz STM32'den veri gelmedi.";
+        document.getElementById("status-display").textContent =
+          Object.keys(data.status).length ? JSON.stringify(data.status) : "Henüz STM32'den veri gelmedi.";
       };
       ws.onclose = () => {
         // Sayfa kapanmadıysa (sunucu yeniden başladıysa vb.) birkaç saniye sonra tekrar dene.
-        setTimeout(websocketBaslat, 3000);
+        setTimeout(startWebSocket, 3000);
       };
     }
 
     // Sayfa açılır açılmaz: port listesini çek + canlı durum akışını başlat.
-    portlariYenile();
-    websocketBaslat();
+    refreshPorts();
+    startWebSocket();
   </script>
 </body>
 </html>

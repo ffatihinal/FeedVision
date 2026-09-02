@@ -22,74 +22,74 @@ BAUD = 115200
 
 class STM32Bridge:
     def __init__(self):
-        self._ser: Optional[serial.Serial] = None
+        self._serial: Optional[serial.Serial] = None
         self._lock = threading.Lock()
-        self._son_durum: dict = {}
-        self._calisiyor = False
+        self._last_status: dict = {}
+        self._running = False
         self._thread: Optional[threading.Thread] = None
-        self.baglantida_mi = False
-        self.son_hata: Optional[str] = None
+        self.is_connected = False
+        self.last_error: Optional[str] = None
 
-    def bagli_portlari_listele(self) -> list[str]:
+    def list_available_ports(self) -> list[str]:
         """Mac/Pi'de o an takılı olan seri portların listesi (kullanıcı UI'dan seçsin diye)."""
         return [p.device for p in list_ports.comports()]
 
-    def baglan(self, port: str) -> bool:
+    def connect(self, port: str) -> bool:
         """Belirtilen porta bağlanmayı dener. Başarılıysa arka plan dinleme
         thread'ini başlatır. Başarısızsa (kart takılı değil, port meşgul vb.)
-        False döner, hatayı `son_hata`'da bırakır — çökmez."""
+        False döner, hatayı `last_error`'da bırakır — çökmez."""
         try:
-            self._ser = serial.Serial(port, BAUD, timeout=1)
-            self.baglantida_mi = True
-            self.son_hata = None
-            self._calisiyor = True
-            self._thread = threading.Thread(target=self._dinle, daemon=True)
+            self._serial = serial.Serial(port, BAUD, timeout=1)
+            self.is_connected = True
+            self.last_error = None
+            self._running = True
+            self._thread = threading.Thread(target=self._listen, daemon=True)
             self._thread.start()
             return True
         except Exception as e:
-            self.baglantida_mi = False
-            self.son_hata = str(e)
+            self.is_connected = False
+            self.last_error = str(e)
             return False
 
-    def kapat(self):
-        self._calisiyor = False
-        if self._ser:
-            self._ser.close()
-        self.baglantida_mi = False
+    def disconnect(self):
+        self._running = False
+        if self._serial:
+            self._serial.close()
+        self.is_connected = False
 
-    def _dinle(self):
+    def _listen(self):
         """Arka planda sürekli satır okur, JSON'a çevirip bellekte tutar.
         Bozuk/eksik bir satır gelirse (kablo gürültüsü vb.) atlar, çökmez."""
-        while self._calisiyor and self._ser:
+        while self._running and self._serial:
             try:
-                ham = self._ser.readline().decode("utf-8", errors="ignore").strip()
-                if not ham:
+                raw = self._serial.readline().decode("utf-8", errors="ignore").strip()
+                if not raw:
                     continue
-                veri = json.loads(ham)
+                data = json.loads(raw)
                 with self._lock:
-                    self._son_durum = veri
+                    self._last_status = data
             except json.JSONDecodeError:
                 continue
             except Exception as e:
-                self.son_hata = str(e)
-                self.baglantida_mi = False
+                self.last_error = str(e)
+                self.is_connected = False
                 break
 
-    def son_durum(self) -> dict:
+    def get_status(self) -> dict:
         """UI'ın (WebSocket üzerinden) periyodik olarak sorguladığı, en son bilinen durum."""
         with self._lock:
-            return dict(self._son_durum)
+            return dict(self._last_status)
 
-    def komut_gonder(self, komut: dict) -> bool:
+    def send_command(self, command: dict) -> bool:
         """Tek satır JSON komutu STM32'ye yollar. Bağlantı yoksa False döner."""
-        if not self._ser or not self.baglantida_mi:
+        if not self._serial or not self.is_connected:
             return False
         try:
-            satir = json.dumps(komut) + "\n"
-            self._ser.write(satir.encode("utf-8"))
+            line = json.dumps(command) + "\n"
+            self._serial.write(line.encode("utf-8"))
             return True
         except Exception as e:
-            self.son_hata = str(e)
+            self.last_error = str(e)
             return False
 
 

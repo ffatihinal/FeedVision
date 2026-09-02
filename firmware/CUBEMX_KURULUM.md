@@ -204,7 +204,7 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
 4. PC'de seri portu aç (STM32CubeIDE'nin kendi terminali veya `pc_ui/feedvision_test_ui.py`).
    115200 baud'da saniyede ~20 satır JSON akmalı:
    ```
-   {"t":1234,"e1":0,"e2":0,"um1":0,"um2":0,"kalan":0,"calisiyor":0,"dc":0}
+   {"t":1234,"e1":0,"e2":0,"um1":0,"um2":0,"remaining":0,"running":0,"dc":0}
    ```
 5. Encoder milini elle çevir → `e1` / `e2` değerleri değişmeli (bir yöne artmalı,
    diğer yöne azalmalı). Değişmiyorsa: kabloyu, 4.7k pull-up'ı ve `Counter Period = 65535`
@@ -214,10 +214,12 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
 
 ## 11. Sahada mutlaka kontrol edilecekler
 
-1. **DM556 mikroadım ayarı (SW5–SW8):** koddaki `MIKROADIM` sabiti sürücüdeki DIP switch
-   ayarıyla aynı olmalı, yoksa "kaç step = kaç mm" hesabı tutmaz.
-2. **Tekerlek çapı:** koddaki `TEKER_CAP_MM` sabiti şu an **40.0 mm varsayım**. Gerçek
-   tekerlek gelince kumpasla ölç ve bu sabiti düzelt — encoder mm hesabı buna bağlı.
+1. **DM556 mikroadım ayarı (SW5–SW8):** kart üzerinden fiziksel olarak ayarlanan
+   mikroadım değeri not alınmalı — kod şu an "kaç step = kaç mm" hesabını yapmıyor
+   (o hesap encoder ile ampirik yapılıyor, bkz. madde 2), ama ileride açık-çevrim
+   mesafe hesabı eklenirse bu değer gerekecek.
+2. **Tekerlek çapı:** koddaki `WHEEL_DIAMETER_MM` sabiti şu an **40.0 mm varsayım**.
+   Gerçek tekerlek gelince kumpasla ölç ve bu sabiti düzelt — encoder mm hesabı buna bağlı.
 3. **Encoder PPR:** koddaki `ENC_PPR` = 600. Encoder etiketinde yazan değerle karşılaştır.
 4. **Step darbe genişliği:** DM556 datasheet'i "en yüksek frekans cevabı 200 kHz" diyor
    (yani en kısa darbe periyodu 5 µs). Kod güvenlik için alt sınırı **20 µs**'de tutuyor.
@@ -235,16 +237,16 @@ PC → STM32 (her komut tek satır, sonunda `\n`):
 |---|---|
 | `{"cmd":"step","dir":1,"delay":500,"steps":2000}` | 2000 step at, darbe periyodu 500 µs, yön 1 |
 | `{"cmd":"stop"}` | Step motoru anında durdur |
-| `{"cmd":"dc","dir":"ileri"}` | DC motor ileri |
-| `{"cmd":"dc","dir":"geri"}` | DC motor geri |
-| `{"cmd":"dc","dir":"dur"}` | DC motor dur |
-| `{"cmd":"sifirla"}` | İki encoder sayacını da sıfırla |
+| `{"cmd":"dc","dir":"forward"}` | DC motor ileri |
+| `{"cmd":"dc","dir":"backward"}` | DC motor geri |
+| `{"cmd":"dc","dir":"stop"}` | DC motor dur |
+| `{"cmd":"reset"}` | İki encoder sayacını da sıfırla |
 | `{"cmd":"ping"}` | Bağlantı testi |
 
 STM32 → PC (saniyede 20 kez):
 
 ```json
-{"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"kalan":0,"calisiyor":0,"dc":0}
+{"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"remaining":0,"running":0,"dc":0}
 ```
 
 | Alan | Anlamı |
@@ -252,8 +254,8 @@ STM32 → PC (saniyede 20 kez):
 | `t` | Kart açıldığından beri geçen ms |
 | `e1` / `e2` | Encoder 1 / 2 toplam sayım (işaretli, geri dönünce azalır) |
 | `um1` / `um2` | Aynı sayımın **mikrometre** karşılığı (1000'e bölünce mm) |
-| `kalan` | Step motorun atmayı bekleyen darbe sayısı |
-| `calisiyor` | 1 = step motor hareket halinde |
+| `remaining` | Step motorun atmayı bekleyen darbe sayısı |
+| `running` | 1 = step motor hareket halinde |
 | `dc` | 0 = dur, 1 = ileri, 2 = geri |
 
 > **Neden mm değil mikrometre gönderiyoruz:** STM32CubeIDE varsayılan olarak `printf`'te

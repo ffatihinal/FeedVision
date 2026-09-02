@@ -1,8 +1,9 @@
 """
-FeedVision RPi Core — AP1/AP2 kamera akış sunucusu (MVP3 iskeleti)
+FeedVision RPi Core — AP1/AP2 kamera akış sunucusu + STM32 köprüsü
 
 Ne yapar: FastAPI ile küçük bir web sunucusu açar, tarayıcıdan "Kamera Aç"
-butonlarına basınca canlı görüntüyü MJPEG olarak akıtır.
+butonlarına basınca canlı görüntüyü MJPEG olarak akıtır; ayrıca STM32'ye
+seri port üzerinden JSON komut gönderir, canlı durumu WebSocket ile akıtır.
 
 Nasıl çalıştırılır:
     python3 -m venv .venv
@@ -79,67 +80,66 @@ def camera_stream(cam_id: int):
     )
 
 
-
 # ==============================================================================
 #  STM32 KÖPRÜSÜ — seri port bağlantısı + motor komutları
 #  Protokol: /docs/protocol.md (STM32 firmware'i ile aynı JSON sözleşmesi)
 # ==============================================================================
 
 
-@app.get("/seri/portlar")
-def seri_portlari_listele():
+@app.get("/serial/ports")
+def list_serial_ports():
     """UI'da açılır listeye doldurulacak, o an takılı seri portlar."""
-    return {"portlar": bridge.bagli_portlari_listele()}
+    return {"ports": bridge.list_available_ports()}
 
 
-@app.post("/seri/baglan")
-def seri_baglan(port: str):
-    ok = bridge.baglan(port)
-    return {"basarili": ok, "hata": bridge.son_hata}
+@app.post("/serial/connect")
+def connect_serial(port: str):
+    ok = bridge.connect(port)
+    return {"success": ok, "error": bridge.last_error}
 
 
-@app.post("/seri/kes")
-def seri_kes():
-    bridge.kapat()
-    return {"basarili": True}
+@app.post("/serial/disconnect")
+def disconnect_serial():
+    bridge.disconnect()
+    return {"success": True}
 
 
-class StepKomut(BaseModel):
+class StepCommand(BaseModel):
     dir: int  # 0 veya 1 (yön)
     delay: int  # mikrosaniye, iki darbe arası (küçük = hızlı)
     steps: int  # atılacak toplam darbe sayısı
 
 
 @app.post("/motor/step")
-def motor_step(k: StepKomut):
-    ok = bridge.komut_gonder({"cmd": "step", "dir": k.dir, "delay": k.delay, "steps": k.steps})
-    return {"gonderildi": ok}
+def motor_step(c: StepCommand):
+    ok = bridge.send_command({"cmd": "step", "dir": c.dir, "delay": c.delay, "steps": c.steps})
+    return {"sent": ok}
 
 
 @app.post("/motor/stop")
 def motor_stop():
-    ok = bridge.komut_gonder({"cmd": "stop"})
-    return {"gonderildi": ok}
+    ok = bridge.send_command({"cmd": "stop"})
+    return {"sent": ok}
 
 
-class DcKomut(BaseModel):
-    dir: str  # "ileri" / "geri" / "dur"
+class DcCommand(BaseModel):
+    dir: str  # "forward" / "backward" / "stop"
 
 
 @app.post("/motor/dc")
-def motor_dc(k: DcKomut):
-    ok = bridge.komut_gonder({"cmd": "dc", "dir": k.dir})
-    return {"gonderildi": ok}
+def motor_dc(c: DcCommand):
+    ok = bridge.send_command({"cmd": "dc", "dir": c.dir})
+    return {"sent": ok}
 
 
-@app.post("/motor/sifirla")
-def motor_sifirla():
-    ok = bridge.komut_gonder({"cmd": "sifirla"})
-    return {"gonderildi": ok}
+@app.post("/motor/reset")
+def motor_reset():
+    ok = bridge.send_command({"cmd": "reset"})
+    return {"sent": ok}
 
 
-@app.websocket("/ws/durum")
-async def ws_durum(websocket: WebSocket):
+@app.websocket("/ws/status")
+async def ws_status(websocket: WebSocket):
     """Tarayıcıya STM32'nin en son durumunu saniyede ~10 kez akıtır
     (WebSocket ile — sayfa yenilenmeden canlı gösterge güncellenir)."""
     await websocket.accept()
@@ -147,9 +147,9 @@ async def ws_durum(websocket: WebSocket):
         while True:
             await websocket.send_json(
                 {
-                    "baglantida_mi": bridge.baglantida_mi,
-                    "son_hata": bridge.son_hata,
-                    "durum": bridge.son_durum(),
+                    "is_connected": bridge.is_connected,
+                    "last_error": bridge.last_error,
+                    "status": bridge.get_status(),
                 }
             )
             await asyncio.sleep(0.1)
