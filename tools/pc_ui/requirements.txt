@@ -1,0 +1,7 @@
+# FeedVision test arayuzu bagimliliklari
+# Kurulum:  pip install -r requirements.txt
+
+pyserial>=3.5
+
+# Not: tkinter standart Python kurulumuyla birlikte gelir, pip ile kurulmaz.
+# Linux'ta yoksa:  sudo apt install python3-tk

@@ -8,3 +8,5 @@ firmware/Debug/
 firmware/.settings/
 firmware/Release/
 .obsidian/
+tools/pc_ui/.venv/
+tools/pc_ui/__pycache__/
