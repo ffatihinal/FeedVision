@@ -7,3 +7,4 @@ __pycache__/
 firmware/Debug/
 firmware/.settings/
 firmware/Release/
+.obsidian/
