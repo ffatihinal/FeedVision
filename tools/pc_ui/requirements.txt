@@ -5,3 +5,7 @@ pyserial>=3.5
 
 # Not: tkinter standart Python kurulumuyla birlikte gelir, pip ile kurulmaz.
 # Linux'ta yoksa:  sudo apt install python3-tk
+
+# Not (02-09): Ayrı venv kurmaya gerek yok — rpi-core/.venv zaten pyserial
+# içeriyor ve aynı sistem Python'undan geldiği için tkinter de destekliyor.
+# VS Code'da interpreter seçerken rpi-core/.venv'i kullan.
