@@ -15,6 +15,20 @@
     button:active { background: #184; }
     img { max-width: 100%; border-radius: 8px; border: 2px solid #333; display: none; }
     img.acik { display: block; }
+
+    /* --- Konsol paneli --- */
+    #konsol-baslik { margin-top: 32px; font-size: 16px; color: #9c9; }
+    #konsol {
+      margin-top: 8px; background: #000; border: 1px solid #333; border-radius: 8px;
+      padding: 12px; height: 220px; overflow-y: auto;
+      font-family: "SF Mono", Menlo, monospace; font-size: 13px; line-height: 1.5;
+    }
+    #konsol .satir { white-space: pre-wrap; word-break: break-word; }
+    #konsol .zaman { color: #666; }
+    #konsol .buton { color: #6cf; }
+    #konsol .gorev { color: #ccc; }
+    #konsol .sonuc { color: #8f8; }
+    #konsol .hata { color: #f77; }
   </style>
 </head>
 <body>
@@ -33,15 +47,78 @@
     </div>
   </div>
 
+  <div id="konsol-baslik">Konsol — her buton işleminin kaydı</div>
+  <div id="konsol"></div>
+
   <script>
-    // Buton her basıldığında görüntüyü göster/gizle.
+    // --- Konsol yardımcı fonksiyonu ---
+    // Her satır: [saat] BUTON: hangi butona basıldı | GÖREV: ne yapmaya çalışıyor | SONUÇ: ne oldu
+    function konsolaYaz(buton, gorev, sonuc, hataMi) {
+      const kutu = document.getElementById("konsol");
+      const saat = new Date().toLocaleTimeString("tr-TR");
+      const satir = document.createElement("div");
+      satir.className = "satir";
+      satir.innerHTML =
+        `<span class="zaman">[${saat}]</span> ` +
+        `<span class="buton">${buton}</span> — ` +
+        `<span class="gorev">Görev: ${gorev}</span> — ` +
+        `<span class="${hataMi ? 'hata' : 'sonuc'}">Sonuç: ${sonuc}</span>`;
+      kutu.appendChild(satir);
+      kutu.scrollTop = kutu.scrollHeight;  // en son satır her zaman görünsün
+    }
+
+    // Buton her basıldığında görüntüyü göster/gizle + konsola yaz.
     // Not: MJPEG akışı <img> görünür olduğu sürece sunucudan sürekli kare
     // çeker; "kapatma" burada sadece görsel gizleme, sunucu tarafı akışı
     // ileride gerçekten durdurmak istersek ayrı bir /camera/{id}/durdur
     // uç noktası eklenir (bugünkü MVP kapsamı dışında).
     function kameraAcKapa(id) {
       const img = document.getElementById("kamera" + id);
-      img.classList.toggle("acik");
+      const simdiAcikMi = img.classList.toggle("acik");
+      const gorev = `Kamera ${id} görüntüsünü ${simdiAcikMi ? "göster (MJPEG akışını başlat)" : "gizle"}`;
+
+      if (!simdiAcikMi) {
+        konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev, "Görüntü gizlendi.", false);
+        return;
+      }
+
+      // Görüntü gösterilmeye çalışılıyor — gerçekten yüklenip yüklenmediğini
+      // (kamera var mı, sunucu akış veriyor mu) bir kereliğine dinleyip
+      // sonucu konsola yazalım. Sunucu boş bir akış açıp hiç kapatmazsa
+      // (kamera bulunamadı durumunda main.py'nin generator'ı böyle davranıyor)
+      // ne "load" ne "error" hiç tetiklenmeyebilir — bu yüzden 3 saniyelik
+      // bir zaman aşımı (timeout) da ekliyoruz, konsol sonsuza kadar
+      // "bekleniyor" demesin.
+      let sonuclandi = false;
+      const temizle = () => {
+        img.removeEventListener("load", yuklendi);
+        img.removeEventListener("error", hata);
+        clearTimeout(zamanAsimi);
+      };
+      const yuklendi = () => {
+        if (sonuclandi) return;
+        sonuclandi = true;
+        konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev, "Görüntü akışı başladı, kare geliyor.", false);
+        temizle();
+      };
+      const hata = () => {
+        if (sonuclandi) return;
+        sonuclandi = true;
+        konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev,
+          "Görüntü yüklenemedi (kamera bağlı değil, izin verilmemiş veya sunucu akış veremiyor).", true);
+        temizle();
+      };
+      const zamanAsimi = setTimeout(() => {
+        if (sonuclandi) return;
+        sonuclandi = true;
+        konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev,
+          "3 saniyede kare gelmedi (zaman aşımı) — kamera muhtemelen bulunamadı/erişilemiyor.", true);
+        temizle();
+      }, 3000);
+      img.addEventListener("load", yuklendi);
+      img.addEventListener("error", hata);
+
+      konsolaYaz(`Kamera ${id} Aç/Kapat`, gorev, "İstek gönderildi, sunucudan cevap bekleniyor…", false);
     }
   </script>
 </body>
