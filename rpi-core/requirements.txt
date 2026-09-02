@@ -3,6 +3,7 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
 opencv-python>=4.9
+pyserial>=3.5
 
 # Not (sahada): Raspberry Pi + Pi Camera v2 (CSI) icin muhtemelen ek olarak
 # picamera2 gerekecek: pip install picamera2

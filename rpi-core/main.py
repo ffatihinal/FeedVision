@@ -20,12 +20,15 @@ SAHADA DEĞİŞECEK NOKTA (Pi Camera v2 için):
     şimdilik "iskelet + akış mantığı doğru çalışıyor" seviyesindedir.
 """
 
+import asyncio
 import threading
 
 import cv2
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from serial_bridge import bridge
 
 app = FastAPI(title="FeedVision RPi Core")
 
@@ -74,6 +77,84 @@ def camera_stream(cam_id: int):
         mjpeg_generator(cam_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+
+# ==============================================================================
+#  STM32 KÖPRÜSÜ — seri port bağlantısı + motor komutları
+#  Protokol: /docs/protocol.md (STM32 firmware'i ile aynı JSON sözleşmesi)
+# ==============================================================================
+
+
+@app.get("/seri/portlar")
+def seri_portlari_listele():
+    """UI'da açılır listeye doldurulacak, o an takılı seri portlar."""
+    return {"portlar": bridge.bagli_portlari_listele()}
+
+
+@app.post("/seri/baglan")
+def seri_baglan(port: str):
+    ok = bridge.baglan(port)
+    return {"basarili": ok, "hata": bridge.son_hata}
+
+
+@app.post("/seri/kes")
+def seri_kes():
+    bridge.kapat()
+    return {"basarili": True}
+
+
+class StepKomut(BaseModel):
+    dir: int  # 0 veya 1 (yön)
+    delay: int  # mikrosaniye, iki darbe arası (küçük = hızlı)
+    steps: int  # atılacak toplam darbe sayısı
+
+
+@app.post("/motor/step")
+def motor_step(k: StepKomut):
+    ok = bridge.komut_gonder({"cmd": "step", "dir": k.dir, "delay": k.delay, "steps": k.steps})
+    return {"gonderildi": ok}
+
+
+@app.post("/motor/stop")
+def motor_stop():
+    ok = bridge.komut_gonder({"cmd": "stop"})
+    return {"gonderildi": ok}
+
+
+class DcKomut(BaseModel):
+    dir: str  # "ileri" / "geri" / "dur"
+
+
+@app.post("/motor/dc")
+def motor_dc(k: DcKomut):
+    ok = bridge.komut_gonder({"cmd": "dc", "dir": k.dir})
+    return {"gonderildi": ok}
+
+
+@app.post("/motor/sifirla")
+def motor_sifirla():
+    ok = bridge.komut_gonder({"cmd": "sifirla"})
+    return {"gonderildi": ok}
+
+
+@app.websocket("/ws/durum")
+async def ws_durum(websocket: WebSocket):
+    """Tarayıcıya STM32'nin en son durumunu saniyede ~10 kez akıtır
+    (WebSocket ile — sayfa yenilenmeden canlı gösterge güncellenir)."""
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(
+                {
+                    "baglantida_mi": bridge.baglantida_mi,
+                    "son_hata": bridge.son_hata,
+                    "durum": bridge.son_durum(),
+                }
+            )
+            await asyncio.sleep(0.1)
+    except WebSocketDisconnect:
+        pass
 
 
 @app.get("/", response_class=HTMLResponse)
