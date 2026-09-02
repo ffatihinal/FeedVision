@@ -23,6 +23,7 @@ SAHADA DEĞİŞECEK NOKTA (Pi Camera v2 için):
 
 import asyncio
 import threading
+from pathlib import Path
 
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -159,7 +160,10 @@ async def ws_status(websocket: WebSocket):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    with open("../ui/index.html", encoding="utf-8") as f:
+    # __file__'e göre yol kur — script'in nereden calistirildigina (VS Code
+    # Play, terminalden farkli bir klasorden vb.) bagli kalmasin diye.
+    ui_path = Path(__file__).resolve().parent.parent / "ui" / "index.html"
+    with open(ui_path, encoding="utf-8") as f:
         return f.read()
 
 
