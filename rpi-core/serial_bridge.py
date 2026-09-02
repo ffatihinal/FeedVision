@@ -12,12 +12,18 @@ seri porta yazar. İki taraf ayrı thread olduğu için `_lock` ile korunuyor.
 
 import json
 import threading
+import time
 from typing import Optional
 
 import serial
 from serial.tools import list_ports
 
 BAUD = 115200
+
+# Port fiziksel olarak açılabilir ama karşı taraf STM32 olmayabilir (Mac'in
+# kendi sanal portları gibi) — gerçek cihazı doğrulamak için bu süre kadar
+# STM32'nin otomatik durum yayınını (saniyede ~20 satır) bekliyoruz.
+HANDSHAKE_TIMEOUT_S = 2.0
 
 
 class STM32Bridge:
@@ -35,21 +41,46 @@ class STM32Bridge:
         return [p.device for p in list_ports.comports()]
 
     def connect(self, port: str) -> bool:
-        """Belirtilen porta bağlanmayı dener. Başarılıysa arka plan dinleme
-        thread'ini başlatır. Başarısızsa (kart takılı değil, port meşgul vb.)
-        False döner, hatayı `last_error`'da bırakır — çökmez."""
+        """Belirtilen porta bağlanmayı dener.
+
+        DİKKAT: Port dosyasının açılabilmesi (macOS'ta sanal/hata ayıklama
+        portları dahil çoğu port için kolayca başarılı olur) STM32'nin
+        gerçekten orada olduğu anlamına GELMEZ. Bu yüzden port açıldıktan
+        sonra STM32'nin kendiliğinden gönderdiği durum satırını (saniyede
+        ~20 kez) kısa bir süre bekliyoruz — HANDSHAKE_TIMEOUT_S içinde
+        geçerli bir JSON satırı gelmezse "bağlı değil" diyoruz ve portu
+        kapatıyoruz, yanlış pozitif "Bağlı" göstermeyelim diye."""
+        with self._lock:
+            self._last_status = {}
         try:
             self._serial = serial.Serial(port, BAUD, timeout=1)
-            self.is_connected = True
-            self.last_error = None
-            self._running = True
-            self._thread = threading.Thread(target=self._listen, daemon=True)
-            self._thread.start()
-            return True
         except Exception as e:
             self.is_connected = False
             self.last_error = str(e)
             return False
+
+        self._running = True
+        self._thread = threading.Thread(target=self._listen, daemon=True)
+        self._thread.start()
+
+        # STM32'den gerçek veri gelene kadar (ya da zaman aşımına kadar) bekle.
+        deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            with self._lock:
+                got_data = bool(self._last_status)
+            if got_data:
+                self.is_connected = True
+                self.last_error = None
+                return True
+            time.sleep(0.05)
+
+        # Zaman aşımı — port açıldı ama karşı taraf STM32 değil/cevap vermiyor.
+        self._running = False
+        self._serial.close()
+        self._serial = None
+        self.is_connected = False
+        self.last_error = "Port açıldı ama STM32'den veri gelmedi (yanlış port ya da kart bağlı değil)"
+        return False
 
     def disconnect(self):
         self._running = False
