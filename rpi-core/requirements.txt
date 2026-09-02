@@ -1,0 +1,9 @@
+# FeedVision RPi Core bagimliliklari
+# Kurulum:  pip install -r requirements.txt
+fastapi>=0.110
+uvicorn[standard]>=0.29
+opencv-python>=4.9
+
+# Not (sahada): Raspberry Pi + Pi Camera v2 (CSI) icin muhtemelen ek olarak
+# picamera2 gerekecek: pip install picamera2
+# main.py'deki get_capture() fonksiyonu o zaman guncellenmeli (bkz. dosya ustundeki not).

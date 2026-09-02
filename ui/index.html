@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <title>FeedVision</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 24px; }
+    h1 { font-size: 28px; }
+    .kameralar { display: flex; gap: 24px; flex-wrap: wrap; }
+    .kamera-blok { flex: 1; min-width: 320px; }
+    button {
+      font-size: 20px; padding: 16px 24px; margin: 8px 8px 8px 0;
+      border-radius: 8px; border: none; background: #2a6; color: white; cursor: pointer;
+    }
+    button:active { background: #184; }
+    img { max-width: 100%; border-radius: 8px; border: 2px solid #333; display: none; }
+    img.acik { display: block; }
+  </style>
+</head>
+<body>
+  <h1>FeedVision — Kamera Paneli</h1>
+
+  <div class="kameralar">
+    <div class="kamera-blok">
+      <button onclick="kameraAcKapa(1)">Kamera 1 Aç/Kapat</button>
+      <br>
+      <img id="kamera1" src="/camera/1/stream">
+    </div>
+    <div class="kamera-blok">
+      <button onclick="kameraAcKapa(2)">Kamera 2 Aç/Kapat</button>
+      <br>
+      <img id="kamera2" src="/camera/2/stream">
+    </div>
+  </div>
+
+  <script>
+    // Buton her basıldığında görüntüyü göster/gizle.
+    // Not: MJPEG akışı <img> görünür olduğu sürece sunucudan sürekli kare
+    // çeker; "kapatma" burada sadece görsel gizleme, sunucu tarafı akışı
+    // ileride gerçekten durdurmak istersek ayrı bir /camera/{id}/durdur
+    // uç noktası eklenir (bugünkü MVP kapsamı dışında).
+    function kameraAcKapa(id) {
+      const img = document.getElementById("kamera" + id);
+      img.classList.toggle("acik");
+    }
+  </script>
+</body>
+</html>
