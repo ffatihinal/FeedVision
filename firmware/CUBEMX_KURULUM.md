@@ -36,11 +36,12 @@ Encoder 1 = **D9 (PA8)** ve **D5 (PA9)**, Encoder 2 = **A6 (PA6)** ve **A7 (PA7)
 
 ## 1. Proje oluştur
 
-1. STM32CubeIDE → **File → New → STM32 Project**
-2. Üstteki **Board Selector** sekmesi → arama kutusuna `NUCLEO-G031K8` → seç → **Next**
-3. Proje adı: `feedvision_test` → **Finish**
-4. "Initialize all peripherals with their default Mode?" sorusuna **Yes** de.
-   (Bu, ST-LINK sanal COM portunu = USART2'yi ve LD3 LED'ini otomatik ayarlar.)
+**En garantili yol (02-09'da doğrulandı): bağımsız STM32CubeMX uygulamasından git, CubeIDE'nin kendi sihirbazından değil.**
+Neden: CubeIDE'nin "File → New → STM32 Project" sihirbazı arka planda CubeMX'i çağırır ve bazı Mac kurulumlarında bunu bulamayıp "Error opening STM32CubeMX" hatası veriyor. CubeMX → CubeIDE yönü (Generate Code → Open Project) her zaman sağlam çalışıyor.
+
+1. **STM32CubeMX** uygulamasını aç → **File → New Project**.
+2. **Board Selector** sekmesinde (⚠️ **MCU Selector değil** — sağdaki çıplak çip listesinden seçersen SWD/debug pinleri boş kalır, kart flaşlanamayabilir) arama kutusuna `NUCLEO-G031K8` yaz → seç.
+3. Board Selector ile açıldığını doğrula: pin şemasında PA2/PA3 (VCP), PC6 (LD3 LED), PA13/PA14 (JTMS/JTCK) **otomatik yeşil/ayarlı** gelmeli. Gelmiyorsa yanlış yoldasın, projeyi kapat baştan başla.
 
 ---
 
@@ -65,7 +66,7 @@ her 10 µs'de bir). 16 MHz'de işlemcinin buna yetişme payı dar kalır, 64 MHz
 1. Mode: **Asynchronous** (Board Selector zaten böyle ayarlamış olmalı)
 2. Parameter Settings:
    - Baud Rate: **115200**
-   - Word Length: 8 Bits
+   - Word Length: **8 Bits** ⚠️ CubeMX'in varsayılanı bazen **7 Bits** geliyor, kontrol et — JSON/ASCII metin göndereceğiz, 7 bit'te bazı karakterler (`{`, `}`, `"`) bozulabilir.
    - Parity: None
    - Stop Bits: 1
 3. **NVIC Settings** sekmesi → `USART2 global interrupt` → **Enabled** ✔
@@ -171,14 +172,16 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
 
 ## 8. Proje ayarları ve kod üretme
 
-1. **Project Manager → Code Generator**:
+1. **Project Manager → Project** (⚠️ bu ikisi CubeMX'te bazen boş/yanlış geliyor, Generate Code'dan ÖNCE mutlaka kontrol et):
+   - **Project Name**: boş gelebilir → elle `feedvision_test` yaz.
+   - **Toolchain / IDE**: varsayılan olarak **EWARM (IAR)** gelebilir → mutlaka **STM32CubeIDE** seç. EWARM'da kalırsa CubeMX, CubeIDE'nin **açamayacağı** proje dosyaları üretir — tüm iş baştan.
+   - Minimum Heap Size: `0x200`
+   - Minimum Stack Size: `0x400`
+2. **Project Manager → Code Generator**:
    - ✔ `Generate peripheral initialization as a pair of '.c/.h' files per peripheral`
      (isteğe bağlı, sadece düzen için)
    - ✔ `Keep User Code when re-generating`  ← **mutlaka işaretli olsun**
-2. **Project Manager → Project**:
-   - Minimum Heap Size: `0x200`
-   - Minimum Stack Size: `0x400`
-3. `Ctrl+S` → "Generate code?" → **Yes**
+3. **GENERATE CODE** butonuna bas → "Generate code?" → **Yes**. Başarı diyaloğunda **"Open Project"**'e bas (CubeIDE'yi projeyle açar).
 
 ---
 
@@ -188,6 +191,8 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
   `/* USER CODE BEGIN ... */` işaretlerinin **arasına** sırasıyla yapıştır.
 - `Core/Src/stm32g0xx_it.c` → `stm32g0xx_it_user_code.c` dosyasını oku; oraya
   **eklenecek bir şey yok**, sadece kontrol listesi var.
+- ⚠️ **Her blok sonrası `Cmd+S` ile kaydet.** CubeIDE'de autosave yok (PyCharm/VSCode'a alışkınsan bu tuzağa düşülüyor) — kaydetmeden Build alırsan eski/boş hali derlenir.
+- "Import Projects" / "Open Projects from File System" ile proje **zaten workspace'te** görünüyorsa ("Folder already imported as project" uyarısı) o pencereyi Cancel'la, Project Explorer'ı kontrol et (Window → Show View → Project Explorer) — proje muhtemelen zaten orada, sadece görünür değil.
 
 ---
 
