@@ -132,6 +132,14 @@ static volatile uint8_t  g_command_ready = 0;
 /* --- Durum gönderme zamanlayıcısı --------------------------------------- */
 static uint32_t g_last_status_ms = 0;
 
+/* --- LED ile bağlantı doğrulaması ----------------------------------------
+ * host_confirmed: Pi/Mac'ten geçerli bir komut alınca 1 olur (ilk komuttan
+ * sonra hep 1 kalır — güç kesilene kadar). LED'i yavaş/hızlı yanıp söndürmek
+ * için kullanılır (bkz. USER CODE 3): yavaş = "firmware çalışıyor ama kimse
+ * konuşmadı", hızlı = "gerçek bir komut alındı, karşı taraf bağlı". */
+static volatile uint8_t g_host_confirmed = 0;
+static uint16_t          g_led_tick = 0;
+
 
 /* USER CODE END PV */
 
@@ -412,6 +420,11 @@ static void process_command(const char *line)
     return;
   }
 
+  /* Geçerli bir komut satırı ayrıştırıldı — karşı tarafın gerçekten bizimle
+   * konuştuğu kanıtlandı. LED yanıp sönme hızını buna göre değiştiriyoruz
+   * (bkz. USER CODE 3). Bir daha güç kesilene kadar geri dönmüyor. */
+  g_host_confirmed = 1;
+
   /* ---- Step motoru hareket ettir ---- */
   if (strcmp(cmd, "step") == 0) {
     json_read_int(line, "dir",   &dir_i);
@@ -542,10 +555,22 @@ int main(void)
       encoder_update(&g_enc2);
       send_status();
 
-      /* Kart üstündeki LED yanıp sönüyorsa firmware yaşıyor demektir */
+      /* Kart üstündeki LED (LD3) bağlantı durumunu gösterir:
+       *   - g_host_confirmed=0 (henüz kimse konuşmadı): her 10 tikte bir
+       *     yanıp söner -> ~1 Hz, yavaş "hayattayım" darbesi.
+       *   - g_host_confirmed=1 (Pi/Mac'ten en az bir geçerli komut geldi):
+       *     her tikte yanıp söner -> ~10 Hz, hızlı "bağlantı doğrulandı"
+       *     darbesi. Bu döngü 50 ms'de bir çalıştığı için (STATUS_PERIOD_MS)
+       *     10 tik = 500 ms = 1 Hz, 1 tik = 100 ms = 10 Hz eder. */
+      g_led_tick++;
+      {
+        uint16_t toggle_every = g_host_confirmed ? 1U : 10U;
+        if ((g_led_tick % toggle_every) == 0U) {
 #ifdef LD3_GPIO_Port
-      HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+          HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
 #endif
+        }
+      }
     }
 
   }

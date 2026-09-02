@@ -71,6 +71,10 @@ class STM32Bridge:
             if got_data:
                 self.is_connected = True
                 self.last_error = None
+                # Karta bir "ping" gönder — bu, kartın host_confirmed
+                # bayrağını set edip LED'i yavaştan hızlıya geçirir. Sahada
+                # ekrana bakmadan da "gerçekten bağlı" görsel teyidi verir.
+                self.send_command({"cmd": "ping"})
                 return True
             time.sleep(0.05)
 

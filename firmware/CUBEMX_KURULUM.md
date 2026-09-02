@@ -200,13 +200,18 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
 
 1. **Project → Build All** (`Ctrl+B`). 0 hata olmalı.
 2. Kartı USB ile bağla → **Run → Run As → STM32 C/C++ Application**.
-3. Kart üstündeki LED (LD3) yanıp sönmeye başlamalı — firmware çalışıyor demektir.
-4. PC'de seri portu aç (STM32CubeIDE'nin kendi terminali veya `pc_ui/feedvision_test_ui.py`).
-   115200 baud'da saniyede ~20 satır JSON akmalı:
+3. Kart üstündeki LED (LD3) **yavaş** yanıp sönmeye başlamalı (~1 Hz) — firmware
+   çalışıyor ama henüz kimse konuşmadı demektir.
+4. PC'de seri portu aç (STM32CubeIDE'nin kendi terminali veya `pc_ui/feedvision_test_ui.py`,
+   ya da `rpi-core` üzerinden web arayüzü). 115200 baud'da saniyede ~20 satır JSON akmalı:
    ```
    {"t":1234,"e1":0,"e2":0,"um1":0,"um2":0,"remaining":0,"running":0,"dc":0}
    ```
-5. Encoder milini elle çevir → `e1` / `e2` değerleri değişmeli (bir yöne artmalı,
+5. Karta geçerli bir komut gönder (`rpi-core` web arayüzünden "Bağlan"a basmak
+   otomatik bir `ping` yollar) → **LED hızlanmalı** (~10 Hz) — bu, kartın en az
+   bir geçerli komut aldığının, yani bağlantının gerçekten çift yönlü çalıştığının
+   görsel kanıtı. Ekrana bakmadan da sahada hızlıca doğrulanabilir.
+6. Encoder milini elle çevir → `e1` / `e2` değerleri değişmeli (bir yöne artmalı,
    diğer yöne azalmalı). Değişmiyorsa: kabloyu, 4.7k pull-up'ı ve `Counter Period = 65535`
    ayarını kontrol et.
 
