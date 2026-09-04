@@ -18,10 +18,16 @@ konumları ve o pinin destekediği fonksiyonlar:
 | PA9 | 19 | TIM1_CH2 | XML: PA9 → `TIM1_CH2` |
 | PA6 | 13 | TIM3_CH1 | XML: PA6 → `TIM3_CH1` |
 | PA7 | 14 | TIM3_CH2 | XML: PA7 → `TIM3_CH2` |
-| PA15 | 26 | GPIO Output (STEP / PUL+) | XML'de GPIO |
+| PA10 | 21 | GPIO Output (STEP / PUL+) | XML'de GPIO — **04-09'da PA15'ten PA10'a taşındı**, bkz. not aşağıda |
 | PB1 | 16 | GPIO Output (DIR+) | XML'de GPIO |
 | PB8 | 32 | GPIO Output (L9110 IA1) | XML'de GPIO |
 | PB9 | 1 | GPIO Output (L9110 IB1) | XML'de GPIO |
+
+**Neden PA10 (eskiden PA15):** STEP donanımsal bir timer/AF'ye bağlı değil, düz bit-banged
+GPIO — kod hep `STEP_Pin`/`STEP_GPIO_Port` sembolik ismini kullanıyor (main.h'den gelir),
+yani **hangi fiziksel pin olduğu tamamen serbest**, kodda hiçbir elle değişiklik gerekmez.
+PA15'te eski bir GND-kısa-devre jumper aparatı vardı, PA10'a geçince o jumper'a hiç
+dokunmaya gerek kalmadı (D2 boş bırakılırsa GND'ye kısa olması zararsız).
 
 **Önemli not (bir yanlış anlaşılmayı önlemek için):** STM32G0'ın küçük paketlerinde
 (TSSOP20, UFQFPN28 vb.) PA9/PA10 kendi pinlerine sahip değildir, PA11/PA12 pini üzerinden
@@ -95,7 +101,7 @@ her 10 µs'de bir). 16 MHz'de işlemcinin buna yetişme payı dar kalır, 64 MHz
 > 0 bırakırsan sayaç her 1 darbede başa döner ve encoder'dan hiç anlamlı sayı okuyamazsın.
 > 65535 yazınca sayaç 16 bitin tamamını kullanır.
 
-> **`Input Filter = 15` neden:** encoder kabloları ~150 cm ve sinyal 4.7k pull-up ile
+> **`Input Filter = 15` neden:** encoder kabloları ~150 cm ve sinyal dahili pull-up ile
 > çekiliyor; filtre gürültüden gelen sahte darbeleri eler. 15 ayarı ~4 µs'den kısa
 > darbeleri yok sayar. Motor 300 dev/dak'ta bile darbeler arası ~80 µs olduğu için
 > gerçek sinyali kaybetmezsin. Sayım kaçırdığını görürsen bu değeri düşür.
@@ -144,22 +150,28 @@ her 10 µs'de bir). 16 MHz'de işlemcinin buna yetişme payı dar kalır, 64 MHz
 
 Pinout görünümünde **sol tıkla → fonksiyon seç**, sonra **sağ tıkla → Enter User Label**:
 
-| Pin | Fonksiyon | User Label (aynen yaz) |
-|---|---|---|
-| PA15 | GPIO_Output | `STEP` |
-| PB1 | GPIO_Output | `DIR` |
-| PB8 | GPIO_Output | `DC_IA1` |
-| PB9 | GPIO_Output | `DC_IB1` |
+| Pin  | Fonksiyon   | User Label (aynen yaz) |
+| ---- | ----------- | ---------------------- |
+| PA10 | GPIO_Output | `STEP`                 |
+| PB1  | GPIO_Output | `DIR`                  |
+| PB8  | GPIO_Output | `DC_IA1`               |
+| PB9  | GPIO_Output | `DC_IB1`               |
 
-Sonra **System Core → GPIO** sekmesinde bu 4 pin için:
+Sonra **System Core → GPIO** sekmesinde bu 4 pin için (**bu 4'ü — Maximum output speed dahil —
+`.ioc`'ta gerçekten böyle ayarlı, 04-09'da doğrulandı**):
 
 - `GPIO output level` : **Low**
 - `GPIO mode` : Output Push Pull
 - `GPIO Pull-up/Pull-down` : No pull-up and no pull-down
 - `Maximum output speed` : **High**
 
-Encoder pinleri (PA6/PA7/PA8/PA9) için ekstra bir şey yapma — Encoder Mode seçtiğinde
-CubeMX doğru ayarı zaten yapıyor. (Kartın dışında zaten 4.7k pull-up dirençleri var.)
+**Encoder pinleri (PA6/PA7/PA8/PA9) — DÜZELTME (04-09):** Bu satır eskiden "ekstra bir şey
+yapma, kartın dışında zaten 4.7k pull-up dirençleri var" diyordu — **bu yanlıştı, harici
+direnç hiç takılmadı.** Gerçekte kullanılan (ve çalıştığı doğrulanan) çözüm: bu 4 pin için
+**System Core → GPIO** sekmesinde `GPIO Pull-up/Pull-down` : **Pull-up** seç (Encoder Mode
+otomatik ayarladığı diğer her şeyin — Alternate Function, hız vb. — üzerine, ekstra bir tık).
+STM32'nin dahili pull-up'ı NPN open-collector encoder çıkışı için yeterli, harici direnç
+gerekmiyor.
 
 > **User Label'ları neden yazıyoruz:** CubeMX bu etiketlerden `STEP_Pin`, `STEP_GPIO_Port`
 > gibi tanımlar üretir; verdiğim kod bunları kullanıyor. Etiket yazmazsan da kod çalışır
@@ -212,8 +224,8 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
    bir geçerli komut aldığının, yani bağlantının gerçekten çift yönlü çalıştığının
    görsel kanıtı. Ekrana bakmadan da sahada hızlıca doğrulanabilir.
 6. Encoder milini elle çevir → `e1` / `e2` değerleri değişmeli (bir yöne artmalı,
-   diğer yöne azalmalı). Değişmiyorsa: kabloyu, 4.7k pull-up'ı ve `Counter Period = 65535`
-   ayarını kontrol et.
+   diğer yöne azalmalı). Değişmiyorsa: kabloyu, PA6/7/8/9'un dahili pull-up ayarını
+   (§7) ve `Counter Period = 65535` ayarını kontrol et.
 
 ---
 
@@ -223,8 +235,11 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
    mikroadım değeri not alınmalı — kod şu an "kaç step = kaç mm" hesabını yapmıyor
    (o hesap encoder ile ampirik yapılıyor, bkz. madde 2), ama ileride açık-çevrim
    mesafe hesabı eklenirse bu değer gerekecek.
-2. **Tekerlek çapı:** koddaki `WHEEL_DIAMETER_MM` sabiti şu an **40.0 mm varsayım**.
-   Gerçek tekerlek gelince kumpasla ölç ve bu sabiti düzelt — encoder mm hesabı buna bağlı.
+2. **Tekerlek çapı — ARTIK FIRMWARE'DE DEĞİL:** koddaki `WHEEL_DIAMETER_MM` (40.0mm) hâlâ
+   `um1`/`um2` alanlarını üretiyor ama bunlar **kullanılmıyor** — motor tekerleği ile encoder
+   tekerlekleri farklı çap olabildiği için (ve iki encoder da farklı olabilir), mm hesabı
+   artık web app'te (`ui/index.html`), her biri ayrı girilen 3 çaptan (Motor/Encoder1/Encoder2)
+   ham `e1`/`e2` sayımından yapılıyor. Bu sabiti düzeltmeye gerek yok.
 3. **Encoder PPR:** koddaki `ENC_PPR` = 600. Encoder etiketinde yazan değerle karşılaştır.
 4. **Step darbe genişliği:** DM556 datasheet'i "en yüksek frekans cevabı 200 kHz" diyor
    (yani en kısa darbe periyodu 5 µs). Kod güvenlik için alt sınırı **20 µs**'de tutuyor.
@@ -236,34 +251,8 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
 
 ## 12. Komut formatı (referans)
 
-PC → STM32 (her komut tek satır, sonunda `\n`):
-
-| Komut | Anlamı |
-|---|---|
-| `{"cmd":"step","dir":1,"delay":500,"steps":2000}` | 2000 step at, darbe periyodu 500 µs, yön 1 |
-| `{"cmd":"stop"}` | Step motoru anında durdur |
-| `{"cmd":"dc","dir":"forward"}` | DC motor ileri |
-| `{"cmd":"dc","dir":"backward"}` | DC motor geri |
-| `{"cmd":"dc","dir":"stop"}` | DC motor dur |
-| `{"cmd":"reset"}` | İki encoder sayacını da sıfırla |
-| `{"cmd":"ping"}` | Bağlantı testi |
-
-STM32 → PC (saniyede 20 kez):
-
-```json
-{"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"remaining":0,"running":0,"dc":0}
-```
-
-| Alan | Anlamı |
-|---|---|
-| `t` | Kart açıldığından beri geçen ms |
-| `e1` / `e2` | Encoder 1 / 2 toplam sayım (işaretli, geri dönünce azalır) |
-| `um1` / `um2` | Aynı sayımın **mikrometre** karşılığı (1000'e bölünce mm) |
-| `remaining` | Step motorun atmayı bekleyen darbe sayısı |
-| `running` | 1 = step motor hareket halinde |
-| `dc` | 0 = dur, 1 = ileri, 2 = geri |
-
-> **Neden mm değil mikrometre gönderiyoruz:** STM32CubeIDE varsayılan olarak `printf`'te
-> ondalık sayı (float) desteğini kapalı getirir; açmadan `%f` yazarsan ekrana çöp basar.
-> Tam sayı olarak mikrometre gönderip bölme işlemini PC tarafında yapmak bu tuzağı
-> tamamen ortadan kaldırıyor.
+Tek kaynak: **`docs/protocol.md`** (kök dizinde) — komut/durum tablosu + `accel`
+(hızlanma/yavaşlama rampası, 03-09'da eklendi) + delay/RPM ilişkisi orada. Burada
+ikinci bir kopyasını tutmuyoruz — encoder pull-up notunun az önce yaşadığı gibi, iki
+yerde aynı bilginin durması bir gün ikisi de birbirinden habersiz güncellenip
+çelişmeye başlıyor.
