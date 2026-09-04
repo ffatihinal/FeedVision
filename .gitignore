@@ -8,3 +8,7 @@ firmware/Debug/
 firmware/.settings/
 firmware/Release/
 .obsidian/
+
+# STM32CubeIDE per-makine/oturum dosyalari (paylasilmaya gerek yok)
+firmware/.osx.project
+firmware/*.launch
