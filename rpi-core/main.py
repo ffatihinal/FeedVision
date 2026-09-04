@@ -28,7 +28,7 @@ from pathlib import Path
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from serial_bridge import bridge
 
@@ -107,20 +107,21 @@ def disconnect_serial():
 
 class StepCommand(BaseModel):
     dir: int  # 0 veya 1 (yön)
-    delay: int  # mikrosaniye, iki darbe arası (küçük = hızlı)
-    steps: int  # atılacak toplam darbe sayısı
+    delay: int = Field(gt=0)  # mikrosaniye, hedef/sabit hız — iki darbe arası (küçük = hızlı) — 0/negatif firmware'i anlamsız hızlandırır
+    steps: int = Field(gt=0)  # atılacak toplam darbe sayısı — firmware zaten <=0'ı reddediyor, burada da erken kes
+    accel: int = Field(default=0, ge=0)  # kaç adımda hızlanıp/yavaşlanılacağı (0 = rampasız, sabit hız — eski davranış)
 
 
 @app.post("/motor/step")
 def motor_step(c: StepCommand):
-    ok = bridge.send_command({"cmd": "step", "dir": c.dir, "delay": c.delay, "steps": c.steps})
-    return {"sent": ok}
+    # send_command artık {"sent","raw_command","command","raw_reply","reply","timed_out"}
+    # döndürüyor — UI hem gönderdiğimiz ham komutu hem STM32'nin ok/err yanıtını gösterebilsin diye.
+    return bridge.send_command({"cmd": "step", "dir": c.dir, "delay": c.delay, "steps": c.steps, "accel": c.accel})
 
 
 @app.post("/motor/stop")
 def motor_stop():
-    ok = bridge.send_command({"cmd": "stop"})
-    return {"sent": ok}
+    return bridge.send_command({"cmd": "stop"})
 
 
 class DcCommand(BaseModel):
@@ -129,14 +130,12 @@ class DcCommand(BaseModel):
 
 @app.post("/motor/dc")
 def motor_dc(c: DcCommand):
-    ok = bridge.send_command({"cmd": "dc", "dir": c.dir})
-    return {"sent": ok}
+    return bridge.send_command({"cmd": "dc", "dir": c.dir})
 
 
 @app.post("/motor/reset")
 def motor_reset():
-    ok = bridge.send_command({"cmd": "reset"})
-    return {"sent": ok}
+    return bridge.send_command({"cmd": "reset"})
 
 
 @app.websocket("/ws/status")

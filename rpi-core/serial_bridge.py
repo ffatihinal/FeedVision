@@ -30,7 +30,11 @@ class STM32Bridge:
     def __init__(self):
         self._serial: Optional[serial.Serial] = None
         self._lock = threading.Lock()
+        self._cmd_lock = threading.Lock()  # tek seferde tek komut+yanıt döngüsü (yarış durumunu önler)
         self._last_status: dict = {}
+        self._last_reply: Optional[dict] = None
+        self._last_reply_raw: Optional[str] = None
+        self._reply_event = threading.Event()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self.is_connected = False
@@ -93,16 +97,20 @@ class STM32Bridge:
         self.is_connected = False
 
     def _listen(self):
-        """Arka planda sürekli satır okur, JSON'a çevirip bellekte tutar.
-        Bozuk/eksik bir satır gelirse (kablo gürültüsü vb.) atlar, çökmez."""
+        """Arka planda sürekli satır okur. STM32 iki tür satır gönderiyor:
+        - periyodik DURUM satırı (t/e1/e2/... alanları) — _last_status'a yazılır
+        - bir komuta doğrudan YANIT satırı ({"ok":...} veya {"err":...}) —
+          _last_reply'e yazılır ve _reply_event tetiklenir.
+        Bunları ayırmazsak (eskiden ikisi de aynı 'last_status' alanına
+        yazılıyordu), yanıt satırı ~50ms içinde bir sonraki durum satırıyla
+        ezilip UI'a hiç ulaşamıyordu — bir komut reddedilse (err) bile
+        kullanıcı bunu göremiyordu. Bozuk/eksik bir satır gelirse atlar, çökmez."""
         while self._running and self._serial:
             try:
                 raw = self._serial.readline().decode("utf-8", errors="ignore").strip()
                 if not raw:
                     continue
                 data = json.loads(raw)
-                with self._lock:
-                    self._last_status = data
             except json.JSONDecodeError:
                 continue
             except Exception as e:
@@ -110,22 +118,60 @@ class STM32Bridge:
                 self.is_connected = False
                 break
 
+            if "ok" in data or "err" in data:
+                with self._lock:
+                    self._last_reply = data
+                    self._last_reply_raw = raw
+                self._reply_event.set()
+            else:
+                with self._lock:
+                    self._last_status = data
+
     def get_status(self) -> dict:
-        """UI'ın (WebSocket üzerinden) periyodik olarak sorguladığı, en son bilinen durum."""
+        """UI'ın (WebSocket üzerinden) periyodik olarak sorguladığı, en son bilinen durum.
+        Artık SADECE gerçek durum satırlarını içeriyor — ok/err yanıtları karışmıyor."""
         with self._lock:
             return dict(self._last_status)
 
-    def send_command(self, command: dict) -> bool:
-        """Tek satır JSON komutu STM32'ye yollar. Bağlantı yoksa False döner."""
+    def send_command(self, command: dict, reply_timeout: float = 0.3) -> dict:
+        """Tek satır JSON komutu STM32'ye yollar ve kartın {"ok":...}/{"err":...}
+        yanıtını kısa süre bekler. UI'ın hem giden komutu hem gelen yanıtı ham
+        haliyle gösterebilmesi için ikisini de döndürür.
+
+        Dönen sözlük:
+          sent         — komut seri porta yazılabildi mi
+          raw_command  — kartına gönderilen tam satır (JSON metni)
+          command      — aynı komut, sözlük olarak
+          raw_reply    — karttan gelen ham yanıt satırı (varsa)
+          reply        — aynı yanıt, sözlük olarak (varsa)
+          timed_out    — reply_timeout içinde hiç yanıt gelmediyse True
+        """
+        result: dict = {
+            "sent": False, "raw_command": None, "command": command,
+            "raw_reply": None, "reply": None, "timed_out": False,
+        }
         if not self._serial or not self.is_connected:
-            return False
-        try:
+            return result
+
+        with self._cmd_lock:  # aynı anda 2 komut birbirinin yanıtını çalmasın
             line = json.dumps(command) + "\n"
-            self._serial.write(line.encode("utf-8"))
-            return True
-        except Exception as e:
-            self.last_error = str(e)
-            return False
+            result["raw_command"] = line.strip()
+            try:
+                self._reply_event.clear()
+                self._serial.write(line.encode("utf-8"))
+                result["sent"] = True
+            except Exception as e:
+                self.last_error = str(e)
+                return result
+
+            if self._reply_event.wait(reply_timeout):
+                with self._lock:
+                    result["reply"] = self._last_reply
+                    result["raw_reply"] = self._last_reply_raw
+            else:
+                result["timed_out"] = True
+
+        return result
 
 
 # Tek, paylaşılan köprü nesnesi — main.py bunu import edip kullanır.
