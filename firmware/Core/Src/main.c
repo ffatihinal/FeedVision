@@ -66,6 +66,14 @@
 #define STEP_MIN_DELAY_US     20U
 #define STEP_MAX_DELAY_US     60000U
 
+/* Rampa (hızlanma/yavaşlama) başlangıç/bitiş gecikmesi: sıfırdan bu HIZLA
+ * (yani bu kadar YAVAŞ bir delay ile) başlar, "accel" kadar adımda hedef
+ * hıza (komuttaki delay'e) çıkar; hareketin son "accel" adımında da aynı
+ * şekilde bu hıza geri iner. Motor+yük değişirse SAHADA burayı ayarla —
+ * çok küçük kalırsa yine sıfırdan hızlı kalkış = step kaybı riski sürer,
+ * çok büyük kalırsa rampa gereksiz uzun sürer. */
+#define STEP_RAMP_START_DELAY_US  2000U
+
 /* --- Encoder / mesafe hesabı sabitleri -----------------------------------
  * SAHADA DOĞRULA: ENC_PPR encoder etiketinden, WHEEL_DIAMETER_MM kumpasla.  */
 #define ENC_PPR               600.0f     /* encoder etiketinde yazan darbe/tur */
@@ -103,6 +111,17 @@ typedef struct {
   volatile uint32_t remaining;  /* atılmayı bekleyen darbe sayısı */
   volatile uint8_t  level;      /* STEP pini şu an 1 mi 0 mı */
   volatile uint8_t  running;    /* 1 = hareket sürüyor */
+
+  /* --- Rampa (hızlanma/yavaşlama) durumu ---------------------------------
+   * "delay" artık tek bir sabit değer değil, hareket boyunca değişebiliyor:
+   * ilk "accel_steps" adımda start_delay'den cruise_delay'e iner (hızlanma),
+   * ortada cruise_delay'de sabit kalır, son "accel_steps" adımda tekrar
+   * start_delay'e çıkar (yavaşlama). accel_steps=0 ise rampa YOK, eski
+   * davranış: baştan sona sabit cruise_delay (geriye dönük uyumlu). */
+  uint32_t total_steps;     /* step_start()'a verilen toplam adım (rampa oranı için) */
+  uint32_t cruise_delay_us; /* hedef/komut edilen sabit hız */
+  uint32_t start_delay_us;  /* rampa başlangıç/bitiş gecikmesi (yavaş, güvenli) */
+  uint32_t accel_steps;     /* kaç adımda hızlanılıp/yavaşlanılacağı */
 } step_generator_t;
 
 static step_generator_t g_step = {0, 0, 0};
@@ -159,7 +178,8 @@ static void     encoder_reset(encoder_t *e);                           // sayac�
 static int32_t  encoder_to_micrometers(int32_t count);                 // ham sayımı mikrometreye (mm'nin 1000'de biri) çevirir
 
 /* --- Step motor fonksiyonları --- */
-static void     step_start(uint8_t dir, uint32_t count, uint32_t delay_us);  // step motoru başlatır: yön + kaç adım + ne hızda
+static void     step_start(uint8_t dir, uint32_t count, uint32_t delay_us, uint32_t accel_steps);  // step motoru başlatır: yön + kaç adım + ne hızda + kaç adımda hızlan/yavaşla
+static uint32_t step_delay_for_remaining(uint32_t remaining);  // rampanın o anki fazına göre gecikme hesaplar
 static void     step_stop(void);                                              // step motoru anında durdurur
 
 /* --- DC motor fonksiyonu --- */
@@ -260,10 +280,35 @@ static int32_t encoder_to_micrometers(int32_t count)
  *  STEP MOTOR  —  TIM16 kesmesi ile sabit hızda darbe üretimi
  * ========================================================================== */
 
-/* dir      : 0 veya 1 (DIR pininin seviyesi)
- * count    : atılacak tam darbe sayısı
- * delay_us : iki darbe arası toplam süre (mikrosaniye) - küçük değer = hızlı */
-static void step_start(uint8_t dir, uint32_t count, uint32_t delay_us)
+/* Şu anki adımda (remaining kaç darbe kaldıysa) kullanılması gereken
+ * gecikmeyi hesaplar — rampanın hızlanma/sabit/yavaşlama neresinde
+ * olduğumuza bakar. ISR içinden de çağrıldığı için basit tam sayı
+ * matematiği dışında bir şey yapmaz (float/bölme dışı ağır işlem yok). */
+static uint32_t step_delay_for_remaining(uint32_t remaining)
+{
+  uint32_t done = g_step.total_steps - remaining;   /* şu ana kadar atılan darbe */
+
+  if (g_step.accel_steps == 0U) {
+    return g_step.cruise_delay_us;                  /* rampa yok - eski davranış */
+  }
+  if (done < g_step.accel_steps) {
+    /* Hızlanma: start_delay'den cruise_delay'e doğrusal iniyor. */
+    uint32_t span = g_step.start_delay_us - g_step.cruise_delay_us;
+    return g_step.start_delay_us - (span * done / g_step.accel_steps);
+  }
+  if (remaining <= g_step.accel_steps) {
+    /* Yavaşlama: cruise_delay'den start_delay'e doğrusal çıkıyor (simetrik). */
+    uint32_t span = g_step.start_delay_us - g_step.cruise_delay_us;
+    return g_step.start_delay_us - (span * remaining / g_step.accel_steps);
+  }
+  return g_step.cruise_delay_us;                     /* rampalar arası - sabit hız */
+}
+
+/* dir         : 0 veya 1 (DIR pininin seviyesi)
+ * count       : atılacak tam darbe sayısı
+ * delay_us    : hedef/sabit hız - iki darbe arası toplam süre (mikrosaniye), küçük değer = hızlı
+ * accel_steps : hızlanıp yavaşlanacağı adım sayısı (0 = rampasız, eski davranış) */
+static void step_start(uint8_t dir, uint32_t count, uint32_t delay_us, uint32_t accel_steps)
 {
   if (count == 0U) {
     return;
@@ -273,6 +318,10 @@ static void step_start(uint8_t dir, uint32_t count, uint32_t delay_us)
   if (delay_us < STEP_MIN_DELAY_US) delay_us = STEP_MIN_DELAY_US;
   if (delay_us > STEP_MAX_DELAY_US) delay_us = STEP_MAX_DELAY_US;
 
+  /* Rampa toplam adımın yarısından fazlasını isteyemez (hızlanma+yavaşlama
+   * çakışmasın diye) - kısa hareketlerde otomatik küçültülür. */
+  if (accel_steps > count / 2U) accel_steps = count / 2U;
+
   step_stop();   /* önceki hareket varsa temizle */
 
   /* Yön pinini darbelerden ÖNCE ayarla, sürücünün okuması için 1 ms bekle */
@@ -280,14 +329,22 @@ static void step_start(uint8_t dir, uint32_t count, uint32_t delay_us)
   HAL_Delay(1);
 
   HAL_GPIO_WritePin(STEP_GPIO_Port, STEP_Pin, GPIO_PIN_RESET);
-  g_step.level     = 0;
-  g_step.remaining = count;
-  g_step.running   = 1;
+  g_step.level           = 0;
+  g_step.remaining       = count;
+  g_step.total_steps     = count;
+  g_step.cruise_delay_us = delay_us;
+  g_step.accel_steps     = accel_steps;
+  /* Rampa başlangıcı hedeften daha YAVAŞ olmalı (büyük delay); komut edilen
+   * hız zaten rampa başlangıcından yavaşsa (delay_us >= start delay), rampa
+   * yapılacak bir şey yok - fiilen accel_steps=0 gibi davranır. */
+  g_step.start_delay_us  = (STEP_RAMP_START_DELAY_US > delay_us) ? STEP_RAMP_START_DELAY_US : delay_us;
+  g_step.running         = 1;
 
   /* Timer 1 MHz'de sayıyor (CubeMX'te Prescaler=63 ayarladık), yani 1 tık = 1 us.
    * Kesme her YARIM periyotta bir gelecek: bir kesmede pini kaldır, sonrakinde indir.
-   * Böylece tam bir darbe delay_us kadar sürer. */
-  __HAL_TIM_SET_AUTORELOAD(&htim16, (delay_us / 2U) - 1U);
+   * Böylece tam bir darbe delay_us kadar sürer. İlk darbe rampa başlangıç
+   * hızıyla (ya da rampasızsa doğrudan cruise hızıyla) başlıyor. */
+  __HAL_TIM_SET_AUTORELOAD(&htim16, (step_delay_for_remaining(count) / 2U) - 1U);
   __HAL_TIM_SET_COUNTER(&htim16, 0);
   __HAL_TIM_CLEAR_FLAG(&htim16, TIM_FLAG_UPDATE);  /* bekleyen eski bayrağı sil */
 
@@ -413,7 +470,7 @@ static void process_command(const char *line)
 {
   char    cmd[16];
   char    dir_str[12];
-  int32_t dir_i = 0, delay_i = 500, steps_i = 0;
+  int32_t dir_i = 0, delay_i = 500, steps_i = 0, accel_i = 0;
 
   if (!json_read_str(line, "cmd", cmd, sizeof(cmd))) {
     uart_send("{\"err\":\"missing cmd field\"}\r\n");
@@ -430,12 +487,14 @@ static void process_command(const char *line)
     json_read_int(line, "dir",   &dir_i);
     json_read_int(line, "delay", &delay_i);
     json_read_int(line, "steps", &steps_i);
+    json_read_int(line, "accel", &accel_i);  /* opsiyonel - yoksa 0 (rampasız, eski davranış) */
 
     if (steps_i <= 0) {
       uart_send("{\"err\":\"steps must be > 0\"}\r\n");
       return;
     }
-    step_start((uint8_t)(dir_i ? 1 : 0), (uint32_t)steps_i, (uint32_t)delay_i);
+    if (accel_i < 0) accel_i = 0;
+    step_start((uint8_t)(dir_i ? 1 : 0), (uint32_t)steps_i, (uint32_t)delay_i, (uint32_t)accel_i);
     uart_send("{\"ok\":\"step\"}\r\n");
   }
 
@@ -883,6 +942,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if (g_step.remaining == 0U) {
       g_step.running = 0U;
       HAL_TIM_Base_Stop_IT(&htim16);
+    } else {
+      /* Rampa varsa (accel_steps>0) sıradaki darbenin hızı bir öncekinden
+       * farklı olabilir - her darbede yeniden hesaplayıp timer'a yazıyoruz.
+       * Rampasız harekette (accel_steps=0) bu hep aynı değeri döndürür,
+       * gereksiz ama zararsız bir yazma. */
+      __HAL_TIM_SET_AUTORELOAD(&htim16, (step_delay_for_remaining(g_step.remaining) / 2U) - 1U);
     }
   }
 }
