@@ -38,6 +38,38 @@
     .status-dot.connected { background: #4c4; }
     .status-dot.disconnected { background: #c44; }
 
+    /* --- Encoder anlık okuma: büyük, ilk bakışta görünür rakamlar --- */
+    .encoder-readouts { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+    .encoder-readout { background: #000; border: 1.5px solid #333; border-radius: 8px; padding: 10px 20px; min-width: 170px; }
+    .encoder-readout .er-label { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+    .encoder-readout .er-count { font-family: "SF Mono", Menlo, monospace; font-size: 26px; font-weight: 700; color: #eee; line-height: 1.3; }
+    .encoder-readout .er-mm { font-family: "SF Mono", Menlo, monospace; font-size: 15px; color: #999; }
+
+    /* --- Giden komut / gelen yanıt paneli --- */
+    .io-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+    .io-box { background: #000; border: 1px solid #333; border-radius: 6px; padding: 10px 12px; }
+    .io-box h3 { margin: 0 0 6px; font-size: 13px; color: #9c9; text-transform: uppercase; letter-spacing: .04em; }
+    .io-box .raw { font-family: "SF Mono", Menlo, monospace; font-size: 13px; color: #ddd; word-break: break-all; }
+    .io-box .explain { font-size: 13px; color: #aaa; margin-top: 6px; }
+    .io-box.err .raw, .io-box.err .explain { color: #f77; }
+    .io-box.timeout .raw, .io-box.timeout .explain { color: #fb4; }
+
+    /* --- Canlı durum: sadeleştirilmiş satırlar + ham JSON --- */
+    #status-table { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px 16px; margin-top: 8px; font-size: 13px; }
+    #status-table .field { color: #888; }
+    #status-table .value { font-family: "SF Mono", Menlo, monospace; color: #eee; }
+    #status-raw { font-family: "SF Mono", Menlo, monospace; font-size: 12px; color: #666; margin-top: 8px; word-break: break-all; }
+    .running-warning { display: none; color: #fb4; font-size: 13px; margin: 6px 0 0; }
+    .running-warning.show { display: block; }
+
+    /* --- Hareket analizi: teker çapları + grafikler --- */
+    .motion-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
+    @media (max-width: 900px) { .motion-grid { grid-template-columns: 1fr; } }
+    .motion-col h3 { font-size: 14px; color: #9c9; margin: 0 0 8px; }
+    .chart-box { background: #000; border: 1px solid #333; border-radius: 6px; padding: 8px; margin-bottom: 10px; }
+    .chart-box .chart-title { font-size: 11.5px; color: #888; margin-bottom: 4px; }
+    .chart-box canvas { width: 100%; height: 120px; display: block; }
+
     /* --- Konsol paneli --- */
     #console-title { margin-top: 32px; font-size: 16px; color: #9c9; }
     #console {
@@ -72,6 +104,19 @@
   <div class="panel">
     <h2>Motor Kontrolü (STM32 köprüsü)</h2>
 
+    <div class="encoder-readouts">
+      <div class="encoder-readout">
+        <div class="er-label" style="color:#6cf">Encoder 1</div>
+        <div class="er-count" id="er-e1-count">— sayım</div>
+        <div class="er-mm" id="er-e1-mm">— mm</div>
+      </div>
+      <div class="encoder-readout">
+        <div class="er-label" style="color:#fb4">Encoder 2</div>
+        <div class="er-count" id="er-e2-count">— sayım</div>
+        <div class="er-mm" id="er-e2-mm">— mm</div>
+      </div>
+    </div>
+
     <div class="row-group">
       <label>Seri port:</label>
       <select id="port-select"></select>
@@ -85,13 +130,19 @@
     <div class="row-group">
       <label>Step motor — Yön:</label>
       <select id="step-dir"><option value="1">1</option><option value="0">0</option></select>
-      <label>Gecikme (µs):</label>
-      <input id="step-delay" type="number" value="500">
+      <label>Gecikme (µs) — hedef hız:</label>
+      <input id="step-delay" type="number" value="500" min="1">
       <label>Adım:</label>
-      <input id="step-count" type="number" value="2000">
+      <input id="step-count" type="number" value="2000" min="1">
+      <label>İvme (adım) — rampa:</label>
+      <input id="step-accel" type="number" value="0" min="0">
       <button onclick="sendStep()">Step At</button>
       <button onclick="stopStep()">Durdur</button>
     </div>
+    <div class="row-group" style="margin-top:-8px">
+      <label style="font-size:12.5px;color:#888">İvme = kaç adımda hedef hıza çıkılıp yine o kadar adımda durmadan önce yavaşlanacağı. 0 = rampasız, direkt hedef hızda başlar (stall riski yüksek).</label>
+    </div>
+    <div id="running-warning" class="running-warning">⚠ Step motor şu an zaten hareket halinde — yeni komut önceki hareketin üzerine yazacak.</div>
 
     <div class="row-group">
       <label>DC motor:</label>
@@ -101,7 +152,64 @@
       <button onclick="resetEncoders()">Encoder Sıfırla</button>
     </div>
 
-    <div id="status-display">Canlı durum bekleniyor…</div>
+    <!-- Son gönderilen komut (ham JSON + Türkçe açıklama) / STM32'nin ok|err yanıtı -->
+    <div class="io-grid">
+      <div class="io-box" id="out-box">
+        <h3>Giden Komut</h3>
+        <div class="raw" id="out-raw">—</div>
+        <div class="explain" id="out-explain">Henüz komut gönderilmedi.</div>
+      </div>
+      <div class="io-box" id="in-box">
+        <h3>STM32 Yanıtı</h3>
+        <div class="raw" id="in-raw">—</div>
+        <div class="explain" id="in-explain">Henüz yanıt yok.</div>
+      </div>
+    </div>
+
+    <!-- Canlı durum: STM32'nin ~20Hz yolladığı periyodik durum satırı, hem
+         çözülmüş (Türkçe etiketli) hem de ham JSON haliyle — hiçbir alan gizli kalmasın. -->
+    <div id="status-panel">
+      <div id="status-table">
+        <div class="field">Süre (kart açık kalma):</div><div class="value" id="s-t">—</div>
+        <div class="field">Step motor:</div><div class="value" id="s-run">—</div>
+        <div class="field">Kalan darbe (remaining):</div><div class="value" id="s-rem">—</div>
+        <div class="field">DC motor:</div><div class="value" id="s-dc">—</div>
+        <div class="field">Encoder 1:</div><div class="value" id="s-e1">—</div>
+        <div class="field">Encoder 2:</div><div class="value" id="s-e2">—</div>
+      </div>
+      <div id="status-raw">Canlı durum bekleniyor…</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Hareket Analizi</h2>
+
+    <div class="row-group">
+      <label>Motor Teker Çapı (mm):</label>
+      <input id="wheel-motor" type="number" value="40" min="1" step="0.1" oninput="saveWheelDiameter('wheel-motor')">
+      <label>Encoder 1 Teker Çapı (mm):</label>
+      <input id="wheel-enc1" type="number" value="40" min="1" step="0.1" oninput="saveWheelDiameter('wheel-enc1')">
+      <label>Encoder 2 Teker Çapı (mm):</label>
+      <input id="wheel-enc2" type="number" value="40" min="1" step="0.1" oninput="saveWheelDiameter('wheel-enc2')">
+    </div>
+    <div class="row-group" style="margin-top:-8px">
+      <label style="font-size:12.5px;color:#888">Değerler tarayıcıda saklanır (bu bilgisayara özel). Motor çapı soldaki "Gönderilen Komut" grafiğini, encoder çapları sağdaki "Encoder Verisi" grafiğini besler — firmware'in kendi um1/um2 alanı ARTIK KULLANILMIYOR (ikisi için tek sabit çap varsayıyordu, farklıysa yanlış çıkardı).</label>
+    </div>
+
+    <div class="motion-grid">
+      <div class="motion-col">
+        <h3>Gönderilen Komut (teorik — son "Step At"tan hesaplanır)</h3>
+        <div class="chart-box"><div class="chart-title">Konum (mm)</div><canvas id="chart-sent-pos"></canvas></div>
+        <div class="chart-box"><div class="chart-title">Hız (mm/s)</div><canvas id="chart-sent-vel"></canvas></div>
+        <div class="chart-box"><div class="chart-title">İvme (mm/s²)</div><canvas id="chart-sent-acc"></canvas></div>
+      </div>
+      <div class="motion-col">
+        <h3>Encoder Verisi (gerçek — mavi: Encoder 1, turuncu: Encoder 2)</h3>
+        <div class="chart-box"><div class="chart-title">Konum (mm)</div><canvas id="chart-real-pos"></canvas></div>
+        <div class="chart-box"><div class="chart-title">Hız (mm/s)</div><canvas id="chart-real-vel"></canvas></div>
+        <div class="chart-box"><div class="chart-title">İvme (mm/s²)</div><canvas id="chart-real-acc"></canvas></div>
+      </div>
+    </div>
   </div>
 
   <div id="console-title">Konsol — her buton işleminin kaydı</div>
@@ -224,51 +332,145 @@
       logToConsole("Bağlantıyı Kes", task, "Bağlantı kapatıldı.", false);
     }
 
+    // --- Giden komut / gelen yanıt: ham JSON + Türkçe açıklama ---
+    // Backend artık her /motor/* çağrısında {sent, raw_command, command, raw_reply, reply, timed_out}
+    // döndürüyor (bkz. serial_bridge.py send_command) — STM32'nin {"ok":...}/{"err":...}
+    // yanıtı artık periyodik durum satırıyla ezilmiyor, buraya net şekilde geliyor.
+    function compileCommand(cmd) {
+      if (!cmd) return "—";
+      switch (cmd.cmd) {
+        case "step": return cmd.accel
+          ? `Step motorunu sür — yön ${cmd.dir}, hedef gecikme ${cmd.delay} µs, toplam ${cmd.steps} darbe, ilk/son ${cmd.accel} darbede rampa.`
+          : `Step motorunu sür — yön ${cmd.dir}, darbe arası gecikme ${cmd.delay} µs, toplam ${cmd.steps} darbe (rampasız).`;
+        case "stop": return "Step motoru anında durdur.";
+        case "dc": return `DC motoru "${cmd.dir}" yönüne sür.`;
+        case "reset": return "İki encoder sayacını da sıfırla.";
+        case "ping": return "Bağlantı testi (ping).";
+        default: return `Bilinmeyen komut: ${cmd.cmd}`;
+      }
+    }
+    function compileReply(reply) {
+      if (!reply) return "—";
+      if (reply.ok) return `STM32 kabul etti ve uyguladı (ok: "${reply.ok}").`;
+      if (reply.err) return `STM32 REDDETTİ — ${reply.err}`;
+      return "Tanınmayan yanıt biçimi.";
+    }
+    // Giden/gelen paneli günceller + konsola tek satırlık özet yazar; her motor
+    // fonksiyonu ortak bu yoldan geçer, tekrar kod yazmaya gerek kalmasın diye.
+    function renderCmdReply(buttonName, data) {
+      const outBox = document.getElementById("out-box");
+      const inBox = document.getElementById("in-box");
+      outBox.className = "io-box" + (data.sent ? "" : " err");
+      document.getElementById("out-raw").textContent = data.raw_command || "(gönderilemedi — bağlı değil)";
+      document.getElementById("out-explain").textContent = data.command ? compileCommand(data.command) : "—";
+
+      inBox.className = "io-box" + (data.timed_out ? " timeout" : (data.reply && data.reply.err ? " err" : ""));
+      if (!data.sent) {
+        document.getElementById("in-raw").textContent = "—";
+        document.getElementById("in-explain").textContent = "Komut hiç gönderilemedi.";
+      } else if (data.timed_out) {
+        document.getElementById("in-raw").textContent = "(300ms içinde yanıt gelmedi)";
+        document.getElementById("in-explain").textContent = "STM32 yanıt vermedi — kablo/bağlantı sorunu olabilir.";
+      } else {
+        document.getElementById("in-raw").textContent = data.raw_reply || "—";
+        document.getElementById("in-explain").textContent = compileReply(data.reply);
+      }
+
+      const resultText = !data.sent ? "Gönderilemedi (bağlı değil)."
+        : data.timed_out ? "Gönderildi, yanıt gelmedi (timeout)."
+        : `Gönderildi → STM32: ${data.raw_reply}`;
+      const isError = !data.sent || data.timed_out || (data.reply && data.reply.err);
+      logToConsole(buttonName, compileCommand(data.command), resultText, !!isError);
+    }
+
     // --- Motor komutları ---
     async function sendStep() {
       const dir = parseInt(document.getElementById("step-dir").value);
       const delay = parseInt(document.getElementById("step-delay").value);
       const steps = parseInt(document.getElementById("step-count").value);
-      const task = `Step motoru sür: yön=${dir}, gecikme=${delay}µs, adım=${steps}`;
+      const accel = parseInt(document.getElementById("step-accel").value) || 0;
+      if (!(delay > 0) || !(steps > 0)) {
+        logToConsole("Step At", "Step komutu hazırla", "Geçersiz değer — gecikme ve adım 0'dan büyük olmalı, gönderilmedi.", true);
+        return;
+      }
+      if (accel < 0) {
+        logToConsole("Step At", "Step komutu hazırla", "İvme negatif olamaz, gönderilmedi.", true);
+        return;
+      }
       const r = await fetch("/motor/step", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dir, delay, steps }),
+        body: JSON.stringify({ dir, delay, steps, accel }),
       });
       const data = await r.json();
-      logToConsole("Step At", task,
-        data.sent ? "Komut STM32'ye gönderildi." : "Gönderilemedi (bağlı değil).", !data.sent);
+      renderCmdReply("Step At", data);
+      if (data.sent && data.command) onStepSent(data.command);  // hareket analizi grafiklerini başlat
     }
 
     async function stopStep() {
-      const task = "Step motoru anında durdur";
       const r = await fetch("/motor/stop", { method: "POST" });
       const data = await r.json();
-      logToConsole("Durdur", task,
-        data.sent ? "Komut gönderildi." : "Gönderilemedi (bağlı değil).", !data.sent);
+      renderCmdReply("Durdur", data);
     }
 
     async function sendDc(dir, label) {
-      const task = `DC motoru "${label}" yönüne sür`;
       const r = await fetch("/motor/dc", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dir }),
       });
       const data = await r.json();
-      logToConsole(label, task,
-        data.sent ? "Komut gönderildi." : "Gönderilemedi (bağlı değil).", !data.sent);
+      renderCmdReply(label, data);
     }
 
     async function resetEncoders() {
-      const task = "İki encoder sayacını da sıfırla";
       const r = await fetch("/motor/reset", { method: "POST" });
       const data = await r.json();
-      logToConsole("Encoder Sıfırla", task,
-        data.sent ? "Komut gönderildi." : "Gönderilemedi (bağlı değil).", !data.sent);
+      renderCmdReply("Encoder Sıfırla", data);
+      if (data.sent) {
+        // Firmware sayaçları 0'a döndü — istemci tarafındaki kayıt/grafik de
+        // eski taban değerlere göre yanlış görünmesin diye sıfırla.
+        recordStartMs = null;
+        encHistory = [];
+      }
     }
 
     // --- Canlı durum (WebSocket) ---
     // Sayfa yenilenmeden STM32'nin durumu (encoder, kalan adım vb.) sürekli akar.
+    // Alan sözlüğü: docs/protocol.md — {t,e1,e2,um1,um2,remaining,running,dc}.
     let previousConnectionState = null;
+    let lastStatus = {};
+    const DC_LABELS = { 0: "Duruyor", 1: "İleri", 2: "Geri" };
+
+    function renderStatus(status) {
+      const raw = document.getElementById("status-raw");
+      if (!status || !Object.keys(status).length) {
+        raw.textContent = "Henüz STM32'den veri gelmedi.";
+        return;
+      }
+      lastStatus = status;
+      document.getElementById("s-t").textContent = `${(status.t / 1000).toFixed(1)} sn`;
+      document.getElementById("s-run").textContent = status.running ? "HAREKET HALİNDE" : "Durgun";
+      document.getElementById("s-rem").textContent = `${status.remaining} darbe`;
+      document.getElementById("s-dc").textContent = DC_LABELS[status.dc] ?? `bilinmeyen (${status.dc})`;
+      // mm hesabı artık firmware'in um1/um2'sinden DEĞİL, istemcideki kendi teker
+      // çapı girişlerinden yapılıyor (firmware ikisi için tek ortak çap varsayıyordu).
+      const mm1PerCount = Math.PI * wheelMm("wheel-enc1") / ENC_COUNTS_PER_REV;
+      const mm2PerCount = Math.PI * wheelMm("wheel-enc2") / ENC_COUNTS_PER_REV;
+      document.getElementById("s-e1").textContent = `${status.e1} sayım (${(status.e1 * mm1PerCount).toFixed(2)} mm)`;
+      document.getElementById("s-e2").textContent = `${status.e2} sayım (${(status.e2 * mm2PerCount).toFixed(2)} mm)`;
+
+      // Büyük, ilk bakışta görünen okuma (panelin en üstünde) — aynı sayılar,
+      // sadece daha büyük/öne çıkan yerde. Tkinter arayüzündeki gibi.
+      document.getElementById("er-e1-count").textContent = `${status.e1} sayım`;
+      document.getElementById("er-e1-mm").textContent = `${(status.e1 * mm1PerCount).toFixed(2)} mm`;
+      document.getElementById("er-e2-count").textContent = `${status.e2} sayım`;
+      document.getElementById("er-e2-mm").textContent = `${(status.e2 * mm2PerCount).toFixed(2)} mm`;
+      raw.textContent = JSON.stringify(status);
+
+      // Step At'e basmadan önce operatör "zaten hareket halinde mi" görsün —
+      // yeni bir Step At komutu STM32 tarafında önceki hareketin üzerine yazıyor.
+      document.getElementById("running-warning").classList.toggle("show", !!status.running);
+    }
+
     function startWebSocket() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${proto}://${location.host}/ws/status`);
@@ -286,10 +488,15 @@
           logToConsole("Canlı Durum (WebSocket)", "STM32 bağlantı durumunu izle",
             data.is_connected ? "Bağlantı kuruldu, durum akışı başladı." : "Bağlantı yok/koptu.",
             !data.is_connected);
+          if (!data.is_connected) {
+            // Bağlantı koptuğunda eski durumu ekranda "hâlâ geçerliymiş" gibi
+            // bırakmayalım — bariz şekilde bayatladığını göster.
+            document.getElementById("status-raw").textContent = "Bağlantı koptu — aşağıdaki son bilinen durum artık güncel olmayabilir.";
+          }
         }
 
-        document.getElementById("status-display").textContent =
-          Object.keys(data.status).length ? JSON.stringify(data.status) : "Henüz STM32'den veri gelmedi.";
+        renderStatus(data.status);
+        if (data.status && Object.keys(data.status).length) pushEncoderSample(data.status);
       };
       ws.onclose = () => {
         // Sayfa kapanmadıysa (sunucu yeniden başladıysa vb.) birkaç saniye sonra tekrar dene.
@@ -297,9 +504,198 @@
       };
     }
 
-    // Sayfa açılır açılmaz: port listesini çek + canlı durum akışını başlat.
+    // ==========================================================================
+    //  HAREKET ANALİZİ — gönderilen komutun teorik eğrisi + encoder'dan gerçek eğri
+    //  (03-09-2026) İkisini aynı zaman eksenine göre çizip karşılaştırmak,
+    //  step kaybını ("komut gitti ama mil o kadar dönmedi") görsel olarak
+    //  yakalamak için — tam dünkü NEMA23 teşhisinin sistemleştirilmiş hali.
+    // ==========================================================================
+
+    // Firmware sabitleriyle BİREBİR aynı olmalı (main.c) — biri değişirse diğeri de.
+    const STEP_ANGLE_DEG = 1.8;          // mikroadım kapalı: 200 adım/tur
+    const ENC_COUNTS_PER_REV = 600 * 4;  // ENC_PPR * ENC_EDGE_MULTIPLIER
+
+    // --- Teker çapları: 3 ayrı değer (motor ≠ encoder1 ≠ encoder2 olabilir),
+    // tarayıcıda saklanır ki her oturumda yeniden girilmesin. ---
+    const WHEEL_IDS = ["wheel-motor", "wheel-enc1", "wheel-enc2"];
+    function loadWheelDiameters() {
+      WHEEL_IDS.forEach(id => {
+        const saved = localStorage.getItem("feedvision_" + id);
+        if (saved) document.getElementById(id).value = saved;
+      });
+    }
+    function saveWheelDiameter(id) {
+      localStorage.setItem("feedvision_" + id, document.getElementById(id).value);
+    }
+    function wheelMm(inputId) { return parseFloat(document.getElementById(inputId).value) || 40; }
+
+    // --- "Gönderilen Komut" eğrisi: main.c step_delay_for_remaining() ile
+    // BİREBİR aynı formül — firmware değişirse burası da güncellenmeli. ---
+    function stepDelayForRemaining(done, remaining, total, cruise, start, accel) {
+      if (accel === 0) return cruise;
+      if (done < accel) return start - Math.floor((start - cruise) * done / accel);
+      if (remaining <= accel) return start - Math.floor((start - cruise) * remaining / accel);
+      return cruise;
+    }
+
+    // Komutu darbe darbe simüle eder (main.c'nin ISR'da yaptığının aynısı,
+    // burada gerçek zamanda değil anında/toplu hesaplanıyor). steps büyükse
+    // (>4000) örnekleme seyreltilir, grafik/CPU boğulmasın diye.
+    function simulateSentCurve(cmd) {
+      const total = cmd.steps, cruise = cmd.delay, accel = cmd.accel || 0;
+      const start = Math.max(2000, cruise);  // main.c STEP_RAMP_START_DELAY_US
+      const stride = total > 4000 ? Math.ceil(total / 4000) : 1;
+
+      const tS = [], angleDeg = [];
+      let tUs = 0;
+      for (let i = 0; i < total; i++) {
+        tUs += stepDelayForRemaining(i, total - i, total, cruise, start, accel);
+        if (i % stride === 0 || i === total - 1) {
+          tS.push(tUs / 1e6);
+          angleDeg.push((i + 1) * STEP_ANGLE_DEG);
+        }
+      }
+      const mmPerDeg = Math.PI * wheelMm("wheel-motor") / 360;
+      const posMm = angleDeg.map(a => a * mmPerDeg);
+      const velMmS = centralDerivative(tS, posMm);
+      const accMmS2 = centralDerivative(tS, velMmS);
+      return { tS, posMm, velMmS, accMmS2 };
+    }
+
+    // Merkezi fark türevi — teorik eğri zaten pürüzsüz, ekstra yumuşatma gerekmez.
+    function centralDerivative(tS, y) {
+      const out = new Array(y.length).fill(0);
+      for (let i = 1; i < y.length - 1; i++) {
+        const dt = tS[i + 1] - tS[i - 1];
+        out[i] = dt > 0 ? (y[i + 1] - y[i - 1]) / dt : 0;
+      }
+      if (y.length > 1) {
+        out[0] = (tS[1] - tS[0]) > 0 ? (y[1] - y[0]) / (tS[1] - tS[0]) : 0;
+        out[y.length - 1] = out[y.length - 2];
+      }
+      return out;
+    }
+
+    // --- "Encoder Verisi" eğrisi: WS'ten gelen ham sayımlardan canlı üretilir ---
+    let recordStartMs = null, recordBaselineE1 = 0, recordBaselineE2 = 0;
+    let encHistory = [];               // [{tS, e1, e2}, ...] — "Step At" ile sıfırlanır
+    const ENC_HISTORY_MAX_S = 30;      // bellek/çizim yükünü sınırla
+
+    function pushEncoderSample(status) {
+      if (recordStartMs === null) return;  // henüz "Step At" ile kayıt başlamadı
+      const tS = (performance.now() - recordStartMs) / 1000;
+      if (tS > ENC_HISTORY_MAX_S) return;
+      encHistory.push({ tS, e1: status.e1, e2: status.e2 });
+    }
+
+    // Ardışık örnekler arası fark çok gürültülü (encoder 100ms'de birkaç sayım
+    // artıyor) — hız/ivmeyi ~300ms'lik kayan pencerede hesaplıyoruz.
+    function windowedDerivedSeries(history, field, baseline, mmPerCount) {
+      const tS = history.map(h => h.tS);
+      const posMm = history.map(h => Math.abs(h[field] - baseline) * mmPerCount);
+      const WINDOW_S = 0.3;
+      const vel = new Array(posMm.length).fill(0);
+      for (let i = 0; i < posMm.length; i++) {
+        let j = i;
+        while (j > 0 && (tS[i] - tS[j]) < WINDOW_S) j--;
+        const dt = tS[i] - tS[j];
+        vel[i] = dt > 0.02 ? (posMm[i] - posMm[j]) / dt : (i > 0 ? vel[i - 1] : 0);
+      }
+      const acc = new Array(vel.length).fill(0);
+      for (let i = 0; i < vel.length; i++) {
+        let j = i;
+        while (j > 0 && (tS[i] - tS[j]) < WINDOW_S) j--;
+        const dt = tS[i] - tS[j];
+        acc[i] = dt > 0.02 ? (vel[i] - vel[j]) / dt : (i > 0 ? acc[i - 1] : 0);
+      }
+      return { tS, posMm, vel, acc };
+    }
+
+    function redrawActualCharts() {
+      if (!encHistory.length) return;
+      const mm1 = Math.PI * wheelMm("wheel-enc1") / ENC_COUNTS_PER_REV;
+      const mm2 = Math.PI * wheelMm("wheel-enc2") / ENC_COUNTS_PER_REV;
+      const s1 = windowedDerivedSeries(encHistory, "e1", recordBaselineE1, mm1);
+      const s2 = windowedDerivedSeries(encHistory, "e2", recordBaselineE2, mm2);
+      drawChart("chart-real-pos", [{ t: s1.tS, y: s1.posMm, color: "#6cf" }, { t: s2.tS, y: s2.posMm, color: "#fb4" }]);
+      drawChart("chart-real-vel", [{ t: s1.tS, y: s1.vel, color: "#6cf" }, { t: s2.tS, y: s2.vel, color: "#fb4" }]);
+      drawChart("chart-real-acc", [{ t: s1.tS, y: s1.acc, color: "#6cf" }, { t: s2.tS, y: s2.acc, color: "#fb4" }]);
+    }
+
+    // Başarılı bir "Step At" gönderilince: teorik eğriyi hesaplayıp çiz, gerçek
+    // eğriyi de AYNI ana göre (t=0) sıfırla — iki grafik doğrudan karşılaştırılsın.
+    function onStepSent(cmd) {
+      const sent = simulateSentCurve(cmd);
+      drawChart("chart-sent-pos", [{ t: sent.tS, y: sent.posMm, color: "#6cf" }]);
+      drawChart("chart-sent-vel", [{ t: sent.tS, y: sent.velMmS, color: "#6cf" }]);
+      drawChart("chart-sent-acc", [{ t: sent.tS, y: sent.accMmS2, color: "#6cf" }]);
+
+      recordStartMs = performance.now();
+      recordBaselineE1 = lastStatus.e1 ?? 0;
+      recordBaselineE2 = lastStatus.e2 ?? 0;
+      encHistory = [];
+    }
+
+    // --- Bağımsız (kütüphanesiz) çizgi grafik çizici — internet olmadan da
+    // çalışsın diye (saha/Pi), harici bir grafik kütüphanesi yüklemiyoruz. ---
+    function drawChart(canvasId, series) {
+      const canvas = document.getElementById(canvasId);
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth || 300, h = canvas.clientHeight || 120;
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr; canvas.height = h * dpr;
+      }
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      const allT = series.flatMap(s => s.t), allY = series.flatMap(s => s.y);
+      if (!allT.length) {
+        ctx.fillStyle = "#555"; ctx.font = "11px sans-serif"; ctx.fillText("Veri yok", 8, h / 2);
+        return;
+      }
+      const tMax = Math.max(...allT, 0.001);
+      let yMin = Math.min(0, ...allY), yMax = Math.max(0.001, ...allY);
+      if (yMax - yMin < 1e-6) yMax = yMin + 1;
+
+      const padL = 42, padB = 16, padT = 6, padR = 6;
+      const plotW = w - padL - padR, plotH = h - padT - padB;
+      const px = t => padL + (t / tMax) * plotW;
+      const py = v => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+      ctx.strokeStyle = "#222"; ctx.fillStyle = "#666"; ctx.font = "10px monospace"; ctx.lineWidth = 1;
+      [0, 0.5, 1].forEach(f => {
+        const yy = padT + plotH * f;
+        ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w - padR, yy); ctx.stroke();
+        ctx.fillText((yMax - (yMax - yMin) * f).toFixed(1), 2, yy + 3);
+      });
+      ctx.fillText("0s", padL - 2, h - 2);
+      ctx.fillText(tMax.toFixed(1) + "s", w - padR - 24, h - 2);
+
+      if (yMin < 0) {
+        ctx.strokeStyle = "#444";
+        ctx.beginPath(); ctx.moveTo(padL, py(0)); ctx.lineTo(w - padR, py(0)); ctx.stroke();
+      }
+
+      series.forEach(s => {
+        if (!s.t.length) return;
+        ctx.strokeStyle = s.color; ctx.lineWidth = 1.5; ctx.beginPath();
+        s.t.forEach((tv, i) => {
+          const x = px(tv), y = py(s.y[i]);
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      });
+    }
+
+    // Gerçek eğriyi saniyede 5 kez tazele (WS 10Hz'de akıyor ama her tikte
+    // yeniden çizmek gereksiz — Pi'de de rahat çalışsın diye seyreltildi).
+    setInterval(redrawActualCharts, 200);
+
+    // Sayfa açılır açılmaz: port listesini çek + canlı durum akışını başlat + teker çaplarını geri yükle.
     refreshPorts();
     startWebSocket();
+    loadWheelDiameters();
   </script>
 </body>
 </html>
