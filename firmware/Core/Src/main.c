@@ -41,7 +41,7 @@
  * CubeMX'te User Label yazdıysan bu tanımlar zaten üretilmiştir ve aşağıdaki
  * #ifndef blokları atlanır. Yazmadıysan bunlar devreye girer.               */
 #ifndef STEP_Pin
-  #define STEP_Pin            GPIO_PIN_15
+  #define STEP_Pin            GPIO_PIN_10
   #define STEP_GPIO_Port      GPIOA
 #endif
 #ifndef DIR_Pin
