@@ -143,11 +143,29 @@
     #guide-body td { color: #ddd; }
     #guide-body .note { font-size: 12.5px; color: #888; margin-top: 4px; }
 
-    /* --- SoC sıcaklık paneli --- */
-    #temp-panel .chart-box { max-width: 420px; }
-    #temp-current { font-family: "SF Mono", Menlo, monospace; font-size: 22px; font-weight: 700; margin-bottom: 6px; }
-    #temp-error { color: #f77; font-size: 13px; margin-top: 6px; display: none; }
+    /* --- SoC sıcaklık paneli: sağ üst köşede sabit, küçük kare widget.
+       Sayfa kaydırılsa bile hep görünsün diye position: fixed — kritik sıcaklık
+       anlarında kaçırılmaması için. */
+    #temp-panel {
+      position: fixed; top: 12px; right: 12px; z-index: 500;
+      width: 150px; margin-top: 0; padding: 10px;
+    }
+    #temp-panel h2 { font-size: 11px; margin: 0 0 6px; line-height: 1.3; }
+    #temp-panel .chart-box { max-width: none; padding: 4px; margin-bottom: 0; }
+    #temp-panel .chart-box .chart-title { font-size: 9px; margin-bottom: 2px; }
+    #temp-panel .chart-box canvas { width: 100%; height: auto; aspect-ratio: 1 / 1; display: block; }
+    #temp-current { font-family: "SF Mono", Menlo, monospace; font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+    #temp-error { color: #f77; font-size: 10.5px; margin-top: 4px; display: none; line-height: 1.3; }
     #temp-error.show { display: block; }
+
+    /* Dar ekranda köşeye sabitlenmiş widget içerik/butonların üzerine biner —
+       normal akışa döndür, sayfanın en üstünde küçük bir panel olarak kalsın. */
+    @media (max-width: 900px) {
+      #temp-panel {
+        position: static; width: auto; margin-top: 32px; padding: 16px;
+      }
+      #temp-panel .chart-box canvas { max-width: 160px; }
+    }
 
     /* Kritik sıcaklık (>=85°C) — sayfa genelinde yanıp sönen kırmızı uyarı çerçevesi. */
     @keyframes temp-critical-pulse {
