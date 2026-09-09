@@ -19,6 +19,7 @@ gerektirir — bu Raspberry Pi OS dışında kurulamaz, Mac/Windows'ta
 """
 
 import asyncio
+import logging
 import re
 import subprocess
 import time
@@ -35,6 +36,38 @@ from serial_bridge import bridge
 from vision import CAMERA_NUMS, vision
 
 VALID_CAM_IDS = set(CAMERA_NUMS)  # {"cam1", "cam2"}
+
+
+class _PollingAccessLogFilter(logging.Filter):
+    """/system/temp ve /system/resources icin uvicorn erisim log satirlarini bastirir.
+
+    Web app'teki sicaklik/CPU/RAM panelleri bu iki endpoint'e saniyede birkac
+    kez fetch atiyor; bu da journalctl'e (ve oradan "Sistem Logları" pop-up'ina)
+    saniyede birkac satir rutin polling gurultusu dusuruyor ve gercek
+    hata/baslama-durma kayitlarini bulmayi imkansiz hale getiriyor. Baska hicbir
+    endpoint'in (motor, seri, kamera, /system/logs, /system/uptime, /vision/*
+    dahil) erisim logu ya da uygulama seviyesindeki hata/baslama-durma loglari
+    bu filtreden etkilenmez — sadece asagidaki iki path icin uvicorn.access
+    kaydini eler.
+    """
+
+    _SUPPRESSED_PATHS = ("/system/temp", "/system/resources")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn.access, path'i genelde record.args icinde (request_line olarak)
+        # tasir; olmadigi durumda getMessage() ile birlesmis mesaja da bakiyoruz —
+        # ikisi de kapsanmazsa gurultusuz her seyi (varsayilan) gecirmeye devam eder.
+        message = record.getMessage()
+        if any(path in message for path in _PollingAccessLogFilter._SUPPRESSED_PATHS):
+            return False
+        return True
+
+
+# Modul import edilir edilmez (fonksiyon govdesine gomulu degil, ust seviyede)
+# calisir — bu sayede hem systemd'nin `python3 -m uvicorn main:app` cagrisinda
+# hem de `python3 main.py`'nin kendi `uvicorn.run(...)` cagrisinda ayni sekilde
+# devreye girer, ayrica cagri yolundan bagimsizdir.
+logging.getLogger("uvicorn.access").addFilter(_PollingAccessLogFilter())
 
 # Modul import edilir edilmez (surec baslarken) sabitlenir — restart olunca
 # otomatik yenilenir, "kod guncellendi ama eski surec calismaya devam ediyordu"
