@@ -214,6 +214,16 @@
     </div>
   </div>
 
+  <!-- AP2 ekran-okuma proof-of-concept test paneli — bu nihai UI degil,
+       ROI/OCR/renk akisinin uctan uca calistigini gormek icin gecici bir
+       arac. ROI koordinatlari (screen_reader.py DEFAULT_ROI) saha
+       fotograflari gelene kadar sabit/test amaclidir. -->
+  <div class="panel" id="ap2-read-test-panel">
+    <h2>AP2 Ekran Okuma — Test (proof of concept)</h2>
+    <button onclick="readTestAp2()">AP2 Ekranını Oku (Test)</button>
+    <div id="ap2-read-test-result">Henüz okunmadı.</div>
+  </div>
+
   <div id="side-panels">
     <div class="panel" id="temp-panel">
       <h2>SoC Sıcaklığı (Raspberry Pi)</h2>
@@ -550,6 +560,40 @@
       logToConsole(buttonName, task,
         `Sunucu 200 OK (content-type: ${contentType}${contentLength ? `, ${contentLength} byte` : ""}) — akış açıldı.`,
         false);
+    }
+
+    // AP2 ekran-okuma proof-of-concept — GET /vision/cam2/read-test'i çağırır,
+    // ROI/OCR metni/ortalama HSV rengini hem küçük panelde hem Konsol'da
+    // gösterir. Bu nihai operatör UI'ı değil, geliştirme aşaması test aracı.
+    async function readTestAp2() {
+      const resultBox = document.getElementById("ap2-read-test-result");
+      const buttonName = "AP2 Ekranını Oku (Test)";
+      const task = "GET /vision/cam2/read-test";
+      resultBox.textContent = "Okunuyor…";
+      let response;
+      try {
+        response = await fetch("/vision/cam2/read-test");
+      } catch (e) {
+        resultBox.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        const detail = data?.detail ?? (data ? JSON.stringify(data) : "boş yanıt");
+        resultBox.textContent = `Sunucu ${response.status}: ${detail}`;
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      const [h, s, v] = data.avg_color_hsv;
+      resultBox.textContent =
+        `ROI: [${data.roi.join(", ")}]  |  Metin: "${data.text || "(boş)"}"  |  HSV: (${h.toFixed(1)}, ${s.toFixed(1)}, ${v.toFixed(1)})`;
+      logToConsole(buttonName, task, `Sunucu 200 OK — ${JSON.stringify(data)}`, false);
     }
 
     // ==========================================================================
