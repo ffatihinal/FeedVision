@@ -152,6 +152,7 @@ def vision_read_test(cam_id: str):
                 "name": roi_def["name"],
                 "roi": list(result.roi),
                 "text": result.text,
+                "ocr_error": result.ocr_error,
                 "avg_color_hsv": list(result.avg_color_hsv),
             }
         )

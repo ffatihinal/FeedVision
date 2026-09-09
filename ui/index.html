@@ -626,14 +626,24 @@
         // kullanılıyor (hiçbir alan HTML olarak yorumlanmıyor).
         results.forEach((r) => {
           const [h, s, v] = r.avg_color_hsv;
-          const text = r.text || "(boş)";
           const line = document.createElement("div");
           const nameEl = document.createElement("b");
           nameEl.textContent = r.name;
           line.appendChild(nameEl);
+          if (r.ocr_error) {
+            // OCR hic calisamadi (pytesseract/Tesseract eksik vb.) — bunu
+            // "metin bulunamadi" ile karistirmamak icin ayri, kirmizi gosterilir.
+            const errEl = document.createElement("span");
+            errEl.style.color = "#c0392b";
+            errEl.textContent = ` : OCR hatası: ${r.ocr_error}`;
+            line.appendChild(errEl);
+          } else {
+            const text = r.text || "(metin bulunamadı)";
+            line.appendChild(document.createTextNode(`: "${text}"`));
+          }
           line.appendChild(
             document.createTextNode(
-              `: "${text}"  |  HSV: (${h.toFixed(1)}, ${s.toFixed(1)}, ${v.toFixed(1)})`
+              `  |  HSV: (${h.toFixed(1)}, ${s.toFixed(1)}, ${v.toFixed(1)})`
             )
           );
           resultBox.appendChild(line);

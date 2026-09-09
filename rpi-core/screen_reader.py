@@ -42,11 +42,19 @@ DEFAULT_ROI: tuple[int, int, int, int] = (340, 160, 600, 400)
 
 @dataclass
 class ScreenReadResult:
-    """Bir ROI okumasinin sonucu — kirpilan bolgenin OCR metni + ortalama rengi."""
+    """Bir ROI okumasinin sonucu — kirpilan bolgenin OCR metni + ortalama rengi.
+
+    ocr_error: OCR gercekten calisip bos metin bulmasi (normal/beklenen —
+    goruntude yazi olmayabilir) ile OCR'in hic calisamamasi (pytesseract
+    kurulu degil / Tesseract binary'si eksik / cagri exception firlatti)
+    arasindaki farki tasir. None ise OCR sorunsuz calisti demektir (text
+    bos da olabilir, dolu da).
+    """
 
     roi: tuple[int, int, int, int]
     avg_color_hsv: tuple[float, float, float]
     text: str
+    ocr_error: str | None = None
 
 
 def crop_roi(frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI) -> np.ndarray:
@@ -79,32 +87,35 @@ def average_color_hsv(image: np.ndarray) -> tuple[float, float, float]:
     return (float(mean[0]), float(mean[1]), float(mean[2]))
 
 
-def read_text_ocr(image: np.ndarray) -> str:
-    """Kirpilan ROI goruntusunu Tesseract'tan gecirip metni doner.
+def read_text_ocr(image: np.ndarray) -> tuple[str, str | None]:
+    """Kirpilan ROI goruntusunu Tesseract'tan gecirip (metin, hata) tuple'i doner.
 
-    pytesseract kurulu degilse veya Tesseract binary'si (sistem paketi)
-    bulunamazsa bos string doner — cagiran taraf (endpoint) bunu "OCR
-    calismadi" olarak yorumlayabilir, servis cokmez. Bos goruntude de
-    (boyut 0) Tesseract'a hic girmeden bos string donulur.
+    Uc durum ayirt edilir:
+    - OCR calisti, metin bulunamadi -> ("", None) — normal/beklenen, hata degil.
+    - pytesseract (Python paketi) kurulu degil -> ("", "acik sebep mesaji").
+    - Tesseract binary'si (sistem paketi) bulunamadi / cagri patladi ->
+      ("", gercek exception mesaji).
+    Bos goruntude (boyut 0) Tesseract'a hic girmeden ("", None) donulur —
+    bu OCR'in basarisizligi degil, zaten okunacak goruntu yok demektir.
     """
     if image.size == 0:
-        return ""
+        return "", None
     if not PYTESSERACT_AVAILABLE:
-        return ""
+        return "", "pytesseract Python paketi kurulu degil (pip install pytesseract)"
     # Tesseract renkli goruntude de calisir ama gri tonlama + upsample
     # kucuk/HMI fontlarinda dogruluk icin genelde daha iyi sonuc verir.
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
     try:
         text = pytesseract.image_to_string(upscaled)
-    except Exception:  # noqa: BLE001 — Tesseract binary eksik/izin hatasi vb. onceden bilinmiyor
-        return ""
-    return text.strip()
+    except Exception as exc:  # noqa: BLE001 — Tesseract binary eksik/izin hatasi vb. onceden bilinmiyor
+        return "", f"Tesseract calistirilamadi: {exc}"
+    return text.strip(), None
 
 
 def read_roi(frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI) -> ScreenReadResult:
     """ROI'yi kirpar, ortalama HSV rengini ve OCR metnini hesaplar — bu modulun tek giris noktasi."""
     cropped = crop_roi(frame, roi)
     hsv_color = average_color_hsv(cropped)
-    text = read_text_ocr(cropped)
-    return ScreenReadResult(roi=roi, avg_color_hsv=hsv_color, text=text)
+    text, ocr_error = read_text_ocr(cropped)
+    return ScreenReadResult(roi=roi, avg_color_hsv=hsv_color, text=text, ocr_error=ocr_error)
