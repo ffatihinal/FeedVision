@@ -135,12 +135,12 @@
     <div class="camera-block">
       <button onclick="toggleCamera('cam1')">AP1 – Chamber Aç/Kapat</button>
       <br>
-      <img id="camera-cam1" src="/vision/cam1/stream">
+      <img id="camera-cam1">
     </div>
     <div class="camera-block">
       <button onclick="toggleCamera('cam2')">AP2 – Ekran Aç/Kapat</button>
       <br>
-      <img id="camera-cam2" src="/vision/cam2/stream">
+      <img id="camera-cam2">
     </div>
   </div>
 
@@ -317,53 +317,57 @@
     // çeker; "kapatma" burada sadece görsel gizleme, sunucu tarafı akışı
     // (/vision/{cam_id}/stream) ileride gerçekten durdurmak istersek ayrı
     // bir stop uç noktası eklenir (bugünkü MVP kapsamı dışında).
-    function toggleCamera(id) {
+    //
+    // <img src=...> ile direkt akışı açmak Konsol'a gerçek sunucu hatasını
+    // getirmiyordu (tarayıcı sadece load/error DOM event'i veriyor, response
+    // body'sine erişim yok) — bu yüzden <img>'e src vermeden ÖNCE gerçek bir
+    // fetch('/vision/{id}/snapshot') isteği atıp GERÇEK status code + body'yi
+    // okuyoruz. Konsol'da görünen her satır bu fetch'in gerçek sonucu.
+    async function toggleCamera(id) {
       const img = document.getElementById("camera-" + id);
-      const isNowOpen = img.classList.toggle("open");
-      const task = `Kamera ${id} görüntüsünü ${isNowOpen ? "göster (MJPEG akışını başlat)" : "gizle"}`;
+      const isCurrentlyOpen = img.classList.contains("open");
+      const buttonName = `Kamera ${id} Aç/Kapat`;
 
-      if (!isNowOpen) {
-        logToConsole(`Kamera ${id} Aç/Kapat`, task, "Görüntü gizlendi.", false);
+      if (isCurrentlyOpen) {
+        img.classList.remove("open");
+        img.removeAttribute("src");
+        logToConsole(buttonName, `Kamera ${id} görüntüsünü gizle`, "Görüntü gizlendi.", false);
         return;
       }
 
-      // Görüntü gösterilmeye çalışılıyor — gerçekten yüklenip yüklenmediğini
-      // (kamera var mı, sunucu akış veriyor mu) bir kereliğine dinleyip
-      // sonucu konsola yazalım. Sunucu boş bir akış açıp hiç kapatmazsa
-      // (kamera bulunamadı durumunda main.py'nin generator'ı böyle davranıyor)
-      // ne "load" ne "error" hiç tetiklenmeyebilir — bu yüzden 3 saniyelik
-      // bir zaman aşımı (timeout) da ekliyoruz, konsol sonsuza kadar
-      // "bekleniyor" demesin.
-      let settled = false;
-      const cleanup = () => {
-        img.removeEventListener("load", onLoad);
-        img.removeEventListener("error", onError);
-        clearTimeout(timeoutId);
-      };
-      const onLoad = () => {
-        if (settled) return;
-        settled = true;
-        logToConsole(`Kamera ${id} Aç/Kapat`, task, "Görüntü akışı başladı, kare geliyor.", false);
-        cleanup();
-      };
-      const onError = () => {
-        if (settled) return;
-        settled = true;
-        logToConsole(`Kamera ${id} Aç/Kapat`, task,
-          "Görüntü yüklenemedi (kamera bağlı değil, izin verilmemiş veya sunucu akış veremiyor).", true);
-        cleanup();
-      };
-      const timeoutId = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        logToConsole(`Kamera ${id} Aç/Kapat`, task,
-          "3 saniyede kare gelmedi (zaman aşımı) — kamera muhtemelen bulunamadı/erişilemiyor.", true);
-        cleanup();
-      }, 3000);
-      img.addEventListener("load", onLoad);
-      img.addEventListener("error", onError);
+      const task = `Kamera ${id} görüntüsünü göster (önce /vision/${id}/snapshot ile kamera kontrolü)`;
+      let response;
+      try {
+        response = await fetch(`/vision/${id}/snapshot`);
+      } catch (e) {
+        // Sunucuya hiç ulaşılamadı (connection refused, DNS, ağ kopuk vb.) —
+        // bu bir HTTP hatası DEĞİL, fetch'in kendisi reddedildi.
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
 
-      logToConsole(`Kamera ${id} Aç/Kapat`, task, "İstek gönderildi, sunucudan cevap bekleniyor…", false);
+      if (!response.ok) {
+        // Sunucu cevap verdi ama hata kodu döndü — body'yi (gerçek detail
+        // alanını) oku, uydurma metin YAZMA.
+        let detail;
+        try {
+          const data = await response.json();
+          detail = data.detail ?? JSON.stringify(data);
+        } catch {
+          detail = await response.text();
+        }
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+
+      // Snapshot 200 döndü → kamera gerçekten çalışıyor, şimdi canlı akışı aç.
+      const contentType = response.headers.get("content-type") || "bilinmiyor";
+      const contentLength = response.headers.get("content-length");
+      img.src = `/vision/${id}/stream?_=${Date.now()}`;  // cache'e takılmasın
+      img.classList.add("open");
+      logToConsole(buttonName, task,
+        `Sunucu 200 OK (content-type: ${contentType}${contentLength ? `, ${contentLength} byte` : ""}) — akış açıldı.`,
+        false);
     }
 
     // ==========================================================================
