@@ -6,6 +6,13 @@ Description=FeedVision RPi Core (FastAPI/uvicorn)
 # yapiliyor (bkz. /serial/connect), boot aninda seri porta ihtiyac yok.
 After=network-online.target systemd-udev-settle.service
 Wants=network-online.target
+# Ard arda hizli crash-loop'ta CPU'yu yakip lokmayi disari atmasin diye
+# sinirlama: 10 dakikada 10'dan fazla basarisiz baslatmada systemd durur,
+# `systemctl status feedvision` ile sebep gorulur. (Bu iki anahtar [Unit]
+# altinda olmali -- [Service] altina yazilirsa systemd sessizce yok sayar,
+# "Unknown key" uyarisi verir ve koruma calismaz.)
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -15,11 +22,6 @@ WorkingDirectory=__APP_DIR__/rpi-core
 ExecStart=__APP_DIR__/rpi-core/.venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=3
-# Ard arda hizli crash-loop'ta CPU'yu yakip lokmayi disari atmasin diye
-# sinirlama: 10 dakikada 10'dan fazla basarisiz baslatmada systemd durur,
-# `systemctl status feedvision` ile sebep gorulur.
-StartLimitIntervalSec=600
-StartLimitBurst=10
 
 # journald'e yazsin (loglar `journalctl -u feedvision -f` ile izlenir)
 StandardOutput=journal
