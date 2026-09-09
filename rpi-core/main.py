@@ -34,9 +34,10 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from screen_reader import DEFAULT_ROI, read_roi
+import roi_store
+from screen_reader import read_roi
 from serial_bridge import bridge
-from vision import CAMERA_NUMS, vision
+from vision import CAMERA_NUMS, STREAM_SIZE, vision
 
 VALID_CAM_IDS = set(CAMERA_NUMS)  # {"cam1", "cam2"}
 
@@ -124,29 +125,89 @@ def vision_snapshot(cam_id: str):
 
 @app.get("/vision/{cam_id}/read-test")
 def vision_read_test(cam_id: str):
-    """AP2 ekran-okuma proof-of-concept — tek kare al, sabit test ROI'sini
-    kırp, hem OCR (Tesseract) hem ortalama renk (HSV) sonucu döner.
+    """AP2 ekran-okuma — tek kare al, o kamera icin KAYITLI TUM ROI'leri
+    sirayla kirpar, her biri icin hem OCR (Tesseract) hem ortalama renk
+    (HSV) sonucu doner.
 
-    ÖNEMLİ: DEFAULT_ROI (screen_reader.py) şimdilik GEÇİCİ/test amaçlı sabit
-    koordinat — gerçek AP2 HMI ekranının piksel koordinatları saha
-    fotoğrafları gelince (bkz. Azobex_WP1 saha notları) güncellenecek.
-    Bugün için kamera karşısına tutulan herhangi bir telefon/ekran görüntüsü
-    ile uçtan uca akışı doğrulamak yeterli.
+    Kayitli ROI yoksa (henuz /vision/{cam_id}/rois ile hic cizilmemis)
+    hata degil, bos sonuc listesi doner — bu normal/beklenen bir durum.
     """
     if cam_id not in VALID_CAM_IDS:
         raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    rois = roi_store.get_rois(cam_id)
+    if not rois:
+        return {"results": []}
     jpg = vision.capture_jpeg(cam_id)
     if jpg is None:
         raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı")
     frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise HTTPException(status_code=500, detail="Kare çözümlenemedi (JPEG decode hatası)")
-    result = read_roi(frame, DEFAULT_ROI)
-    return {
-        "roi": list(result.roi),
-        "text": result.text,
-        "avg_color_hsv": list(result.avg_color_hsv),
-    }
+    results = []
+    for roi_def in rois:
+        roi_tuple = (roi_def["x"], roi_def["y"], roi_def["w"], roi_def["h"])
+        result = read_roi(frame, roi_tuple)
+        results.append(
+            {
+                "name": roi_def["name"],
+                "roi": list(result.roi),
+                "text": result.text,
+                "avg_color_hsv": list(result.avg_color_hsv),
+            }
+        )
+    return {"results": results}
+
+
+# ==============================================================================
+#  ROI YONETIMI — kamera basina adlandirilmis, kalici ROI listesi
+#  (operatorun canvas uzerinde elle cizdigi dikdortgenler; bkz. roi_store.py)
+# ==============================================================================
+
+
+class RoiDef(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    w: int = Field(gt=0)
+    h: int = Field(gt=0)
+
+
+class RoiListPayload(BaseModel):
+    rois: list[RoiDef]
+
+
+@app.get("/vision/{cam_id}/rois")
+def get_rois(cam_id: str):
+    """Kamera icin kayitli ROI listesini doner (hic cizilmemisse bos liste)."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    return {"rois": roi_store.get_rois(cam_id)}
+
+
+@app.post("/vision/{cam_id}/rois")
+def set_rois(cam_id: str, payload: RoiListPayload):
+    """Kamera icin TUM ROI listesini degistirir (replace-all).
+
+    Dogrulama: koordinatlar zaten Pydantic ile pozitif/sifirdan buyuk
+    zorunlu kilinir; burada ayrica her ROI'nin STREAM_SIZE (kameranin
+    gercek kare boyutu) sinirlari icinde kaldigi kontrol edilir — asiri
+    buyuk/kare disina tasan bir ROI 400 ile reddedilir.
+    """
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    frame_w, frame_h = STREAM_SIZE
+    for roi in payload.rois:
+        if roi.x + roi.w > frame_w or roi.y + roi.h > frame_h:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"ROI '{roi.name}' kare sınırlarını aşıyor "
+                    f"(kare: {frame_w}x{frame_h}, ROI: x={roi.x}, y={roi.y}, w={roi.w}, h={roi.h})"
+                ),
+            )
+    rois_as_dicts = [r.model_dump() for r in payload.rois]
+    roi_store.save_rois(cam_id, rois_as_dicts)
+    return {"success": True, "rois": roi_store.get_rois(cam_id)}
 
 
 # ==============================================================================
