@@ -155,7 +155,7 @@
     <div class="logs-header">
       <div>
         <h2>Sistem Logları — feedvision servisi</h2>
-        <div class="sub">journalctl kaydı · en eski üstte, en yeni altta</div>
+        <div class="sub">Servis kayıtları · en eski üstte, en yeni altta</div>
       </div>
       <div class="logs-actions">
         <button onclick="loadSystemLogs()">Yenile</button>
@@ -179,7 +179,7 @@
   </div>
 
   <div class="panel">
-    <h2>Motor Kontrolü (STM32 köprüsü)</h2>
+    <h2>Motor Kontrolü</h2>
 
     <div class="encoder-readouts">
       <div class="encoder-readout">
@@ -237,7 +237,7 @@
         <div class="explain" id="out-explain">Henüz komut gönderilmedi.</div>
       </div>
       <div class="io-box" id="in-box">
-        <h3>STM32 Yanıtı</h3>
+        <h3>Kontrol Kartı Yanıtı</h3>
         <div class="raw" id="in-raw">—</div>
         <div class="explain" id="in-explain">Henüz yanıt yok.</div>
       </div>
@@ -249,7 +249,7 @@
       <div id="status-table">
         <div class="field">Süre (kart açık kalma):</div><div class="value" id="s-t">—</div>
         <div class="field">Step motor:</div><div class="value" id="s-run">—</div>
-        <div class="field">Kalan darbe (remaining):</div><div class="value" id="s-rem">—</div>
+        <div class="field">Kalan darbe:</div><div class="value" id="s-rem">—</div>
         <div class="field">DC motor:</div><div class="value" id="s-dc">—</div>
         <div class="field">Encoder 1:</div><div class="value" id="s-e1">—</div>
         <div class="field">Encoder 2:</div><div class="value" id="s-e2">—</div>
@@ -270,7 +270,7 @@
       <input id="wheel-enc2" type="number" value="40" min="1" step="0.1" oninput="saveWheelDiameter('wheel-enc2')">
     </div>
     <div class="row-group" style="margin-top:-8px">
-      <label style="font-size:12.5px;color:#888">Değerler tarayıcıda saklanır (bu bilgisayara özel). Motor çapı soldaki "Gönderilen Komut" grafiğini, encoder çapları sağdaki "Encoder Verisi" grafiğini besler — firmware'in kendi um1/um2 alanı ARTIK KULLANILMIYOR (ikisi için tek sabit çap varsayıyordu, farklıysa yanlış çıkardı).</label>
+      <label style="font-size:12.5px;color:#888">Bu değerler yalnızca bu tarayıcıda saklanır. Motor teker çapı "Gönderilen Komut" grafiğini, encoder teker çapları "Encoder Verisi" grafiğini hesaplamakta kullanılır.</label>
     </div>
 
     <div class="motion-grid">
@@ -423,11 +423,11 @@
         body.className = "";
         body.textContent = text.trim() ? text : "(kayıt yok)";
         body.scrollTop = body.scrollHeight;  // en yeni satır altta — otomatik en alta kaydır
-        logToConsole("Sistem Logları", "journalctl kayıtlarını getir", "Loglar yüklendi.", false);
+        logToConsole("Sistem Logları", "Sistem kayıtlarını getir", "Loglar yüklendi.", false);
       } catch (e) {
         body.className = "error";
         body.textContent = `Loglar alınamadı: ${e}`;
-        logToConsole("Sistem Logları", "journalctl kayıtlarını getir", `Başarısız: ${e}`, true);
+        logToConsole("Sistem Logları", "Sistem kayıtlarını getir", `Başarısız: ${e}`, true);
       }
     }
 
@@ -514,7 +514,7 @@
 
     async function connectSerial() {
       const port = document.getElementById("port-select").value;
-      const task = `STM32'ye ${port} portundan bağlan`;
+      const task = `Kontrol kartına ${port} portundan bağlan`;
       if (!port) {
         logToConsole("Bağlan", task, "Önce bir port seçmelisin (Yenile'ye bas).", true);
         return;
@@ -530,7 +530,7 @@
     }
 
     async function disconnectSerial() {
-      const task = "STM32 bağlantısını kapat";
+      const task = "Kontrol kartı bağlantısını kapat";
       await fetch("/serial/disconnect", { method: "POST" });
       logToConsole("Bağlantıyı Kes", task, "Bağlantı kapatıldı.", false);
     }
@@ -554,8 +554,8 @@
     }
     function compileReply(reply) {
       if (!reply) return "—";
-      if (reply.ok) return `STM32 kabul etti ve uyguladı (ok: "${reply.ok}").`;
-      if (reply.err) return `STM32 REDDETTİ — ${reply.err}`;
+      if (reply.ok) return `Kontrol kartı kabul etti ve uyguladı (ok: "${reply.ok}").`;
+      if (reply.err) return `Kontrol kartı reddetti — ${reply.err}`;
       return "Tanınmayan yanıt biçimi.";
     }
     // Giden/gelen paneli günceller + konsola tek satırlık özet yazar; her motor
@@ -573,7 +573,7 @@
         document.getElementById("in-explain").textContent = "Komut hiç gönderilemedi.";
       } else if (data.timed_out) {
         document.getElementById("in-raw").textContent = "(300ms içinde yanıt gelmedi)";
-        document.getElementById("in-explain").textContent = "STM32 yanıt vermedi — kablo/bağlantı sorunu olabilir.";
+        document.getElementById("in-explain").textContent = "Kontrol kartı yanıt vermedi — kablo/bağlantı sorunu olabilir.";
       } else {
         document.getElementById("in-raw").textContent = data.raw_reply || "—";
         document.getElementById("in-explain").textContent = compileReply(data.reply);
@@ -581,7 +581,7 @@
 
       const resultText = !data.sent ? "Gönderilemedi (bağlı değil)."
         : data.timed_out ? "Gönderildi, yanıt gelmedi (timeout)."
-        : `Gönderildi → STM32: ${data.raw_reply}`;
+        : `Gönderildi → Kontrol kartı: ${data.raw_reply}`;
       const isError = !data.sent || data.timed_out || (data.reply && data.reply.err);
       logToConsole(buttonName, compileCommand(data.command), resultText, !!isError);
     }
@@ -646,7 +646,7 @@
     function renderStatus(status) {
       const raw = document.getElementById("status-raw");
       if (!status || !Object.keys(status).length) {
-        raw.textContent = "Henüz STM32'den veri gelmedi.";
+        raw.textContent = "Henüz kontrol kartından veri gelmedi.";
         return;
       }
       lastStatus = status;
@@ -688,7 +688,7 @@
         // her 100ms'de tekrar tekrar yazmasın diye önceki durumla kıyaslıyoruz.
         if (previousConnectionState !== data.is_connected) {
           previousConnectionState = data.is_connected;
-          logToConsole("Canlı Durum (WebSocket)", "STM32 bağlantı durumunu izle",
+          logToConsole("Canlı Durum (WebSocket)", "Kontrol kartı bağlantı durumunu izle",
             data.is_connected ? "Bağlantı kuruldu, durum akışı başladı." : "Bağlantı yok/koptu.",
             !data.is_connected);
           if (!data.is_connected) {
