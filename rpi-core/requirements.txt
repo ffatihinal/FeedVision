@@ -5,6 +5,13 @@ uvicorn[standard]>=0.29
 opencv-python>=4.9
 pyserial>=3.5
 psutil>=5.9
+pytesseract>=0.3.10
+
+# pytesseract, Tesseract OCR'in kendisini (sistem binary'si) DEGIL, ona giden
+# Python sarmalayicisini kurar — asil OCR motoru ayrica apt ile gelmeli:
+#   sudo apt install -y tesseract-ocr
+# picamera2 ile ayni pattern: pip paketi burada, sistem paketi Pi'de elle.
+# Mac'te gelistirme icin: brew install tesseract
 
 # picamera2 (Pi Camera / CSI akisi icin, vision.py) sadece Raspberry Pi OS'te
 # calisir, libcamera'ya bagli — pip ile Mac/Windows'ta kurulamaz. Pi'de:
