@@ -588,7 +588,10 @@
     }
 
     // AP2 ekran-okuma — GET /vision/cam2/read-test'i çağırır, kayıtlı HER
-    // ROI için ayrı bir satır (isim/OCR metni/ortalama HSV rengi) gösterir.
+    // ROI için ayrı bir satır (isim/OCR metni/ortalama RGB rengi) gösterir.
+    // İç hesaplama (alarm mantığı için) HSV kalıyor — ışık/parlaklık
+    // değişiminden daha az etkileniyor (bkz. screen_reader.py docstring) —
+    // ama operatör için ekranda RGB gösteriliyor, insan için daha okunaklı.
     // Bu nihai operatör UI'ı değil, geliştirme/kurulum aşaması test aracı.
     async function readTestAp2() {
       const resultBox = document.getElementById("ap2-read-test-result");
@@ -625,7 +628,7 @@
         // stored XSS'e açık olurdu; bu yüzden DOM API + textContent
         // kullanılıyor (hiçbir alan HTML olarak yorumlanmıyor).
         results.forEach((r) => {
-          const [h, s, v] = r.avg_color_hsv;
+          const [red, green, blue] = r.avg_color_rgb;
           const line = document.createElement("div");
           const nameEl = document.createElement("b");
           nameEl.textContent = r.name;
@@ -643,9 +646,23 @@
           }
           line.appendChild(
             document.createTextNode(
-              `  |  HSV: (${h.toFixed(1)}, ${s.toFixed(1)}, ${v.toFixed(1)})`
+              `  |  RGB: (${red.toFixed(0)}, ${green.toFixed(0)}, ${blue.toFixed(0)})`
             )
           );
+          // Küçük renk örneği kutusu — hexe çevirip background-color olarak
+          // basıyoruz, RGB rakamlarını gözle karşılaştırmaktan daha sezgisel.
+          const toHex = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+          const hex = `#${toHex(red)}${toHex(green)}${toHex(blue)}`;
+          const swatch = document.createElement("span");
+          swatch.style.display = "inline-block";
+          swatch.style.width = "14px";
+          swatch.style.height = "14px";
+          swatch.style.marginLeft = "6px";
+          swatch.style.verticalAlign = "middle";
+          swatch.style.border = "1px solid #888";
+          swatch.style.backgroundColor = hex;
+          swatch.title = hex;
+          line.appendChild(swatch);
           resultBox.appendChild(line);
         });
       }

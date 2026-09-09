@@ -154,6 +154,7 @@ def vision_read_test(cam_id: str):
                 "text": result.text,
                 "ocr_error": result.ocr_error,
                 "avg_color_hsv": list(result.avg_color_hsv),
+                "avg_color_rgb": list(result.avg_color_rgb),
             }
         )
     return {"results": results}

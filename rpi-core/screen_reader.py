@@ -53,6 +53,7 @@ class ScreenReadResult:
 
     roi: tuple[int, int, int, int]
     avg_color_hsv: tuple[float, float, float]
+    avg_color_rgb: tuple[float, float, float]
     text: str
     ocr_error: str | None = None
 
@@ -87,6 +88,20 @@ def average_color_hsv(image: np.ndarray) -> tuple[float, float, float]:
     return (float(mean[0]), float(mean[1]), float(mean[2]))
 
 
+def average_color_rgb(image: np.ndarray) -> tuple[float, float, float]:
+    """Bir goruntunun ortalama rengini (R, G, B) 0-255 araliginda doner — insan icin okunakli.
+
+    Dogrudan ham BGR crop uzerinden cv2.mean ile hesaplanir (kanal sirasi RGB'ye
+    cevrilir); HSV sonucundan geri donusturulmez — ortalamanin ortalamasi
+    (HSV->RGB) matematiksel olarak farkli/hatali bir sonuc verir, bu yuzden
+    bagimsiz olarak ayrica hesaplaniyor.
+    """
+    if image.size == 0:
+        return (0.0, 0.0, 0.0)
+    mean = cv2.mean(image)  # BGR sirasinda (B, G, R, alpha) doner
+    return (float(mean[2]), float(mean[1]), float(mean[0]))
+
+
 def read_text_ocr(image: np.ndarray) -> tuple[str, str | None]:
     """Kirpilan ROI goruntusunu Tesseract'tan gecirip (metin, hata) tuple'i doner.
 
@@ -114,8 +129,15 @@ def read_text_ocr(image: np.ndarray) -> tuple[str, str | None]:
 
 
 def read_roi(frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI) -> ScreenReadResult:
-    """ROI'yi kirpar, ortalama HSV rengini ve OCR metnini hesaplar — bu modulun tek giris noktasi."""
+    """ROI'yi kirpar, ortalama HSV+RGB rengini ve OCR metnini hesaplar — bu modulun tek giris noktasi."""
     cropped = crop_roi(frame, roi)
     hsv_color = average_color_hsv(cropped)
+    rgb_color = average_color_rgb(cropped)
     text, ocr_error = read_text_ocr(cropped)
-    return ScreenReadResult(roi=roi, avg_color_hsv=hsv_color, text=text, ocr_error=ocr_error)
+    return ScreenReadResult(
+        roi=roi,
+        avg_color_hsv=hsv_color,
+        avg_color_rgb=rgb_color,
+        text=text,
+        ocr_error=ocr_error,
+    )
