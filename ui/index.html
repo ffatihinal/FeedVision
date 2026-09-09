@@ -98,9 +98,9 @@
     }
     .logs-header h2 { margin: 0; font-size: 16px; }
     .logs-header .sub { font-size: 12px; color: #888; margin-top: 2px; }
-    .logs-actions button { font-size: 13px; padding: 8px 14px; margin: 0 0 0 8px; }
-    .logs-actions .close-btn { background: #555; }
-    .logs-actions .close-btn:active { background: #444; }
+    .logs-actions button, .guide-header .close-btn { font-size: 13px; padding: 8px 14px; margin: 0 0 0 8px; }
+    .logs-actions .close-btn, .guide-header .close-btn { background: #555; }
+    .logs-actions .close-btn:active, .guide-header .close-btn:active { background: #444; }
     #logs-body {
       margin: 0; padding: 14px 18px; overflow-y: auto; max-height: calc(82vh - 60px);
       font-family: "SF Mono", Menlo, monospace; font-size: 12.5px; line-height: 1.5;
@@ -108,6 +108,40 @@
     }
     #logs-body.loading { color: #888; }
     #logs-body.error { color: #f77; }
+
+    /* --- Konsol başlığı yanındaki küçük butonlar --- */
+    .console-header { display: flex; align-items: center; gap: 10px; margin-top: 32px; flex-wrap: wrap; }
+    .console-header #console-title { margin-top: 0; }
+    .console-header button { font-size: 12.5px; padding: 6px 12px; margin: 0; }
+    #console-clear-btn { background: #555; }
+    #console-clear-btn:active { background: #444; }
+    #console-guide-btn { background: #446; }
+    #console-guide-btn:active { background: #335; }
+
+    /* --- Konsol Rehberi modali (native <dialog>, Sistem Logları ile aynı pattern) --- */
+    dialog#guide-dialog {
+      width: min(900px, 92vw); max-height: 82vh; padding: 0;
+      background: #1a1a1a; color: #eee; border: 1px solid #333; border-radius: 10px;
+    }
+    dialog#guide-dialog::backdrop { background: rgba(0,0,0,.6); }
+    .guide-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 18px; border-bottom: 1px solid #333;
+    }
+    .guide-header h2 { margin: 0; font-size: 16px; }
+    #guide-body {
+      padding: 14px 18px; overflow-y: auto; max-height: calc(82vh - 60px);
+      font-size: 13.5px; line-height: 1.6; color: #ccc;
+    }
+    #guide-body .analogy {
+      background: #000; border: 1px solid #333; border-radius: 6px;
+      padding: 10px 14px; margin-bottom: 14px; color: #9c9; font-style: italic;
+    }
+    #guide-body table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-bottom: 14px; }
+    #guide-body th, #guide-body td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #333; vertical-align: top; }
+    #guide-body th { color: #9c9; font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; }
+    #guide-body td { color: #ddd; }
+    #guide-body .note { font-size: 12.5px; color: #888; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -255,12 +289,92 @@
     </div>
   </div>
 
-  <div id="console-title">Konsol — her buton işleminin kaydı</div>
+  <div class="console-header">
+    <div id="console-title">Konsol — her buton işleminin kaydı</div>
+    <button id="console-clear-btn" onclick="clearConsole()">Konsolu Temizle</button>
+    <button id="console-guide-btn" onclick="openGuideDialog()">ℹ️ Konsol Rehberi</button>
+  </div>
   <div id="console"></div>
+
+  <!-- Konsol'daki her mesaj kategorisinin kaynağını/nedenini açıklayan rehber pop-up. -->
+  <dialog id="guide-dialog">
+    <div class="guide-header">
+      <h2>Konsol Rehberi</h2>
+      <button class="close-btn" onclick="closeGuideDialog()">Kapat</button>
+    </div>
+    <div id="guide-body">
+      <p class="analogy">
+        Konsol = "ben backend'e şunu sordum, backend gerçekte şunu söyledi" kaydı.
+      </p>
+      <p>
+        Bu web uygulamasının iki tarafı var: <strong>Frontend</strong> (şu an gördüğün tarayıcı sayfası)
+        ve <strong>Backend</strong> (Pi veya Mac'te çalışan gerçek sunucu — motor, kamera ve seri portla
+        fiilen konuşan taraf). Konsol'daki her satır, bir işlemin backend'den gelen <strong>GERÇEK</strong>
+        cevabıdır — uydurma veya tahmini metin yazılmaz (kamera panelinde geçmişte böyle bir sorun vardı,
+        düzeltildi).
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Kategori</th>
+            <th>Kaynağı</th>
+            <th>Ne zaman görünür</th>
+            <th>Gerçekten neyi gösterir</th>
+            <th>İlişkili başka bir yer</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>🎥 Kamera (AP1/AP2)</td>
+            <td><code>vision.py</code>, gerçek Picamera2 donanım denemesi</td>
+            <td>Kamera butonuna basınca</td>
+            <td><code>/vision/{id}/snapshot</code> isteğinin gerçek HTTP cevabı — başarılıysa
+              content-type/uzunluk, başarısızsa backend'in gerçek hata sebebi (<code>vision.errors</code>)</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>📜 Sistem Logları</td>
+            <td><code>journalctl -u feedvision</code> (systemd)</td>
+            <td>"Sistem Logları" pop-up'ı açılınca/yenilenince</td>
+            <td>Backend SÜRECİNİN kendi sağlığı (başlama/durma/hata) — motorun ne yaptığıyla ilgili değil</td>
+            <td>Journal'ın ham içeriği Konsol'da değil, ayrı "Sistem Logları" pop-up'ında görünür;
+              Konsol'a sadece "Loglar yüklendi." / "Başarısız: ..." özet satırı düşer</td>
+          </tr>
+          <tr>
+            <td>🔌 Seri Port (Yenile / Bağlan / Bağlantıyı Kes)</td>
+            <td>Backend'in işletim sisteminden yaptığı gerçek USB/seri port taraması (pyserial)</td>
+            <td>İlgili butona basınca</td>
+            <td>O an sistemde gerçekten bulunan portlar ve bağlantı işleminin gerçek sonucu</td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td>⚙️ Motor Komutları (Step At, Dur, DC, Encoder Sıfırla)</td>
+            <td>Backend, komutu seri port üzerinden STM32'ye gönderir</td>
+            <td>İlgili motor butonuna basınca</td>
+            <td>STM32'nin gerçek JSON cevabı — backend bunu okuyup Konsol'a yazar</td>
+            <td>"Giden Komut / Gelen Yanıt" panelinde aynı alışveriş daha detaylı gösterilir;
+              Konsol'daki sadece o panelin kısa günlüğüdür</td>
+          </tr>
+          <tr>
+            <td>📶 Canlı Durum (WebSocket)</td>
+            <td>STM32 ↔ backend bağlantı durumu</td>
+            <td>Bağlantı kurulduğunda/koptuğunda — hiçbir butona basmadan, kendiliğinden</td>
+            <td>Bağlantının o anki gerçek durumu; spam olmasın diye sadece durum değiştiğinde bir kez yazılır</td>
+            <td>—</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="note">
+        Konsol en fazla 500 satır tutar, eskiler otomatik düşer; "Konsolu Temizle" ile elle de boşaltılabilir.
+      </p>
+    </div>
+  </dialog>
 
   <script>
     // --- Konsol yardımcı fonksiyonu ---
     // Her satır: [saat] BUTON: hangi butona basıldı | GÖREV: ne yapmaya çalışıyor | SONUÇ: ne oldu
+    const CONSOLE_MAX_LINES = 500;  // performans için cap — tam log geçmişi önemli değil
+
     function logToConsole(buttonName, task, result, isError) {
       const box = document.getElementById("console");
       const time = new Date().toLocaleTimeString("tr-TR");
@@ -272,7 +386,26 @@
         `<span class="task">Görev: ${task}</span> — ` +
         `<span class="${isError ? 'error' : 'result'}">Sonuç: ${result}</span>`;
       box.appendChild(line);
+      while (box.children.length > CONSOLE_MAX_LINES) {
+        box.removeChild(box.firstChild);  // en eski satırları at
+      }
       box.scrollTop = box.scrollHeight;  // en son satır her zaman görünsün
+    }
+
+    function clearConsole() {
+      document.getElementById("console").innerHTML = "";
+    }
+
+    // ==========================================================================
+    //  KONSOL REHBERİ — native <dialog>, Sistem Logları modaliyle aynı pattern
+    // ==========================================================================
+    function openGuideDialog() {
+      const dlg = document.getElementById("guide-dialog");
+      if (!dlg.open) dlg.showModal();
+    }
+
+    function closeGuideDialog() {
+      document.getElementById("guide-dialog").close();
     }
 
     // ==========================================================================
