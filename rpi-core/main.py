@@ -27,11 +27,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
+import cv2
+import numpy as np
 import psutil
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from screen_reader import DEFAULT_ROI, read_roi
 from serial_bridge import bridge
 from vision import CAMERA_NUMS, vision
 
@@ -117,6 +120,33 @@ def vision_snapshot(cam_id: str):
     if jpg is None:
         raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı")
     return Response(content=jpg, media_type="image/jpeg")
+
+
+@app.get("/vision/{cam_id}/read-test")
+def vision_read_test(cam_id: str):
+    """AP2 ekran-okuma proof-of-concept — tek kare al, sabit test ROI'sini
+    kırp, hem OCR (Tesseract) hem ortalama renk (HSV) sonucu döner.
+
+    ÖNEMLİ: DEFAULT_ROI (screen_reader.py) şimdilik GEÇİCİ/test amaçlı sabit
+    koordinat — gerçek AP2 HMI ekranının piksel koordinatları saha
+    fotoğrafları gelince (bkz. Azobex_WP1 saha notları) güncellenecek.
+    Bugün için kamera karşısına tutulan herhangi bir telefon/ekran görüntüsü
+    ile uçtan uca akışı doğrulamak yeterli.
+    """
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    jpg = vision.capture_jpeg(cam_id)
+    if jpg is None:
+        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı")
+    frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise HTTPException(status_code=500, detail="Kare çözümlenemedi (JPEG decode hatası)")
+    result = read_roi(frame, DEFAULT_ROI)
+    return {
+        "roi": list(result.roi),
+        "text": result.text,
+        "avg_color_hsv": list(result.avg_color_hsv),
+    }
 
 
 # ==============================================================================
