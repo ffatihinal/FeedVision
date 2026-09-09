@@ -5,6 +5,8 @@ uvicorn[standard]>=0.29
 opencv-python>=4.9
 pyserial>=3.5
 
-# Not (sahada): Raspberry Pi + Pi Camera v2 (CSI) icin muhtemelen ek olarak
-# picamera2 gerekecek: pip install picamera2
-# main.py'deki get_capture() fonksiyonu o zaman guncellenmeli (bkz. dosya ustundeki not).
+# picamera2 (Pi Camera / CSI akisi icin, vision.py) sadece Raspberry Pi OS'te
+# calisir, libcamera'ya bagli — pip ile Mac/Windows'ta kurulamaz. Pi'de:
+#   sudo apt install -y python3-picamera2
+# --system-site-packages ile olusturulmus venv'de otomatik gorunur;
+# ayrica requirements.txt'e eklemiyoruz ki bu dosya Mac'te de calissin.

@@ -133,14 +133,14 @@
 
   <div class="cameras">
     <div class="camera-block">
-      <button onclick="toggleCamera(1)">Kamera 1 Aç/Kapat</button>
+      <button onclick="toggleCamera('cam1')">AP1 – Chamber Aç/Kapat</button>
       <br>
-      <img id="camera1" src="/camera/1/stream">
+      <img id="camera-cam1" src="/vision/cam1/stream">
     </div>
     <div class="camera-block">
-      <button onclick="toggleCamera(2)">Kamera 2 Aç/Kapat</button>
+      <button onclick="toggleCamera('cam2')">AP2 – Ekran Aç/Kapat</button>
       <br>
-      <img id="camera2" src="/camera/2/stream">
+      <img id="camera-cam2" src="/vision/cam2/stream">
     </div>
   </div>
 
@@ -315,10 +315,10 @@
     // Buton her basıldığında görüntüyü göster/gizle + konsola yaz.
     // Not: MJPEG akışı <img> görünür olduğu sürece sunucudan sürekli kare
     // çeker; "kapatma" burada sadece görsel gizleme, sunucu tarafı akışı
-    // ileride gerçekten durdurmak istersek ayrı bir /camera/{id}/stop
-    // uç noktası eklenir (bugünkü MVP kapsamı dışında).
+    // (/vision/{cam_id}/stream) ileride gerçekten durdurmak istersek ayrı
+    // bir stop uç noktası eklenir (bugünkü MVP kapsamı dışında).
     function toggleCamera(id) {
-      const img = document.getElementById("camera" + id);
+      const img = document.getElementById("camera-" + id);
       const isNowOpen = img.classList.toggle("open");
       const task = `Kamera ${id} görüntüsünü ${isNowOpen ? "göster (MJPEG akışını başlat)" : "gizle"}`;
 

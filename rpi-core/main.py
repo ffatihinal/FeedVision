@@ -2,8 +2,9 @@
 FeedVision RPi Core — AP1/AP2 kamera akış sunucusu + STM32 köprüsü
 
 Ne yapar: FastAPI ile küçük bir web sunucusu açar, tarayıcıdan "Kamera Aç"
-butonlarına basınca canlı görüntüyü MJPEG olarak akıtır; ayrıca STM32'ye
-seri port üzerinden JSON komut gönderir, canlı durumu WebSocket ile akıtır.
+butonlarına basınca canlı görüntüyü MJPEG olarak akıtır (picamera2/libcamera
+üzerinden, bkz. vision.py); ayrıca STM32'ye seri port üzerinden JSON komut
+gönderir, canlı durumu WebSocket ile akıtır.
 
 Nasıl çalıştırılır:
     python3 -m venv .venv
@@ -11,80 +12,67 @@ Nasıl çalıştırılır:
     ./.venv/bin/python3 main.py
     # tarayıcıda: http://localhost:8000
 
-SAHADA DEĞİŞECEK NOKTA (Pi Camera v2 için):
-    CAMERA_INDEXES sözlüğü şu an OpenCV'nin genel VideoCapture arayüzünü
-    kullanıyor (Mac'te test amaçlı yerleşik kamerayla denendi). Raspberry Pi
-    5 + Pi Camera v2 (CSI) kombinasyonunda bu satır muhtemelen çalışmaz —
-    Pi Camera'lar `picamera2` kütüphanesiyle (libcamera tabanlı) açılır.
-    Sahada ilk kurulumda: `pip install picamera2` + bu dosyadaki
-    `get_capture()` fonksiyonunu picamera2 API'sine göre güncelle. Bu dosya
-    şimdilik "iskelet + akış mantığı doğru çalışıyor" seviyesindedir.
+Kamera notu: Pi Camera (CSI) kameraları `picamera2` (libcamera tabanlı)
+gerektirir — bu Raspberry Pi OS dışında kurulamaz, Mac/Windows'ta
+`vision.py` picamera2'siz de import edilir ama kamera endpoint'leri
+503 döner (bkz. vision.py PICAMERA2_AVAILABLE).
 """
 
 import asyncio
 import subprocess
-import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-import cv2
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from serial_bridge import bridge
+from vision import CAMERA_NUMS, vision
 
-app = FastAPI(title="FeedVision RPi Core")
+VALID_CAM_IDS = set(CAMERA_NUMS)  # {"cam1", "cam2"}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Servis açılırken iki kamerayı da açmayı dener (biri takılı değilse
+    # diğerini/motor kontrolünü engellemez), kapanırken serbest bırakır —
+    # systemd restart'ta "device busy" ile kilitlenmesin diye.
+    vision.start()
+    yield
+    vision.stop()
+
+
+app = FastAPI(title="FeedVision RPi Core", lifespan=lifespan)
 
 # Sistemsel journal ucu icin sabitler: unit adi disaridan verilemez (guvenlik),
 # istenen satir sayisina ust sinir var (asiri yuklenmeyi/CPU'yu bogmayi onlemek icin).
 JOURNAL_UNIT = "feedvision"
 JOURNAL_MAX_LINES = 1000
 
-# kamera id -> OpenCV cihaz indeksi. Sahada gerçek CSI kameraların index'i
-# (veya picamera2'ye geçilirse kamera nesnesi) burada güncellenecek.
-CAMERA_INDEXES = {1: 0, 2: 1}
 
-_caps: dict[int, cv2.VideoCapture] = {}
-_locks: dict[int, threading.Lock] = {}
-
-
-def get_capture(cam_id: int):
-    """Kamerayı ilk istekte açar, sonraki isteklerde aynı bağlantıyı kullanır."""
-    if cam_id not in _caps:
-        idx = CAMERA_INDEXES.get(cam_id)
-        if idx is None:
-            return None
-        cap = cv2.VideoCapture(idx)
-        _caps[cam_id] = cap
-        _locks[cam_id] = threading.Lock()
-    return _caps[cam_id]
-
-
-def mjpeg_generator(cam_id: int):
-    """Kameradan sürekli kare okuyup MJPEG formatında (art arda JPEG) akıtır."""
-    cap = get_capture(cam_id)
-    if cap is None or not cap.isOpened():
-        return
-    while True:
-        with _locks[cam_id]:
-            ok, frame = cap.read()
-        if not ok:
-            break
-        ok, jpg = cv2.imencode(".jpg", frame)
-        if not ok:
-            continue
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" + jpg.tobytes() + b"\r\n"
-        )
-
-
-@app.get("/camera/{cam_id}/stream")
-def camera_stream(cam_id: int):
+@app.get("/vision/{cam_id}/stream")
+def vision_stream(cam_id: str):
+    """MJPEG canlı akış. cam_id: cam1 (AP1 — chamber) / cam2 (AP2 — UA ekranı)."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    if vision.get(cam_id) is None:
+        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı")
     return StreamingResponse(
-        mjpeg_generator(cam_id),
+        vision.mjpeg_generator(cam_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+@app.get("/vision/{cam_id}/snapshot")
+def vision_snapshot(cam_id: str):
+    """Tek kare JPEG — AP2 OCR/debug için (ileride görüntü işleme adımı)."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    jpg = vision.capture_jpeg(cam_id)
+    if jpg is None:
+        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı")
+    return Response(content=jpg, media_type="image/jpeg")
 
 
 # ==============================================================================
