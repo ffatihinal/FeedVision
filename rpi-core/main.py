@@ -137,6 +137,11 @@ def vision_read_test(cam_id: str):
     rois = roi_store.get_rois(cam_id)
     if not rois:
         return {"results": []}
+    # Sure olcumu burada basliyor (kare alinmadan hemen once) — "saniyede kac
+    # kez bu islemi yapabiliriz" sorusuna cevap vermek icin; JSON serialize/
+    # network gonderimi kasitli olarak disarida birakildi (bizim kontrolumuzde
+    # degil, olcmenin anlami yok).
+    start = time.perf_counter()
     jpg = vision.capture_jpeg(cam_id)
     if jpg is None:
         raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı")
@@ -157,7 +162,8 @@ def vision_read_test(cam_id: str):
                 "avg_color_rgb": list(result.avg_color_rgb),
             }
         )
-    return {"results": results}
+    duration_ms = (time.perf_counter() - start) * 1000
+    return {"results": results, "duration_ms": duration_ms}
 
 
 # ==============================================================================

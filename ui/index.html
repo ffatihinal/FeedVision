@@ -620,8 +620,20 @@
       }
       const results = data.results || [];
       resultBox.textContent = "";
+      if (typeof data.duration_ms === "number") {
+        // Kare alma -> tum ROI'lerin OCR+renk okumasi bitene kadar gecen
+        // sure (network/serialize haric) — "saniyede kac kez yapabiliriz"
+        // sorusuna cevap vermek icin.
+        const durationLine = document.createElement("div");
+        durationLine.style.color = "#555";
+        durationLine.style.fontSize = "0.9em";
+        durationLine.textContent = `İşlem süresi: ${data.duration_ms.toFixed(0)}ms`;
+        resultBox.appendChild(durationLine);
+      }
       if (results.length === 0) {
-        resultBox.textContent = "Kayıtlı ROI yok — yukarıda çizip \"Kaydet\"e basın.";
+        const emptyLine = document.createElement("div");
+        emptyLine.textContent = "Kayıtlı ROI yok — yukarıda çizip \"Kaydet\"e basın.";
+        resultBox.appendChild(emptyLine);
       } else {
         // ROI adı operatörün prompt() ile girdiği serbest metin — sunucudan
         // olduğu gibi geri dönüyor. innerHTML/template-literal ile basmak
