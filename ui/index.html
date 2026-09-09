@@ -143,22 +143,29 @@
     #guide-body td { color: #ddd; }
     #guide-body .note { font-size: 12.5px; color: #888; margin-top: 4px; }
 
-    /* --- SoC sıcaklık paneli: sağ tarafta, küçük kare widget, sayfanın
-       normal akışında (sabit/fixed konum değil — sayfayla birlikte kayar). */
-    #temp-panel {
-      width: 150px; padding: 10px; margin-left: auto;
+    /* --- Sağ taraf sistem widget'ları (SoC sıcaklığı, CPU, RAM): sayfanın
+       normal akışında (sabit/fixed konum değil — sayfayla birlikte kayar),
+       küçük kare grafikler dikey bir sütun halinde alt alta. */
+    #side-panels {
+      display: flex; flex-direction: column; gap: 16px;
+      width: 150px; margin-left: auto;
     }
-    #temp-panel h2 { font-size: 11px; margin: 0 0 6px; line-height: 1.3; }
-    #temp-panel .chart-box { max-width: none; padding: 4px; margin-bottom: 0; }
-    #temp-panel .chart-box .chart-title { font-size: 9px; margin-bottom: 2px; }
-    #temp-panel .chart-box canvas { width: 100%; height: auto; aspect-ratio: 1 / 1; display: block; }
-    #temp-current { font-family: "SF Mono", Menlo, monospace; font-size: 15px; font-weight: 700; margin-bottom: 4px; }
-    #temp-error { color: #f77; font-size: 10.5px; margin-top: 4px; display: none; line-height: 1.3; }
-    #temp-error.show { display: block; }
+    #side-panels .panel { margin-top: 0; }
+    #temp-panel, .resource-panel {
+      width: 150px; padding: 10px;
+    }
+    #temp-panel h2, .resource-panel h2 { font-size: 11px; margin: 0 0 6px; line-height: 1.3; }
+    #temp-panel .chart-box, .resource-panel .chart-box { max-width: none; padding: 4px; margin-bottom: 0; }
+    #temp-panel .chart-box .chart-title, .resource-panel .chart-box .chart-title { font-size: 9px; margin-bottom: 2px; }
+    #temp-panel .chart-box canvas, .resource-panel .chart-box canvas { width: 100%; height: auto; aspect-ratio: 1 / 1; display: block; }
+    #temp-current, .resource-current { font-family: "SF Mono", Menlo, monospace; font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+    #temp-error, .resource-error { color: #f77; font-size: 10.5px; margin-top: 4px; display: none; line-height: 1.3; }
+    #temp-error.show, .resource-error.show { display: block; }
 
     @media (max-width: 900px) {
-      #temp-panel { width: auto; padding: 16px; }
-      #temp-panel .chart-box canvas { max-width: 160px; }
+      #side-panels { width: auto; }
+      #temp-panel, .resource-panel { width: auto; padding: 16px; }
+      #temp-panel .chart-box canvas, .resource-panel .chart-box canvas { max-width: 160px; }
     }
 
     /* Kritik sıcaklık (>=85°C) — sayfa genelinde yanıp sönen kırmızı uyarı çerçevesi. */
@@ -207,11 +214,27 @@
     </div>
   </div>
 
-  <div class="panel" id="temp-panel">
-    <h2>SoC Sıcaklığı (Raspberry Pi)</h2>
-    <div id="temp-current">— °C</div>
-    <div class="chart-box"><div class="chart-title">Son 5 saniye</div><canvas id="chart-temp"></canvas></div>
-    <div id="temp-error"></div>
+  <div id="side-panels">
+    <div class="panel" id="temp-panel">
+      <h2>SoC Sıcaklığı (Raspberry Pi)</h2>
+      <div id="temp-current">— °C</div>
+      <div class="chart-box"><div class="chart-title">Son 5 saniye</div><canvas id="chart-temp"></canvas></div>
+      <div id="temp-error"></div>
+    </div>
+
+    <div class="panel resource-panel" id="cpu-panel">
+      <h2>CPU Kullanımı</h2>
+      <div class="resource-current" id="cpu-current">— %</div>
+      <div class="chart-box"><div class="chart-title">Son 5 saniye</div><canvas id="chart-cpu"></canvas></div>
+      <div class="resource-error" id="cpu-error"></div>
+    </div>
+
+    <div class="panel resource-panel" id="ram-panel">
+      <h2>RAM Kullanımı</h2>
+      <div class="resource-current" id="ram-current">— %</div>
+      <div class="chart-box"><div class="chart-title">Son 5 saniye</div><canvas id="chart-ram"></canvas></div>
+      <div class="resource-error" id="ram-error"></div>
+    </div>
   </div>
 
   <div class="panel">
@@ -663,6 +686,120 @@
 
       const yMin = tempWindowMin, yMax = tempWindowMax;
       const px = i => padL + (i * 0.5 / TEMP_WINDOW_S) * plotW;
+      const py = v => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+      ctx.strokeStyle = "#222"; ctx.fillStyle = "#666"; ctx.font = "10px monospace"; ctx.lineWidth = 1;
+      [0, 0.5, 1].forEach(f => {
+        const yy = padT + plotH * f;
+        ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w - padR, yy); ctx.stroke();
+        ctx.fillText((yMax - (yMax - yMin) * f).toFixed(0), 2, yy + 3);
+      });
+      ctx.fillText("0s", padL - 2, h - 2);
+      ctx.fillText("5s", w - padR - 14, h - 2);
+
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+      history.forEach((t, i) => {
+        const x = px(i), y = py(t);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    // ==========================================================================
+    //  CPU / RAM KULLANIMI — GET /system/resources'ı 0.5sn'de bir çeker
+    //  (tek fetch, ikisi de aynı response'ta), son 5 saniyeyi (10 nokta)
+    //  gösterir. SoC sıcaklığı panelindeki mantıkla birebir aynı — tek fark:
+    //  y ekseni sabit 0-100% (yüzde zaten sabit aralıkta, kayan pencereye
+    //  gerek yok, sıcaklıktaki "taşınca kayar" mekanizması burada gereksiz).
+    // ==========================================================================
+    const RESOURCE_POLL_MS = 500;
+    const RESOURCE_HISTORY_MAX = 10;  // son 5s / 0.5s
+    const RESOURCE_WINDOW_S = 5;      // x ekseni her zaman sabit "0s" → "5s"
+
+    let cpuHistory = [];   // son RESOURCE_HISTORY_MAX okuma (%), en yeni en sonda
+    let ramHistory = [];
+
+    function showResourceError(prefix, elId, detail) {
+      const box = document.getElementById(elId);
+      box.textContent = `${prefix} verisi alınamıyor: ${detail}`;
+      box.classList.add("show");
+    }
+
+    function hideResourceError(elId) {
+      document.getElementById(elId).classList.remove("show");
+    }
+
+    function pushResourceSample(history, value, currentElId, chartId, color) {
+      history.push(value);
+      while (history.length > RESOURCE_HISTORY_MAX) history.shift();  // 11. gelince en eski silinir
+      const cur = document.getElementById(currentElId);
+      cur.textContent = `${value.toFixed(1)} %`;
+      cur.style.color = color;
+      drawPercentChart(chartId, history, color);
+    }
+
+    async function fetchResources() {
+      let response;
+      try {
+        response = await fetch("/system/resources");
+      } catch (e) {
+        const msg = `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`;
+        showResourceError("CPU", "cpu-error", msg);
+        showResourceError("RAM", "ram-error", msg);
+        return;
+      }
+      if (!response.ok) {
+        // Gerçek backend detail metnini göster — uydurma/tahmini mesaj yazma,
+        // sıcaklık panelindeki fetch pattern'iyle aynı.
+        let detail;
+        try {
+          const data = await response.json();
+          detail = data.detail ?? JSON.stringify(data);
+        } catch {
+          detail = await response.text();
+        }
+        showResourceError("CPU", "cpu-error", detail);
+        showResourceError("RAM", "ram-error", detail);
+        return;
+      }
+      hideResourceError("cpu-error");
+      hideResourceError("ram-error");
+      let data;
+      try {
+        data = await response.json();
+      } catch (e) {
+        const msg = `Yanıt ayrıştırılamadı: ${e.message}`;
+        showResourceError("CPU", "cpu-error", msg);
+        showResourceError("RAM", "ram-error", msg);
+        return;
+      }
+      pushResourceSample(cpuHistory, data.cpu_percent, "cpu-current", "chart-cpu", "#4fc3f7");
+      pushResourceSample(ramHistory, data.ram_percent, "ram-current", "chart-ram", "#ba68c8");
+    }
+
+    // drawTempChart'tan bilinçli olarak ayrı: y ekseni sabit 0-100% (kayan
+    // pencere yok), x ekseni sabit 0s→5s — mantığın geri kalanı aynı.
+    function drawPercentChart(canvasId, history, color) {
+      const canvas = document.getElementById(canvasId);
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth || 300, h = canvas.clientHeight || 120;
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr; canvas.height = h * dpr;
+      }
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      const padL = 30, padB = 16, padT = 6, padR = 6;
+      const plotW = w - padL - padR, plotH = h - padT - padB;
+
+      if (!history.length) {
+        ctx.fillStyle = "#555"; ctx.font = "11px sans-serif"; ctx.fillText("Veri yok", 8, h / 2);
+        return;
+      }
+
+      const yMin = 0, yMax = 100;
+      const px = i => padL + (i * 0.5 / RESOURCE_WINDOW_S) * plotW;
       const py = v => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
 
       ctx.strokeStyle = "#222"; ctx.fillStyle = "#666"; ctx.font = "10px monospace"; ctx.lineWidth = 1;
@@ -1148,6 +1285,9 @@
     loadWheelDiameters();
     fetchTemp();
     setInterval(fetchTemp, TEMP_POLL_MS);
+
+    fetchResources();
+    setInterval(fetchResources, RESOURCE_POLL_MS);
   </script>
 </body>
 </html>

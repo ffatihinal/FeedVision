@@ -23,14 +23,14 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 {"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"remaining":0,"running":0,"dc":0}
 ```
 
-| Alan | Anlamı |
-|---|---|
-| `t` | Kart açıldığından beri geçen ms |
-| `e1` / `e2` | Encoder 1 / 2 toplam sayım (işaretli, geri dönünce azalır) |
-| `um1` / `um2` | Aynı sayımın mikrometre karşılığı (1000'e bölünce mm) |
-| `remaining` | Step motorun atmayı bekleyen darbe sayısı |
-| `running` | 1 = step motor hareket halinde |
-| `dc` | 0 = dur, 1 = ileri, 2 = geri |
+| Alan          | Anlamı                                                     |
+| ------------- | ---------------------------------------------------------- |
+| `t`           | Kart açıldığından beri geçen ms                            |
+| `e1` / `e2`   | Encoder 1 / 2 toplam sayım (işaretli, geri dönünce azalır) |
+| `um1` / `um2` | Aynı sayımın mikrometre karşılığı (1000'e bölünce mm)      |
+| `remaining`   | Step motorun atmayı bekleyen darbe sayısı                  |
+| `running`     | 1 = step motor hareket halinde                             |
+| `dc`          | 0 = dur, 1 = ileri, 2 = geri                               |
 
 Gerçek üretim protokolü (Pi tarafı `feedvision-core`) bu test protokolünü temel alacak, komut seti büyüyecek (SE ekibinin ICD'siyle uyumlu hale gelecek).
 

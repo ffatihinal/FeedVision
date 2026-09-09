@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
+import psutil
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -47,6 +48,8 @@ async def lifespan(app: FastAPI):
     # diğerini/motor kontrolünü engellemez), kapanırken serbest bırakır —
     # systemd restart'ta "device busy" ile kilitlenmesin diye.
     vision.start()
+    psutil.cpu_percent()  # priming cagrisi: ilk cagri referans alir, anlamli deger dondurmez —
+    # asagidaki /system/resources'daki interval=None cagrilari bastan itibaren dogru deger versin diye.
     yield
     vision.stop()
 
@@ -241,6 +244,24 @@ def system_temp():
         raise HTTPException(status_code=503, detail=f"vcgencmd ciktisi ayristirilamadi: {result.stdout.strip()!r}")
 
     return {"temp_c": float(match.group(1))}
+
+
+@app.get("/system/resources")
+def system_resources():
+    """CPU ve RAM kullanimini `{"cpu_percent": 12.3, "ram_percent": 41.7}` olarak doner.
+
+    psutil hem Mac hem Pi'de calisir (vcgencmd gibi Pi'ye ozel degil).
+    interval=None non-blocking'tir (lifespan'daki priming cagrisina bagli) —
+    yine de beklenmedik bir hata cikarsa sunucu cokmesin diye 503 + gercek
+    hata metni donulur (yukaridaki /system/temp pattern'iyle ayni felsefe).
+    """
+    try:
+        cpu_percent = psutil.cpu_percent(interval=None)
+        ram_percent = psutil.virtual_memory().percent
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"psutil hata verdi: {exc}")
+
+    return {"cpu_percent": cpu_percent, "ram_percent": ram_percent}
 
 
 @app.get("/system/uptime")

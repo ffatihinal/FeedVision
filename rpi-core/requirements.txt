@@ -4,6 +4,7 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 opencv-python>=4.9
 pyserial>=3.5
+psutil>=5.9
 
 # picamera2 (Pi Camera / CSI akisi icin, vision.py) sadece Raspberry Pi OS'te
 # calisir, libcamera'ya bagli — pip ile Mac/Windows'ta kurulamaz. Pi'de:
