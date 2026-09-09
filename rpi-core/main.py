@@ -320,6 +320,17 @@ def index():
         return f.read()
 
 
+@app.get("/wall", response_class=HTMLResponse)
+def wall():
+    """Canlı yayın duvarı: 2x2 grid (AP1, AP2, FeedVision UI, custom alan) —
+    TV/telefon gibi izleme amaçlı bağımsız sayfa, ana kontrol UI'sinden ayrı
+    (bkz. ui/wall.html üstündeki mimari not). Mevcut hiçbir endpoint'in
+    davranışı değişmiyor, sadece statik HTML servis eden yeni bir uç."""
+    wall_path = Path(__file__).resolve().parent.parent / "ui" / "wall.html"
+    with open(wall_path, encoding="utf-8") as f:
+        return f.read()
+
+
 if __name__ == "__main__":
     import uvicorn
 

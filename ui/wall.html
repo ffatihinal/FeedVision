@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>FeedVision — Canlı Yayın Duvarı</title>
+  <style>
+    /* TV/tarayıcı ekranını komple kaplasın diye — ana index.html'in aksine
+       burada sayfa kaydırma/margin yok, tam ekran bir "duvar" hedefleniyor. */
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background: #000; color: #eee; font-family: sans-serif;
+      overflow: hidden;
+    }
+
+    .wall-grid {
+      display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+      width: 100vw; height: 100vh; gap: 4px; background: #000;
+    }
+
+    .cell {
+      position: relative; background: #111; overflow: hidden;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    .cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .cell iframe { width: 100%; height: 100%; border: 0; display: block; background: #111; }
+
+    .cell .label {
+      position: absolute; top: 10px; left: 10px; z-index: 2; pointer-events: none;
+      background: rgba(0,0,0,.65); padding: 5px 12px; border-radius: 6px;
+      font-size: 14px; letter-spacing: .03em; font-weight: 600;
+    }
+    .cell .label .sub { display: block; font-size: 11px; font-weight: 400; color: #aaa; margin-top: 2px; }
+
+    /* Kamera/UI/custom hücreleri henüz büyütülmemişken sağ alta küçük
+       "dokun/tıkla, büyüt" ipucu — TV uzaktan kumandasıyla gezinirken de
+       görünür olsun diye kalın/okunaklı. */
+    .cell .hint {
+      position: absolute; bottom: 10px; right: 12px; z-index: 2; pointer-events: none;
+      background: rgba(0,0,0,.65); padding: 4px 10px; border-radius: 6px;
+      font-size: 12px; color: #9c9;
+    }
+
+    /* --- "Kanal" hücresi: FeedVision UI grid'de sadece statik bir kart,
+       gerçek sayfa (ve onun kendi WS/polling trafiği) yalnızca bu hücre
+       tam ekran açıldığında iframe ile yüklenir (bkz. JS: loadUiFrame). --- */
+    .ui-placeholder {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 10px; width: 100%; height: 100%; background: linear-gradient(160deg, #142 0%, #111 60%);
+    }
+    .ui-placeholder .icon { font-size: 44px; }
+    .ui-placeholder .title { font-size: 18px; font-weight: 700; color: #eee; }
+    .ui-placeholder .desc { font-size: 13px; color: #9c9; }
+    #ui-iframe { display: none; }
+
+    /* --- Custom alan: ileride operasyonel journal görselleştirmesi vb.
+       gelecek, şimdilik placeholder. --- */
+    .custom-placeholder {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 10px; width: 100%; height: 100%; background: #161616;
+    }
+    .custom-placeholder .icon { font-size: 44px; opacity: .5; }
+    .custom-placeholder .title { font-size: 18px; font-weight: 700; color: #888; }
+    .custom-placeholder .desc { font-size: 13px; color: #666; }
+
+    /* Kamera akışı henüz gelmediyse (503/hata) görünür durum metni. */
+    .cam-status {
+      position: absolute; inset: 0; z-index: 1; display: none;
+      flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+      background: #161616; color: #f77; font-size: 14px; text-align: center; padding: 0 16px;
+    }
+    .cam-status.show { display: flex; }
+
+    /* --- Tam ekran modu --- */
+    body.fullscreen-mode .wall-grid { display: block; }
+    body.fullscreen-mode .cell { display: none; width: 100vw; height: 100vh; }
+    body.fullscreen-mode .cell.active { display: flex; }
+
+    #back-btn {
+      display: none; position: fixed; top: 16px; right: 16px; z-index: 20;
+      font-size: 20px; font-weight: 700; padding: 16px 24px;
+      border-radius: 10px; border: none; background: #2a6; color: #fff;
+      cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,.5);
+    }
+    #back-btn:active { background: #184; }
+    body.fullscreen-mode #back-btn { display: block; }
+  </style>
+</head>
+<body>
+
+  <button id="back-btn" onclick="exitFullscreen()">&larr; Grid'e Dön</button>
+
+  <div class="wall-grid" id="wall-grid">
+
+    <div class="cell" id="cell-cam1" onclick="enterFullscreen('cell-cam1')">
+      <div class="label">AP1 — Chamber<span class="sub">canlı kamera</span></div>
+      <div class="hint">Büyütmek için dokun</div>
+      <img id="wall-cam1" alt="AP1 kamera akışı">
+      <div class="cam-status" id="cam1-status"></div>
+    </div>
+
+    <div class="cell" id="cell-cam2" onclick="enterFullscreen('cell-cam2')">
+      <div class="label">AP2 — Ekran<span class="sub">canlı kamera</span></div>
+      <div class="hint">Büyütmek için dokun</div>
+      <img id="wall-cam2" alt="AP2 kamera akışı">
+      <div class="cam-status" id="cam2-status"></div>
+    </div>
+
+    <div class="cell" id="cell-ui" onclick="enterFullscreen('cell-ui')">
+      <div class="label">FeedVision UI<span class="sub">kontrol paneli</span></div>
+      <div class="hint">Büyütmek için dokun</div>
+      <div class="ui-placeholder" id="ui-placeholder">
+        <div class="icon">🎛️</div>
+        <div class="title">FeedVision UI</div>
+        <div class="desc">Motor kontrol + canlı durum paneli</div>
+      </div>
+      <iframe id="ui-iframe" title="FeedVision UI"></iframe>
+    </div>
+
+    <div class="cell" id="cell-custom" onclick="enterFullscreen('cell-custom')">
+      <div class="label">Custom Alan<span class="sub">yakında</span></div>
+      <div class="custom-placeholder">
+        <div class="icon">📊</div>
+        <div class="title">Yakında</div>
+        <div class="desc">Operasyonel journal görselleştirmesi (planlanıyor)</div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // ==========================================================================
+    //  KAMERA AKIŞLARI — grid görünümünde her iki kamera da otomatik başlar
+    //  (bir "TV kanalı" gibi sürekli yayın amaçlandığı için index.html'deki
+    //  Aç/Kapat butonlarının aksine burada kullanıcı etkileşimi beklenmez).
+    //  Aynı /vision/{cam_id}/stream endpoint'i, kod tekrarı yok.
+    // ==========================================================================
+    function startCamera(camId) {
+      const img = document.getElementById("wall-" + camId);
+      const statusEl = document.getElementById(camId + "-status");
+      img.onerror = () => {
+        statusEl.textContent = "Kamera akışı alınamadı";
+        statusEl.classList.add("show");
+      };
+      img.onload = () => statusEl.classList.remove("show");
+      img.src = `/vision/${camId}/stream?_=${Date.now()}`;
+    }
+    startCamera("cam1");
+    startCamera("cam2");
+
+    // ==========================================================================
+    //  FEEDVISION UI HÜCRESİ — grid'de sadece statik kart, gerçek sayfa (kendi
+    //  WebSocket + sıcaklık/CPU/RAM polling'iyle birlikte) yalnızca bu hücre
+    //  tam ekran açıldığında iframe ile yüklenir; grid'e dönünce iframe'i
+    //  boşaltıp durduruyoruz — TV'de görünmeyen bir hücrenin arka planda
+    //  gereksiz ağ/CPU yükü üretmesini önlemek için.
+    // ==========================================================================
+    function loadUiFrame() {
+      const iframe = document.getElementById("ui-iframe");
+      const placeholder = document.getElementById("ui-placeholder");
+      iframe.src = "/";
+      iframe.style.display = "block";
+      placeholder.style.display = "none";
+    }
+    function unloadUiFrame() {
+      const iframe = document.getElementById("ui-iframe");
+      const placeholder = document.getElementById("ui-placeholder");
+      iframe.src = "about:blank";
+      iframe.style.display = "none";
+      placeholder.style.display = "flex";
+    }
+
+    // ==========================================================================
+    //  TAM EKRAN GEÇİŞİ — herhangi bir hücreye tıklanınca o hücre tüm ekranı
+    //  kaplar, diğerleri gizlenir; "Geri" butonu veya Escape ile grid'e dönülür.
+    // ==========================================================================
+    function enterFullscreen(cellId) {
+      document.querySelectorAll(".cell").forEach((c) => c.classList.toggle("active", c.id === cellId));
+      document.body.classList.add("fullscreen-mode");
+      if (cellId === "cell-ui") loadUiFrame();
+    }
+
+    function exitFullscreen() {
+      document.body.classList.remove("fullscreen-mode");
+      document.querySelectorAll(".cell").forEach((c) => c.classList.remove("active"));
+      unloadUiFrame();
+    }
+
+    // TV uzaktan kumandalarında "geri" tuşu genelde Escape olarak gelir.
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && document.body.classList.contains("fullscreen-mode")) exitFullscreen();
+    });
+  </script>
+</body>
+</html>
