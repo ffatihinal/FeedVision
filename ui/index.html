@@ -304,68 +304,54 @@
     </div>
     <div id="guide-body">
       <p class="analogy">
-        Konsol = "ben backend'e şunu sordum, backend gerçekte şunu söyledi" kaydı.
-      </p>
-      <p>
-        Bu web uygulamasının iki tarafı var: <strong>Frontend</strong> (şu an gördüğün tarayıcı sayfası)
-        ve <strong>Backend</strong> (Pi veya Mac'te çalışan gerçek sunucu — motor, kamera ve seri portla
-        fiilen konuşan taraf). Konsol'daki her satır, bir işlemin backend'den gelen <strong>GERÇEK</strong>
-        cevabıdır — uydurma veya tahmini metin yazılmaz (kamera panelinde geçmişte böyle bir sorun vardı,
-        düzeltildi).
+        Konsol, sistemin sana "ne yaptım ve sonucu ne oldu" diye anlattığı kayıt defteridir.
+        Bir butona bastığında sistemin arka planda gerçekte ne yaptığını ve gerçekte ne cevap
+        aldığını buradan görürsün — uydurma ya da tahmini bir bilgi yazılmaz.
       </p>
       <table>
         <thead>
           <tr>
             <th>Kategori</th>
-            <th>Kaynağı</th>
-            <th>Ne zaman görünür</th>
-            <th>Gerçekten neyi gösterir</th>
-            <th>İlişkili başka bir yer</th>
+            <th>Ne zaman görürsün</th>
+            <th>Ne anlama gelir</th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td>🎥 Kamera (AP1/AP2)</td>
-            <td><code>vision.py</code>, gerçek Picamera2 donanım denemesi</td>
-            <td>Kamera butonuna basınca</td>
-            <td><code>/vision/{id}/snapshot</code> isteğinin gerçek HTTP cevabı — başarılıysa
-              content-type/uzunluk, başarısızsa backend'in gerçek hata sebebi (<code>vision.errors</code>)</td>
-            <td>—</td>
+            <td>🎥 Kamera</td>
+            <td>Kamera görüntüsünü her açtığında/yenilediğinde</td>
+            <td>İşlem başarılıysa görüntünün geldiğini, başarısızsa nedenini (örn. kamera bağlı değil)
+              burada görürsün.</td>
           </tr>
           <tr>
-            <td>📜 Sistem Logları</td>
-            <td><code>journalctl -u feedvision</code> (systemd)</td>
-            <td>"Sistem Logları" pop-up'ı açılınca/yenilenince</td>
-            <td>Backend SÜRECİNİN kendi sağlığı (başlama/durma/hata) — motorun ne yaptığıyla ilgili değil</td>
-            <td>Journal'ın ham içeriği Konsol'da değil, ayrı "Sistem Logları" pop-up'ında görünür;
-              Konsol'a sadece "Loglar yüklendi." / "Başarısız: ..." özet satırı düşer</td>
+            <td>📜 Sistem Kayıtları</td>
+            <td>"Sistem Logları" penceresini açtığında/yenilediğinde</td>
+            <td>Buradaki satır sadece kısa bir özettir ("Loglar yüklendi." / "Başarısız: ..."). Detaylı
+              teknik kayıtlar ayrı bir pencerede (Sistem Logları) tutulur, ihtiyaç olursa onu aç.</td>
           </tr>
           <tr>
-            <td>🔌 Seri Port (Yenile / Bağlan / Bağlantıyı Kes)</td>
-            <td>Backend'in işletim sisteminden yaptığı gerçek USB/seri port taraması (pyserial)</td>
-            <td>İlgili butona basınca</td>
-            <td>O an sistemde gerçekten bulunan portlar ve bağlantı işleminin gerçek sonucu</td>
-            <td>—</td>
+            <td>🔌 Bağlantı Noktası (Port)</td>
+            <td>Yenile / Bağlan / Bağlantıyı Kes butonlarına bastığında</td>
+            <td>Cihaza bağlanmak için hangi bağlantı noktalarının bulunduğunu ve bağlanma/kesme
+              işleminin sonucunu burada görürsün.</td>
           </tr>
           <tr>
-            <td>⚙️ Motor Komutları (Step At, Dur, DC, Encoder Sıfırla)</td>
-            <td>Backend, komutu seri port üzerinden STM32'ye gönderir</td>
-            <td>İlgili motor butonuna basınca</td>
-            <td>STM32'nin gerçek JSON cevabı — backend bunu okuyup Konsol'a yazar</td>
-            <td>"Giden Komut / Gelen Yanıt" panelinde aynı alışveriş daha detaylı gösterilir;
-              Konsol'daki sadece o panelin kısa günlüğüdür</td>
+            <td>⚙️ Motor Komutları</td>
+            <td>Bir motor butonuna (Step At, Dur, DC, Encoder Sıfırla) bastığında</td>
+            <td>Gönderdiğin komuta kontrol kartından gelen gerçek yanıt burada özetlenir; aynı
+              alışverişin ayrıntısını "Giden Komut / Gelen Yanıt" panelinden takip edebilirsin.</td>
           </tr>
           <tr>
-            <td>📶 Canlı Durum (WebSocket)</td>
-            <td>STM32 ↔ backend bağlantı durumu</td>
-            <td>Bağlantı kurulduğunda/koptuğunda — hiçbir butona basmadan, kendiliğinden</td>
-            <td>Bağlantının o anki gerçek durumu; spam olmasın diye sadece durum değiştiğinde bir kez yazılır</td>
-            <td>—</td>
+            <td>📶 Bağlantı Durumu</td>
+            <td>Cihazla bağlantı koptuğunda veya yeniden kurulduğunda — kendiliğinden, hiçbir şeye dokunmadan</td>
+            <td>Bağlantı sorunlarını fark etmenin en hızlı yolu budur; durum değişmediği sürece
+              tekrar tekrar yazılmaz.</td>
           </tr>
         </tbody>
       </table>
       <p class="note">
-        Konsol en fazla 500 satır tutar, eskiler otomatik düşer; "Konsolu Temizle" ile elle de boşaltılabilir.
+        Konsol en fazla 500 satır tutar, eskiler otomatik düşer; "Konsolu Temizle" butonuyla istediğin
+        an elle de boşaltabilirsin.
       </p>
     </div>
   </dialog>
