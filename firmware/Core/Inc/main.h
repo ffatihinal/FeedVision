@@ -69,12 +69,12 @@ void Error_Handler(void);
 #define DIR_GPIO_Port GPIOB
 #define LD3_Pin GPIO_PIN_6
 #define LD3_GPIO_Port GPIOC
+#define STEP_Pin GPIO_PIN_10
+#define STEP_GPIO_Port GPIOA
 #define T_JTMS_Pin GPIO_PIN_13
 #define T_JTMS_GPIO_Port GPIOA
 #define T_JTCK_Pin GPIO_PIN_14
 #define T_JTCK_GPIO_Port GPIOA
-#define STEP_Pin GPIO_PIN_15
-#define STEP_GPIO_Port GPIOA
 #define DC_IA1_Pin GPIO_PIN_8
 #define DC_IA1_GPIO_Port GPIOB
 
