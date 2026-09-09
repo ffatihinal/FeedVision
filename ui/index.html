@@ -167,6 +167,10 @@
       50% { box-shadow: inset 0 0 0 4px rgba(244, 67, 54, 0.65); background-color: rgba(244, 67, 54, 0.12); }
     }
     body.temp-critical { animation: temp-critical-pulse 1s ease-in-out infinite; }
+
+    /* --- Sunucu çalışma süresi satırı: sayfanın en altı, ikincil bilgi
+       görünümü (#temp-error / .note ile aynı üslup — küçük, gri). */
+    #uptime-line { color: #888; font-size: 11px; margin: 16px 0 4px; line-height: 1.3; }
   </style>
 </head>
 <body>
@@ -327,6 +331,10 @@
     <button id="console-guide-btn" onclick="openGuideDialog()">ℹ️ Konsol Rehberi</button>
   </div>
   <div id="console"></div>
+
+  <!-- Sunucu sureci ne zaman basladi + ne kadardir calisiyor — restart'i
+       gozle fark edebilmek icin (bkz. main.py /system/uptime). -->
+  <div id="uptime-line">Sunucu çalışma süresi yükleniyor…</div>
 
   <!-- Konsol'daki her mesaj kategorisinin kaynağını/nedenini açıklayan rehber pop-up. -->
   <dialog id="guide-dialog">
@@ -1079,6 +1087,60 @@
     // Gerçek eğriyi saniyede 5 kez tazele (WS 10Hz'de akıyor ama her tikte
     // yeniden çizmek gereksiz — Pi'de de rahat çalışsın diye seyreltildi).
     setInterval(redrawActualCharts, 200);
+
+    // --- SUNUCU ÇALIŞMA SÜRESİ — /system/uptime'ı sayfa açılışında bir kere
+    // çeker, sonrası tarayıcı tarafında saniyede bir sayaçla ilerletilir
+    // (tekrar tekrar sunucuya istek atmaya gerek yok — bkz. main.py).
+    let uptimeStartedAtMs = null;   // referans nokta (Date.now() bazlı) — saniyelik sayaç bundan hesaplanır
+    let uptimeStartedAtIso = null;  // sadece etikette "GG.AA.YYYY SS:DD başladı" göstermek için
+
+    function formatUptime(totalSeconds) {
+      const days = Math.floor(totalSeconds / 86400);
+      const hours = Math.floor((totalSeconds % 86400) / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const parts = [];
+      if (days > 0) parts.push(`${days} gün`);
+      if (days > 0 || hours > 0) parts.push(`${hours} sa`);
+      parts.push(`${minutes} dk`);
+      return parts.join(" ");
+    }
+
+    function formatStartedAt(iso) {
+      const d = new Date(iso);
+      const pad = n => String(n).padStart(2, "0");
+      return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function renderUptimeLine() {
+      if (uptimeStartedAtMs === null) return;
+      const elapsedSeconds = (Date.now() - uptimeStartedAtMs) / 1000;
+      const line = document.getElementById("uptime-line");
+      line.textContent = `Sunucu ${formatStartedAt(uptimeStartedAtIso)}'de başladı · ${formatUptime(elapsedSeconds)}'dır çalışıyor`;
+    }
+
+    async function fetchUptime() {
+      const line = document.getElementById("uptime-line");
+      let response;
+      try {
+        response = await fetch("/system/uptime");
+      } catch (e) {
+        line.textContent = "Sunucu çalışma süresi alınamıyor";
+        return;
+      }
+      if (!response.ok) {
+        line.textContent = "Sunucu çalışma süresi alınamıyor";
+        return;
+      }
+      const data = await response.json();
+      // Referans noktasını Date.now() bazlı tutuyoruz, sonraki tik'lerde
+      // sunucuya tekrar istek atmadan sadece fark hesaplanır.
+      uptimeStartedAtMs = Date.now() - data.uptime_seconds * 1000;
+      uptimeStartedAtIso = data.started_at;
+      renderUptimeLine();
+    }
+
+    fetchUptime();
+    setInterval(renderUptimeLine, 1000);
 
     // Sayfa açılır açılmaz: port listesini çek + canlı durum akışını başlat + teker çaplarını geri yükle + sıcaklık izlemeyi başlat.
     refreshPorts();

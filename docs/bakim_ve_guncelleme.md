@@ -41,3 +41,5 @@ sudo systemctl status feedvision
 ```
 
 Bu komutun çıktısındaki "Active: active (running) since ..." satırı servisin ne zamandır ayakta olduğunu gösterir — eğer bu tarih son `git pull`'dan önceyse, servis hâlâ eski kodla çalışıyor demektir; restart gerekir.
+
+Bu bilgiyi (ne zaman başladı) artık web app'in en altında da görebilirsin, ayrıca terminale gitmene gerek kalmadan.

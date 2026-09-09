@@ -21,7 +21,9 @@ gerektirir — bu Raspberry Pi OS dışında kurulamaz, Mac/Windows'ta
 import asyncio
 import re
 import subprocess
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -32,6 +34,11 @@ from serial_bridge import bridge
 from vision import CAMERA_NUMS, vision
 
 VALID_CAM_IDS = set(CAMERA_NUMS)  # {"cam1", "cam2"}
+
+# Modul import edilir edilmez (surec baslarken) sabitlenir — restart olunca
+# otomatik yenilenir, "kod guncellendi ama eski surec calismaya devam ediyordu"
+# durumunu web'den fark edebilmek icin (bkz. /system/uptime).
+SERVER_START_TIME = time.time()
 
 
 @asynccontextmanager
@@ -234,6 +241,20 @@ def system_temp():
         raise HTTPException(status_code=503, detail=f"vcgencmd ciktisi ayristirilamadi: {result.stdout.strip()!r}")
 
     return {"temp_c": float(match.group(1))}
+
+
+@app.get("/system/uptime")
+def system_uptime():
+    """Su anki sürecin ne zaman başladığını ve ne kadar süredir çalıştığını döner.
+
+    Restart farkedilebilsin diye: süreç her yeniden başladığında SERVER_START_TIME
+    de otomatik yenilenir (yukarıda modül seviyesinde tanımlı) — dış komuta bağımlı
+    değil, hata senaryosu yok.
+    """
+    return {
+        "started_at": datetime.fromtimestamp(SERVER_START_TIME).astimezone().isoformat(),
+        "uptime_seconds": time.time() - SERVER_START_TIME,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
