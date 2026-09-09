@@ -83,10 +83,53 @@
     #console .task { color: #ccc; }
     #console .result { color: #8f8; }
     #console .error { color: #f77; }
+
+    /* --- Sistem Logları modali (native <dialog>) --- */
+    #logs-open-btn { background: #446; }
+    #logs-open-btn:active { background: #335; }
+    dialog#logs-dialog {
+      width: min(900px, 92vw); max-height: 82vh; padding: 0;
+      background: #1a1a1a; color: #eee; border: 1px solid #333; border-radius: 10px;
+    }
+    dialog#logs-dialog::backdrop { background: rgba(0,0,0,.6); }
+    .logs-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 18px; border-bottom: 1px solid #333;
+    }
+    .logs-header h2 { margin: 0; font-size: 16px; }
+    .logs-header .sub { font-size: 12px; color: #888; margin-top: 2px; }
+    .logs-actions button { font-size: 13px; padding: 8px 14px; margin: 0 0 0 8px; }
+    .logs-actions .close-btn { background: #555; }
+    .logs-actions .close-btn:active { background: #444; }
+    #logs-body {
+      margin: 0; padding: 14px 18px; overflow-y: auto; max-height: calc(82vh - 60px);
+      font-family: "SF Mono", Menlo, monospace; font-size: 12.5px; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-word; color: #ccc;
+    }
+    #logs-body.loading { color: #888; }
+    #logs-body.error { color: #f77; }
   </style>
 </head>
 <body>
   <h1>FeedVision — Kamera Paneli</h1>
+
+  <button id="logs-open-btn" onclick="openLogsDialog()">Sistem Logları</button>
+
+  <!-- Systemd/journalctl servis loglari (baslama/durma/hata/crash) — operasyonel
+       journal (motor komutu/besleme miktari) DEGIL, o ayri ve kapsam disi. -->
+  <dialog id="logs-dialog">
+    <div class="logs-header">
+      <div>
+        <h2>Sistem Logları — feedvision servisi</h2>
+        <div class="sub">journalctl kaydı · en eski üstte, en yeni altta</div>
+      </div>
+      <div class="logs-actions">
+        <button onclick="loadSystemLogs()">Yenile</button>
+        <button class="close-btn" onclick="closeLogsDialog()">Kapat</button>
+      </div>
+    </div>
+    <pre id="logs-body">Yükleniyor…</pre>
+  </dialog>
 
   <div class="cameras">
     <div class="camera-block">
@@ -230,6 +273,43 @@
         `<span class="${isError ? 'error' : 'result'}">Sonuç: ${result}</span>`;
       box.appendChild(line);
       box.scrollTop = box.scrollHeight;  // en son satır her zaman görünsün
+    }
+
+    // ==========================================================================
+    //  SİSTEM LOGLARI — /system/logs (journalctl -u feedvision), native <dialog>
+    // ==========================================================================
+    const LOG_LINES = 200;
+
+    function openLogsDialog() {
+      const dlg = document.getElementById("logs-dialog");
+      if (!dlg.open) dlg.showModal();
+      loadSystemLogs();
+    }
+
+    function closeLogsDialog() {
+      document.getElementById("logs-dialog").close();
+    }
+
+    async function loadSystemLogs() {
+      const body = document.getElementById("logs-body");
+      body.className = "loading";
+      body.textContent = "Yükleniyor…";
+      try {
+        const r = await fetch(`/system/logs?lines=${LOG_LINES}`);
+        if (!r.ok) {
+          const detail = await r.text();
+          throw new Error(`${r.status}: ${detail}`);
+        }
+        const text = await r.text();
+        body.className = "";
+        body.textContent = text.trim() ? text : "(kayıt yok)";
+        body.scrollTop = body.scrollHeight;  // en yeni satır altta — otomatik en alta kaydır
+        logToConsole("Sistem Logları", "journalctl kayıtlarını getir", "Loglar yüklendi.", false);
+      } catch (e) {
+        body.className = "error";
+        body.textContent = `Loglar alınamadı: ${e}`;
+        logToConsole("Sistem Logları", "journalctl kayıtlarını getir", `Başarısız: ${e}`, true);
+      }
     }
 
     // Buton her basıldığında görüntüyü göster/gizle + konsola yaz.

@@ -22,17 +22,23 @@ SAHADA DEĞİŞECEK NOKTA (Pi Camera v2 için):
 """
 
 import asyncio
+import subprocess
 import threading
 from pathlib import Path
 
 import cv2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from serial_bridge import bridge
 
 app = FastAPI(title="FeedVision RPi Core")
+
+# Sistemsel journal ucu icin sabitler: unit adi disaridan verilemez (guvenlik),
+# istenen satir sayisina ust sinir var (asiri yuklenmeyi/CPU'yu bogmayi onlemek icin).
+JOURNAL_UNIT = "feedvision"
+JOURNAL_MAX_LINES = 1000
 
 # kamera id -> OpenCV cihaz indeksi. Sahada gerçek CSI kameraların index'i
 # (veya picamera2'ye geçilirse kamera nesnesi) burada güncellenecek.
@@ -155,6 +161,51 @@ async def ws_status(websocket: WebSocket):
             await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         pass
+
+
+# ==============================================================================
+#  SISTEMSEL JOURNAL — servisin systemd/journalctl loglarini web'den gormek icin
+#  (operasyonel journal — motor komutlari/besleme miktari — AYRI ve KAPSAM DISI,
+#  burada SADECE servis basladi/durdu/hata/crash gibi sistem loglari var.)
+# ==============================================================================
+
+
+@app.get("/system/logs", response_class=PlainTextResponse)
+def system_logs(lines: int = 200):
+    """Son N satir journald kaydini duz metin olarak dondurur.
+
+    Guvenlik: unit adi sabit ("feedvision") — disaridan baska bir unit
+    istenemez. `lines` JOURNAL_MAX_LINES ile sinirlanir, sunucu asiri
+    yuklenmesin diye. Calismasi icin kullanicinin `systemd-journal`
+    grubunda olmasi gerekir (bkz. setup_pi.sh) — aksi halde journalctl
+    izin hatasi verir, bu da HTTPException 500 olarak donulur.
+    """
+    if lines < 1:
+        raise HTTPException(status_code=400, detail="lines 1 veya daha buyuk olmali")
+    lines = min(lines, JOURNAL_MAX_LINES)
+
+    try:
+        result = subprocess.run(
+            [
+                "journalctl",
+                "-u", JOURNAL_UNIT,
+                "-n", str(lines),
+                "--no-pager",
+                "-o", "short-iso",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="journalctl bulunamadi (Linux/systemd disinda mi calisiyor?)")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="journalctl zaman asimina ugradi")
+
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"journalctl hata verdi: {result.stderr.strip()}")
+
+    return result.stdout
 
 
 @app.get("/", response_class=HTMLResponse)

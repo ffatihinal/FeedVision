@@ -26,8 +26,9 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=feedvision
 
-# Kamera/seri port erisimi icin gerekli gruplar (Raspberry Pi OS varsayilani)
-SupplementaryGroups=dialout video
+# Kamera/seri port erisimi + /system/logs ucunun journalctl'i sudo'suz
+# okuyabilmesi icin gerekli gruplar (Raspberry Pi OS varsayilani)
+SupplementaryGroups=dialout video systemd-journal
 
 # Hafiza sizintisi ihtimaline karsi guvenlik supabı: RPi 5 (4/8GB) icin makul
 # bir tavan; asilirsa systemd servisi yeniden baslatir (OOM ile ugrasmaz).

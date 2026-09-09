@@ -41,6 +41,14 @@ if [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1; then
   SERVICE_GROUP="$(id -gn)"
   UNIT_PATH="/etc/systemd/system/feedvision.service"
 
+  # Web'den /system/logs ucu icin journalctl sudo'suz calisabilsin diye
+  # kullanici systemd-journal grubuna eklenir (idempotent -- zaten uyeyse
+  # usermod hicbir sey degistirmez).
+  if ! id -nG "$SERVICE_USER" | grep -qw "systemd-journal"; then
+    sudo usermod -a -G systemd-journal "$SERVICE_USER"
+    echo "  Kullanici '$SERVICE_USER' systemd-journal grubuna eklendi (etkinlesmesi icin oturum/servis yeniden baslamali)."
+  fi
+
   RENDERED="$(sed \
     -e "s#__APP_DIR__#${APP_DIR}#g" \
     -e "s#__SERVICE_USER__#${SERVICE_USER}#g" \
