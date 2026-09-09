@@ -8,6 +8,13 @@
     h1 { font-size: 28px; }
     .cameras { display: flex; gap: 24px; flex-wrap: wrap; }
     .camera-block { flex: 1; min-width: 320px; }
+    .roi-canvas-wrap { max-width: 640px; }
+    #roi-canvas { max-width: 100%; height: auto; border: 1px solid #444; border-radius: 4px; touch-action: none; cursor: crosshair; background: #222; }
+    #roi-list { list-style: none; padding: 0; margin: 0; }
+    #roi-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid #292929; font-size: 14px; }
+    #roi-list li button { font-size: 13px; padding: 4px 10px; margin: 0; background: #a33; }
+    #roi-list li button:active { background: #722; }
+    #ap2-read-test-result div { padding: 4px 0; }
     button {
       font-size: 20px; padding: 16px 24px; margin: 8px 8px 8px 0;
       border-radius: 8px; border: none; background: #2a6; color: white; cursor: pointer;
@@ -214,12 +221,30 @@
     </div>
   </div>
 
-  <!-- AP2 ekran-okuma proof-of-concept test paneli — bu nihai UI degil,
-       ROI/OCR/renk akisinin uctan uca calistigini gormek icin gecici bir
-       arac. ROI koordinatlari (screen_reader.py DEFAULT_ROI) saha
-       fotograflari gelene kadar sabit/test amaclidir. -->
-  <div class="panel" id="ap2-read-test-panel">
-    <h2>AP2 Ekran Okuma — Test (proof of concept)</h2>
+  <!-- AP2 ROI yonetimi — operator kamera goruntusu uzerinde fare/parmakla
+       dikdortgen (ROI) cizer, her birine isim verir; kayitli ROI'ler
+       roi_config.json'da (rpi-core/roi_store.py) kalici tutulur. Bu nihai
+       operator UI'i degil, calisma/kurulum araci — dikdortgenler eksene
+       paralel, dondurulemez; kamera acisi degisirse yeniden cizilmeli. -->
+  <div class="panel" id="ap2-roi-panel">
+    <h2>AP2 ROI Yönetimi</h2>
+    <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
+      Görüntü üzerinde tıkla-sürükle ile dikdörtgen çiz, isim ver. "Kaydet" ile kalıcı yapılır.
+    </div>
+    <div style="display:flex; gap:24px; flex-wrap:wrap;">
+      <div class="roi-canvas-wrap">
+        <canvas id="roi-canvas" width="1280" height="720"></canvas>
+        <div style="margin-top:8px;">
+          <button onclick="refreshRoiSnapshot()">Yenile</button>
+          <button onclick="saveRois()">Kaydet</button>
+        </div>
+      </div>
+      <div style="min-width:220px; flex:1;">
+        <h3 style="margin-top:0; font-size:15px;">Tanımlı ROI'ler</h3>
+        <ul id="roi-list"><li style="border:none; color:#888;">Henüz ROI yok.</li></ul>
+      </div>
+    </div>
+    <hr style="border-color:#292929; margin:16px 0;">
     <button onclick="readTestAp2()">AP2 Ekranını Oku (Test)</button>
     <div id="ap2-read-test-result">Henüz okunmadı.</div>
   </div>
@@ -562,9 +587,9 @@
         false);
     }
 
-    // AP2 ekran-okuma proof-of-concept — GET /vision/cam2/read-test'i çağırır,
-    // ROI/OCR metni/ortalama HSV rengini hem küçük panelde hem Konsol'da
-    // gösterir. Bu nihai operatör UI'ı değil, geliştirme aşaması test aracı.
+    // AP2 ekran-okuma — GET /vision/cam2/read-test'i çağırır, kayıtlı HER
+    // ROI için ayrı bir satır (isim/OCR metni/ortalama HSV rengi) gösterir.
+    // Bu nihai operatör UI'ı değil, geliştirme/kurulum aşaması test aracı.
     async function readTestAp2() {
       const resultBox = document.getElementById("ap2-read-test-result");
       const buttonName = "AP2 Ekranını Oku (Test)";
@@ -590,10 +615,265 @@
         logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
         return;
       }
-      const [h, s, v] = data.avg_color_hsv;
-      resultBox.textContent =
-        `ROI: [${data.roi.join(", ")}]  |  Metin: "${data.text || "(boş)"}"  |  HSV: (${h.toFixed(1)}, ${s.toFixed(1)}, ${v.toFixed(1)})`;
-      logToConsole(buttonName, task, `Sunucu 200 OK — ${JSON.stringify(data)}`, false);
+      const results = data.results || [];
+      resultBox.textContent = "";
+      if (results.length === 0) {
+        resultBox.textContent = "Kayıtlı ROI yok — yukarıda çizip \"Kaydet\"e basın.";
+      } else {
+        // ROI adı operatörün prompt() ile girdiği serbest metin — sunucudan
+        // olduğu gibi geri dönüyor. innerHTML/template-literal ile basmak
+        // stored XSS'e açık olurdu; bu yüzden DOM API + textContent
+        // kullanılıyor (hiçbir alan HTML olarak yorumlanmıyor).
+        results.forEach((r) => {
+          const [h, s, v] = r.avg_color_hsv;
+          const text = r.text || "(boş)";
+          const line = document.createElement("div");
+          const nameEl = document.createElement("b");
+          nameEl.textContent = r.name;
+          line.appendChild(nameEl);
+          line.appendChild(
+            document.createTextNode(
+              `: "${text}"  |  HSV: (${h.toFixed(1)}, ${s.toFixed(1)}, ${v.toFixed(1)})`
+            )
+          );
+          resultBox.appendChild(line);
+        });
+      }
+      logToConsole(buttonName, task, `Sunucu 200 OK — ${results.length} ROI okundu.`, false);
+    }
+
+    // ==========================================================================
+    //  AP2 ROI YÖNETİMİ — snapshot'ı canvas'a çizer, fare/parmakla dikdörtgen
+    //  (ROI) çizdirir, isimlendirir, GET/POST /vision/cam2/rois ile
+    //  yükler/kaydeder. Dikdörtgenler her zaman eksene paralel — döndürme yok.
+    // ==========================================================================
+    const ROI_CAM_ID = "cam2";
+    let roiList = [];           // {name, x, y, w, h} — orijinal kare (1280x720) koordinatlarında
+    const roiSnapshotImg = new Image();
+    let roiDrawing = null;      // aktif çizim: {startX, startY, curX, curY}
+
+    function roiCanvasEl() {
+      return document.getElementById("roi-canvas");
+    }
+
+    // Ekranda CSS ile küçültülmüş canvas üzerindeki tıklama noktasını,
+    // canvas'ın gerçek çözünürlüğüne (1280x720) ölçekleyerek çevirir.
+    function roiPointFromEvent(evt) {
+      const canvas = roiCanvasEl();
+      const rect = canvas.getBoundingClientRect();
+      const point = evt.touches && evt.touches.length ? evt.touches[0] : evt;
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = Math.round((point.clientX - rect.left) * scaleX);
+      const y = Math.round((point.clientY - rect.top) * scaleY);
+      return {
+        x: Math.min(Math.max(x, 0), canvas.width),
+        y: Math.min(Math.max(y, 0), canvas.height),
+      };
+    }
+
+    function drawRoiCanvas() {
+      const canvas = roiCanvasEl();
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (roiSnapshotImg.complete && roiSnapshotImg.naturalWidth) {
+        ctx.drawImage(roiSnapshotImg, 0, 0, canvas.width, canvas.height);
+      } else {
+        ctx.fillStyle = "#222";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#888";
+        ctx.font = "20px sans-serif";
+        ctx.fillText("Görüntü için \"Yenile\"ye basın", 20, 40);
+      }
+      ctx.lineWidth = 2;
+      ctx.font = "16px sans-serif";
+      roiList.forEach((roi) => {
+        ctx.strokeStyle = "#00e0a0";
+        ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+        ctx.fillStyle = "#00e0a0";
+        ctx.fillText(roi.name, roi.x + 4, roi.y + 18);
+      });
+      if (roiDrawing) {
+        const x = Math.min(roiDrawing.startX, roiDrawing.curX);
+        const y = Math.min(roiDrawing.startY, roiDrawing.curY);
+        const w = Math.abs(roiDrawing.curX - roiDrawing.startX);
+        const h = Math.abs(roiDrawing.curY - roiDrawing.startY);
+        ctx.strokeStyle = "#ffcc00";
+        ctx.strokeRect(x, y, w, h);
+      }
+    }
+
+    function renderRoiList() {
+      const ul = document.getElementById("roi-list");
+      ul.innerHTML = "";
+      if (roiList.length === 0) {
+        ul.innerHTML = '<li style="border:none; color:#888;">Henüz ROI yok.</li>';
+        return;
+      }
+      roiList.forEach((roi, idx) => {
+        const li = document.createElement("li");
+        const label = document.createElement("span");
+        label.textContent = `${roi.name}: [${roi.x}, ${roi.y}, ${roi.w}, ${roi.h}]`;
+        const delBtn = document.createElement("button");
+        delBtn.textContent = "Sil";
+        delBtn.onclick = () => {
+          roiList.splice(idx, 1);
+          renderRoiList();
+          drawRoiCanvas();
+        };
+        li.appendChild(label);
+        li.appendChild(delBtn);
+        ul.appendChild(li);
+      });
+    }
+
+    function roiPointerDown(evt) {
+      evt.preventDefault();
+      const p = roiPointFromEvent(evt);
+      roiDrawing = { startX: p.x, startY: p.y, curX: p.x, curY: p.y };
+    }
+
+    function roiPointerMove(evt) {
+      if (!roiDrawing) return;
+      evt.preventDefault();
+      const p = roiPointFromEvent(evt);
+      roiDrawing.curX = p.x;
+      roiDrawing.curY = p.y;
+      drawRoiCanvas();
+    }
+
+    function roiPointerUp(evt) {
+      if (!roiDrawing) return;
+      evt.preventDefault();
+      const x = Math.min(roiDrawing.startX, roiDrawing.curX);
+      const y = Math.min(roiDrawing.startY, roiDrawing.curY);
+      const w = Math.abs(roiDrawing.curX - roiDrawing.startX);
+      const h = Math.abs(roiDrawing.curY - roiDrawing.startY);
+      roiDrawing = null;
+      if (w < 5 || h < 5) {
+        // Çok küçük/yanlışlıkla tıklama — dikdörtgen sayılmaz, yok say.
+        drawRoiCanvas();
+        return;
+      }
+      const name = prompt("Bu ROI için bir isim/etiket girin (örn. sicaklik_degeri):");
+      if (!name || !name.trim()) {
+        drawRoiCanvas();
+        return;
+      }
+      roiList.push({ name: name.trim(), x, y, w, h });
+      renderRoiList();
+      drawRoiCanvas();
+    }
+
+    function setupRoiCanvasEvents() {
+      const canvas = roiCanvasEl();
+      canvas.addEventListener("mousedown", roiPointerDown);
+      canvas.addEventListener("mousemove", roiPointerMove);
+      window.addEventListener("mouseup", roiPointerUp);
+      canvas.addEventListener("touchstart", roiPointerDown, { passive: false });
+      canvas.addEventListener("touchmove", roiPointerMove, { passive: false });
+      canvas.addEventListener("touchend", roiPointerUp, { passive: false });
+    }
+
+    // AP2'nin anlık karesini çekip canvas arka planına koyar (kamera açısı/
+    // pozisyonu değiştiyse tekrar çizmek için de kullanılır).
+    async function refreshRoiSnapshot() {
+      const buttonName = "AP2 ROI - Yenile";
+      const task = `GET /vision/${ROI_CAM_ID}/snapshot`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/snapshot?_=${Date.now()}`);
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      if (!response.ok) {
+        let detail;
+        try {
+          const data = await response.json();
+          detail = data.detail ?? JSON.stringify(data);
+        } catch {
+          detail = await response.text();
+        }
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      try {
+        await new Promise((resolve, reject) => {
+          roiSnapshotImg.onload = resolve;
+          roiSnapshotImg.onerror = reject;
+          roiSnapshotImg.src = url;
+        });
+      } catch {
+        logToConsole(buttonName, task, "Görüntü çözümlenemedi (bozuk JPEG).", true);
+        return;
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+      drawRoiCanvas();
+      logToConsole(buttonName, task, `Kare güncellendi (${roiSnapshotImg.naturalWidth}x${roiSnapshotImg.naturalHeight}).`, false);
+    }
+
+    // Sayfa açılışında kayıtlı ROI'leri sunucudan çeker (kaldığı yerden devam).
+    async function loadRois() {
+      const buttonName = "AP2 ROI - Yükle";
+      const task = `GET /vision/${ROI_CAM_ID}/rois`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/rois`);
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      if (!response.ok) {
+        let detail;
+        try {
+          const data = await response.json();
+          detail = data.detail ?? JSON.stringify(data);
+        } catch {
+          detail = await response.text();
+        }
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      const data = await response.json();
+      roiList = data.rois || [];
+      renderRoiList();
+      drawRoiCanvas();
+      logToConsole(buttonName, task, `${roiList.length} ROI yüklendi.`, false);
+    }
+
+    // O anki ROI listesini sunucuya "replace-all" olarak kaydeder.
+    async function saveRois() {
+      const buttonName = "AP2 ROI - Kaydet";
+      const task = `POST /vision/${ROI_CAM_ID}/rois`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/rois`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rois: roiList }),
+        });
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        alert(`Kaydedilemedi (ağ hatası): ${e.message}`);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        const detail = data?.detail ?? (data ? JSON.stringify(data) : "boş yanıt");
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        alert(`Kaydedilemedi: ${detail}`);
+        return;
+      }
+      logToConsole(buttonName, task, `Sunucu 200 OK — ${roiList.length} ROI kaydedildi.`, false);
     }
 
     // ==========================================================================
@@ -1332,6 +1612,11 @@
 
     fetchResources();
     setInterval(fetchResources, RESOURCE_POLL_MS);
+
+    // AP2 ROI paneli: çizim olaylarını bağla, kayıtlı ROI'leri yükle, ilk kareyi çek.
+    setupRoiCanvasEvents();
+    loadRois();
+    refreshRoiSnapshot();
   </script>
 </body>
 </html>
