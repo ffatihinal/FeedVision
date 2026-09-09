@@ -19,6 +19,7 @@ gerektirir — bu Raspberry Pi OS dışında kurulamaz, Mac/Windows'ta
 """
 
 import asyncio
+import re
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -194,6 +195,45 @@ def system_logs(lines: int = 200):
         raise HTTPException(status_code=500, detail=f"journalctl hata verdi: {result.stderr.strip()}")
 
     return result.stdout
+
+
+# ==============================================================================
+#  SOC SICAKLIGI — `vcgencmd measure_temp` ile Pi'nin SoC sicakligini web'e
+#  tasir (daha once elle `watch -n 0.5 vcgencmd measure_temp` ile bakiliyordu).
+# ==============================================================================
+
+VCGENCMD_TIMEOUT_S = 5
+TEMP_RE = re.compile(r"temp=([\d.]+)")
+
+
+@app.get("/system/temp")
+def system_temp():
+    """SoC sicakligini `{"temp_c": 42.8}` olarak doner.
+
+    Mac/Windows gelistirme ortaminda `vcgencmd` bulunmaz — sunucu cokmesin
+    diye 503 + gercek hata sebebi `detail` alaninda donulur (vision.py'deki
+    errors pattern'iyle ayni felsefe, uydurma mesaj yok).
+    """
+    try:
+        result = subprocess.run(
+            ["vcgencmd", "measure_temp"],
+            capture_output=True,
+            text=True,
+            timeout=VCGENCMD_TIMEOUT_S,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=503, detail="vcgencmd bulunamadi (Raspberry Pi disinda mi calisiyor?)")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=503, detail="vcgencmd zaman asimina ugradi")
+
+    if result.returncode != 0:
+        raise HTTPException(status_code=503, detail=f"vcgencmd hata verdi: {result.stderr.strip()}")
+
+    match = TEMP_RE.search(result.stdout)
+    if not match:
+        raise HTTPException(status_code=503, detail=f"vcgencmd ciktisi ayristirilamadi: {result.stdout.strip()!r}")
+
+    return {"temp_c": float(match.group(1))}
 
 
 @app.get("/", response_class=HTMLResponse)

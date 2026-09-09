@@ -142,6 +142,19 @@
     #guide-body th { color: #9c9; font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; }
     #guide-body td { color: #ddd; }
     #guide-body .note { font-size: 12.5px; color: #888; margin-top: 4px; }
+
+    /* --- SoC sıcaklık paneli --- */
+    #temp-panel .chart-box { max-width: 420px; }
+    #temp-current { font-family: "SF Mono", Menlo, monospace; font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+    #temp-error { color: #f77; font-size: 13px; margin-top: 6px; display: none; }
+    #temp-error.show { display: block; }
+
+    /* Kritik sıcaklık (>=85°C) — sayfa genelinde yanıp sönen kırmızı uyarı çerçevesi. */
+    @keyframes temp-critical-pulse {
+      0%, 100% { box-shadow: inset 0 0 0 4px rgba(244, 67, 54, 0.15); background-color: rgba(244, 67, 54, 0.03); }
+      50% { box-shadow: inset 0 0 0 4px rgba(244, 67, 54, 0.65); background-color: rgba(244, 67, 54, 0.12); }
+    }
+    body.temp-critical { animation: temp-critical-pulse 1s ease-in-out infinite; }
   </style>
 </head>
 <body>
@@ -176,6 +189,13 @@
       <br>
       <img id="camera-cam2">
     </div>
+  </div>
+
+  <div class="panel" id="temp-panel">
+    <h2>SoC Sıcaklığı (Raspberry Pi)</h2>
+    <div id="temp-current">— °C</div>
+    <div class="chart-box"><div class="chart-title">Son 5 saniye</div><canvas id="chart-temp"></canvas></div>
+    <div id="temp-error"></div>
   </div>
 
   <div class="panel">
@@ -487,6 +507,159 @@
       logToConsole(buttonName, task,
         `Sunucu 200 OK (content-type: ${contentType}${contentLength ? `, ${contentLength} byte` : ""}) — akış açıldı.`,
         false);
+    }
+
+    // ==========================================================================
+    //  SoC SICAKLIĞI — GET /system/temp'i 0.5sn'de bir çeker, son 5 saniyeyi
+    //  (10 nokta) sabit pencereli bir grafikte gösterir. Daha önce elle
+    //  `watch -n 0.5 vcgencmd measure_temp` ile bakılıyordu.
+    // ==========================================================================
+    const TEMP_POLL_MS = 500;
+    const TEMP_HISTORY_MAX = 10;   // son 5s / 0.5s
+    const TEMP_WINDOW_S = 5;       // x ekseni her zaman sabit "0s" → "5s"
+    const TEMP_Y_SPAN = 10;        // y ekseni sabit 10°C'lik pencere
+
+    let tempHistory = [];          // son TEMP_HISTORY_MAX okuma (°C), en yeni en sonda
+    let tempWindowMin = null, tempWindowMax = null;  // y ekseni penceresi — sadece taşınca kayar
+    let tempPrevBand = "normal";   // normal | throttle | critical — sadece durum DEĞİŞİNCE logla
+
+    function tempColorFor(t) {
+      if (t < 60) return "#4caf50";   // yeşil
+      if (t < 75) return "#e0c840";   // sarı
+      if (t < 80) return "#ff9800";   // turuncu
+      return "#f44336";               // kırmızı (80-85 ve ≥85 aynı renk, ≥85 ayrıca kritik alarm tetikler)
+    }
+
+    function tempBandFor(t) {
+      if (t >= 85) return "critical";
+      if (t >= 80) return "throttle";
+      return "normal";
+    }
+
+    // Pencere varsayılan olarak ilk okumanın etrafında başlar, sadece yeni bir
+    // okuma o anki 10°C'lik pencerenin dışına çıkarsa kayar (her karede
+    // otomatik sığdırma YAPMIYORUZ — kasıtlı olarak "sabit, taşınca kaydır").
+    function updateTempWindow(t) {
+      if (tempWindowMin === null) {
+        tempWindowMin = Math.floor(t - TEMP_Y_SPAN / 2);
+        tempWindowMax = tempWindowMin + TEMP_Y_SPAN;
+        return;
+      }
+      if (t < tempWindowMin) {
+        tempWindowMin = Math.floor(t - 1);
+        tempWindowMax = tempWindowMin + TEMP_Y_SPAN;
+      } else if (t > tempWindowMax) {
+        tempWindowMax = Math.ceil(t + 1);
+        tempWindowMin = tempWindowMax - TEMP_Y_SPAN;
+      }
+    }
+
+    // Kritik alarm (≥85°C): sayfa genelinde yanıp sönen kırmızı efekt +
+    // konsola durum DEĞİŞTİĞİNDE bir kez log (WebSocket bağlantı durumu
+    // loglamasındaki "önceki durumla kıyasla değiştiyse yaz" pattern'i).
+    function handleTempAlarm(t) {
+      const band = tempBandFor(t);
+      if (band !== tempPrevBand) {
+        if (band === "throttle") {
+          logToConsole("Sıcaklık İzleme", "SoC sıcaklığını izle", `Sıcaklık throttle bölgesine girdi (${t.toFixed(1)}°C)`, true);
+        } else if (band === "critical") {
+          logToConsole("Sıcaklık İzleme", "SoC sıcaklığını izle", `Sıcaklık kritik seviyede (${t.toFixed(1)}°C) — acil kapanmaya yakın`, true);
+        } else if (tempPrevBand !== "normal") {
+          logToConsole("Sıcaklık İzleme", "SoC sıcaklığını izle", `Sıcaklık normale döndü (${t.toFixed(1)}°C)`, false);
+        }
+        tempPrevBand = band;
+      }
+      document.body.classList.toggle("temp-critical", band === "critical");
+    }
+
+    function showTempError(detail) {
+      const box = document.getElementById("temp-error");
+      box.textContent = `Sıcaklık verisi alınamıyor: ${detail}`;
+      box.classList.add("show");
+    }
+
+    function hideTempError() {
+      document.getElementById("temp-error").classList.remove("show");
+    }
+
+    function pushTempSample(t) {
+      tempHistory.push(t);
+      while (tempHistory.length > TEMP_HISTORY_MAX) tempHistory.shift();  // 11. gelince en eski silinir
+      const color = tempColorFor(t);
+      const cur = document.getElementById("temp-current");
+      cur.textContent = `${t.toFixed(1)} °C`;
+      cur.style.color = color;
+      updateTempWindow(t);
+      handleTempAlarm(t);
+      drawTempChart("chart-temp", tempHistory, color);
+    }
+
+    async function fetchTemp() {
+      let response;
+      try {
+        response = await fetch("/system/temp");
+      } catch (e) {
+        showTempError(`Sunucuya ulaşılamadı (ağ hatası): ${e.message}`);
+        return;
+      }
+      if (!response.ok) {
+        // Gerçek backend detail metnini göster (ör. Mac'te vcgencmd yok) —
+        // uydurma/tahmini mesaj yazma, kamera panelindeki fetch pattern'iyle aynı.
+        let detail;
+        try {
+          const data = await response.json();
+          detail = data.detail ?? JSON.stringify(data);
+        } catch {
+          detail = await response.text();
+        }
+        showTempError(detail);
+        return;
+      }
+      hideTempError();
+      const data = await response.json();
+      pushTempSample(data.temp_c);
+    }
+
+    // Mevcut drawChart'tan bilinçli olarak ayrı: eksenler dinamik sığdırma
+    // YAPMIYOR — x ekseni sabit 0s→5s, y ekseni sabit 10°C'lik pencere.
+    function drawTempChart(canvasId, history, color) {
+      const canvas = document.getElementById(canvasId);
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth || 300, h = canvas.clientHeight || 120;
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr; canvas.height = h * dpr;
+      }
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      const padL = 42, padB = 16, padT = 6, padR = 6;
+      const plotW = w - padL - padR, plotH = h - padT - padB;
+
+      if (!history.length || tempWindowMin === null) {
+        ctx.fillStyle = "#555"; ctx.font = "11px sans-serif"; ctx.fillText("Veri yok", 8, h / 2);
+        return;
+      }
+
+      const yMin = tempWindowMin, yMax = tempWindowMax;
+      const px = i => padL + (i * 0.5 / TEMP_WINDOW_S) * plotW;
+      const py = v => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+      ctx.strokeStyle = "#222"; ctx.fillStyle = "#666"; ctx.font = "10px monospace"; ctx.lineWidth = 1;
+      [0, 0.5, 1].forEach(f => {
+        const yy = padT + plotH * f;
+        ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w - padR, yy); ctx.stroke();
+        ctx.fillText((yMax - (yMax - yMin) * f).toFixed(0), 2, yy + 3);
+      });
+      ctx.fillText("0s", padL - 2, h - 2);
+      ctx.fillText("5s", w - padR - 14, h - 2);
+
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+      history.forEach((t, i) => {
+        const x = px(i), y = py(t);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
     }
 
     // ==========================================================================
@@ -895,10 +1068,12 @@
     // yeniden çizmek gereksiz — Pi'de de rahat çalışsın diye seyreltildi).
     setInterval(redrawActualCharts, 200);
 
-    // Sayfa açılır açılmaz: port listesini çek + canlı durum akışını başlat + teker çaplarını geri yükle.
+    // Sayfa açılır açılmaz: port listesini çek + canlı durum akışını başlat + teker çaplarını geri yükle + sıcaklık izlemeyi başlat.
     refreshPorts();
     startWebSocket();
     loadWheelDiameters();
+    fetchTemp();
+    setInterval(fetchTemp, TEMP_POLL_MS);
   </script>
 </body>
 </html>
