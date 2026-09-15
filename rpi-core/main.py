@@ -47,14 +47,14 @@ from vision import CAMERA_NUMS, STREAM_SIZE, vision
 
 VALID_CAM_IDS = set(CAMERA_NUMS)  # {"chamber", "ui_screen"}
 
-# Kural Motoru (madde 1 ROI kural mantığı + madde 2 güvenlik interlock +
+# Kontrol Kriterleri (madde 1 ROI kriter mantığı + madde 2 güvenlik interlock +
 # madde 7 aralık dışı alarm — bkz. rule_engine.py docstring'i) kaç saniyede
 # bir kontrol yapacağı. 2sn seçildi: OCR+kırpma işlemi (~birkaç 10ms, bkz.
 # read-test duration_ms) yanında ek yük yaratmaz, ama "nadiren" olan bir
 # arızayı (proje kapsamı) makul sürede yakalar. Sahada gerekirse kısaltılır.
 RULE_CHECK_INTERVAL_S = 2.0
 
-# En son kural değerlendirmesinin sonucu — /rules/status ve /ws/status bunu
+# En son Kontrol Kriterleri değerlendirmesinin sonucu — /rules/status ve /ws/status bunu
 # okur. Modül seviyesinde tutuluyor (bridge/vision ile aynı desen): tek
 # süreç, tek paylaşılan durum, thread/task güvenliği için ekstra kilide
 # gerek yok çünkü SADECE _rule_engine_loop() yazıyor, başkaları sadece okuyor.
@@ -62,7 +62,7 @@ _current_violations: list[dict] = []
 _current_skipped: list[dict] = []
 _rule_engine_task: "asyncio.Task | None" = None
 
-# Operasyonel journal (madde 6): kural motorundan (2sn) daha seyrek —
+# Operasyonel journal (madde 6): Kontrol Kriterleri'nden (2sn) daha seyrek —
 # ekrandaki değerler bu sıklıkta değişse bile her 2sn'de bir diske yazmak
 # günlük dosyayı gereksiz şişirir; 10sn "ne oldu" sorusuna cevap vermek için
 # yeterli çözünürlük, disk/CPU yükü ihmal edilebilir düzeyde kalır.
@@ -201,7 +201,7 @@ def _adjust_rois_for_drift(cam_id: str, frame: np.ndarray, rois: list[dict]) -> 
 
     Döner: (düzeltilmiş roi listesi, uncertain) — uncertain=True ise bezel bu
     karede bulunamadı ve son bilinen köşe (ya da hiç yoksa referansın kendisi)
-    kullanıldı; çağıran taraf bunu kullanıcıya/Kural Motoru'na "ROI referansı
+    kullanıldı; çağıran taraf bunu kullanıcıya/Kontrol Kriterleri'ne "ROI referansı
     belirsiz" olarak iletmeli (sessizce yanlış okumak yerine açıkça bildirmek).
     """
     reference = calibration_store.get_reference(cam_id)
@@ -271,7 +271,7 @@ def _capture_frame(cam_id: str) -> np.ndarray | None:
     """Kameradan tek kare alip decode eder. Kamera kapaliysa/decode
     basarisizsa None doner (cagiran taraf HTTP hatasi ya da sessiz atlama
     olarak kendi baglaminda ele alir — bu fonksiyon FastAPI'ye bagli degil,
-    hem endpoint hem arka plan kural dongusu tarafindan kullanilabilsin diye)."""
+    hem endpoint hem arka plan Kontrol Kriterleri dongusu tarafindan kullanilabilsin diye)."""
     jpg = vision.capture_jpeg(cam_id)
     if jpg is None:
         return None
@@ -281,7 +281,7 @@ def _capture_frame(cam_id: str) -> np.ndarray | None:
 def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
     """Bir kamera icin kayitli TUM ROI'leri (kalibrasyona gore kaymayi
     telafi ederek) okur. Hem /vision/{cam_id}/read-test endpoint'i hem
-    Kural Motoru dongusu tarafindan kullanilan ORTAK yol — iki yerde ayni
+    Kontrol Kriterleri dongusu tarafindan kullanilan ORTAK yol — iki yerde ayni
     mantigin tekrarlanip zamanla birbirinden sapmasini onler.
 
     Doner: (okuma sonuc listesi [{"name","roi","text","ocr_error",
@@ -387,21 +387,23 @@ def set_rois(cam_id: str, payload: RoiListPayload):
 
 
 # ==============================================================================
-#  KURAL MOTORU — madde 1 (ROI kural mantığı) + madde 2 (güvenlik interlock)
-#  + madde 7 (aralık dışı alarm), TEK motor olarak (bkz. rule_engine.py).
-#  Kurallar periyodik arka plan görevinde (_rule_engine_loop) değerlendirilir;
-#  ihlal olunca motor durdurulur + alarm durumu bellekte tutulup UI'a
-#  (/rules/status, /ws/status) yansıtılır.
+#  KONTROL KRİTERLERİ — madde 1 (ROI kriter mantığı) + madde 2 (güvenlik
+#  interlock) + madde 7 (aralık dışı alarm), TEK motor olarak (bkz.
+#  rule_engine.py). Kriterler periyodik arka plan görevinde
+#  (_rule_engine_loop) değerlendirilir; ihlal olunca motor durdurulur +
+#  alarm durumu bellekte tutulup UI'a (/rules/status, /ws/status) yansıtılır.
+#  (İç endpoint/değişken adları "rules" kaldı — kullanıcıya görünen tüm
+#  metin/yorumlarda terim "Kontrol Kriterleri", 15-09-2026 Fatih kararı.)
 # ==============================================================================
 
 
 class RuleDef(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=128)
-    source: str  # "roi" | "stm32"
+    source: str  # "roi" | "stm"
     cam_id: str | None = None  # source="roi" ise zorunlu
     roi_name: str | None = None  # source="roi" ise zorunlu
-    field: str | None = None  # source="stm32" ise zorunlu
+    timeout_s: float | None = None  # source="stm" ise zorunlu — bağlantı kaç sn sessiz kalınca ihlal
     min: float | None = None
     max: float | None = None
     stop_motor: bool = False
@@ -414,26 +416,26 @@ class RuleListPayload(BaseModel):
 
 @app.get("/rules")
 def get_rules():
-    """Kayıtlı TÜM kuralları döner (hiç tanımlanmamışsa boş liste)."""
+    """Kayıtlı TÜM Kontrol Kriterlerini döner (hiç tanımlanmamışsa boş liste)."""
     return {"rules": rules_store.get_rules()}
 
 
 @app.post("/rules")
 def set_rules(payload: RuleListPayload):
-    """TÜM kural listesini değiştirir (replace-all, ROI yönetimiyle aynı desen).
+    """TÜM Kontrol Kriterleri listesini değiştirir (replace-all, ROI yönetimiyle aynı desen).
 
-    Basit doğrulama: source="roi" için cam_id+roi_name, source="stm32" için
-    field zorunlu — eksikse kural sessizce yanlış çalışmak yerine 400 ile
-    reddedilir (ör. hangi ROI/alan izleneceği belirsiz bir kural, motor
-    durdurma kararını asla veremeyecek bir kural demektir, kaydedilmemeli).
+    Basit doğrulama: source="roi" için cam_id+roi_name, source="stm" için
+    timeout_s zorunlu — eksikse kriter sessizce yanlış çalışmak yerine 400
+    ile reddedilir (ör. hangi ROI/alan izleneceği belirsiz bir kriter, motor
+    durdurma kararını asla veremeyecek bir kriter demektir, kaydedilmemeli).
     """
     for rule in payload.rules:
         if rule.source == "roi" and not (rule.cam_id and rule.roi_name):
-            raise HTTPException(status_code=400, detail=f"Kural '{rule.name}': source=roi için cam_id+roi_name zorunlu")
-        if rule.source == "stm32" and not rule.field:
-            raise HTTPException(status_code=400, detail=f"Kural '{rule.name}': source=stm32 için field zorunlu")
-        if rule.source not in ("roi", "stm32"):
-            raise HTTPException(status_code=400, detail=f"Kural '{rule.name}': bilinmeyen source '{rule.source}'")
+            raise HTTPException(status_code=400, detail=f"Kriter '{rule.name}': source=roi için cam_id+roi_name zorunlu")
+        if rule.source == "stm" and rule.timeout_s is None:
+            raise HTTPException(status_code=400, detail=f"Kriter '{rule.name}': source=stm için timeout_s zorunlu")
+        if rule.source not in ("roi", "stm"):
+            raise HTTPException(status_code=400, detail=f"Kriter '{rule.name}': bilinmeyen source '{rule.source}'")
     rules_as_dicts = [r.model_dump() for r in payload.rules]
     rules_store.save_rules(rules_as_dicts)
     return {"success": True, "rules": rules_store.get_rules()}
@@ -441,16 +443,16 @@ def set_rules(payload: RuleListPayload):
 
 @app.get("/rules/status")
 def get_rules_status():
-    """En son kural değerlendirmesinin sonucu — UI'ın alarm banner'ı ve
-    "şu kural şu an okunamıyor" listesi bunu periyodik olarak çeker."""
+    """En son Kontrol Kriterleri değerlendirmesinin sonucu — UI'ın alarm
+    banner'ı ve "şu kriter şu an okunamıyor" listesi bunu periyodik olarak çeker."""
     return {"violations": _current_violations, "skipped": _current_skipped}
 
 
 def _collect_roi_readings(cam_ids: set[str]) -> dict[tuple[str, str], dict]:
-    """Verilen kameralardan kayıtlı TÜM ROI'leri okuyup, kural motorunun
-    beklediği {(cam_id, roi_name): {"text":..., "avg_color_hsv":...}}
+    """Verilen kameralardan kayıtlı TÜM ROI'leri okuyup, Kontrol
+    Kriterleri'nin beklediği {(cam_id, roi_name): {"text":..., "avg_color_hsv":...}}
     formatına çevirir. Kamera açılamazsa o kamera sessizce atlanır (bağlı
-    kural değerlendirilemez -> skipped listesine düşer, motoru durdurmaz —
+    kriter değerlendirilemez -> skipped listesine düşer, motoru durdurmaz —
     bkz. rule_engine.py'deki "okunamayan değer ihlal sayılmaz" prensibi)."""
     readings: dict[tuple[str, str], dict] = {}
     for cam_id in cam_ids:
@@ -465,8 +467,8 @@ def _collect_roi_readings(cam_ids: set[str]) -> dict[tuple[str, str], dict]:
 
 async def _rule_engine_loop():
     """Arka planda sürekli çalışır: RULE_CHECK_INTERVAL_S'te bir kayıtlı
-    kuralları değerlendirir, ihlal varsa motoru durdurur + alarm durumunu
-    günceller. lifespan() içinde başlatılır/iptal edilir (bkz. yukarısı)."""
+    Kontrol Kriterlerini değerlendirir, ihlal varsa motoru durdurur + alarm
+    durumunu günceller. lifespan() içinde başlatılır/iptal edilir (bkz. yukarısı)."""
     global _current_violations, _current_skipped
     while True:
         try:
@@ -475,7 +477,8 @@ async def _rule_engine_loop():
                 cam_ids_needed = {r["cam_id"] for r in rules if r.get("source") == "roi" and r.get("cam_id")}
                 roi_readings = _collect_roi_readings(cam_ids_needed) if cam_ids_needed else {}
                 stm32_status = bridge.get_status()
-                violations, skipped = evaluate_rules(rules, roi_readings, stm32_status)
+                stm32_meta = {"is_connected": bridge.is_connected, "status_age_s": bridge.get_status_age()}
+                violations, skipped = evaluate_rules(rules, roi_readings, stm32_status, stm32_meta)
                 _current_violations = [v.__dict__ for v in violations]
                 _current_skipped = [s.__dict__ for s in skipped]
                 # Herhangi bir ihlal stop_motor=true ise motoru durdur. Her
@@ -489,13 +492,13 @@ async def _rule_engine_loop():
                 _current_violations = []
                 _current_skipped = []
         except Exception:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
-            logging.getLogger("feedvision.rules").exception("Kural Motoru dongusunde beklenmeyen hata")
+            logging.getLogger("feedvision.rules").exception("Kontrol Kriterleri dongusunde beklenmeyen hata")
         await asyncio.sleep(RULE_CHECK_INTERVAL_S)
 
 
 async def _journal_loop():
     """Arka planda sürekli çalışır: JOURNAL_INTERVAL_S'te bir, o an ekrandan
-    takip edilen TÜM değerleri (kural motorunun baktığı belirli ROI'lerle
+    takip edilen TÜM değerleri (Kontrol Kriterleri'nin baktığı belirli ROI'lerle
     sınırlı değil — kayıtlı her iki kameranın da tüm ROI'leri + STM32
     durumu) günün journal dosyasına ekler (bkz. journal.py). lifespan()
     içinde başlatılır/iptal edilir."""
@@ -593,7 +596,7 @@ async def ws_status(websocket: WebSocket):
                     "is_connected": bridge.is_connected,
                     "last_error": bridge.last_error,
                     "status": bridge.get_status(),
-                    # Kural Motoru'nun en son değerlendirmesi — UI polling'e
+                    # Kontrol Kriterleri'nin en son değerlendirmesi — UI polling'e
                     # gerek kalmadan alarm banner'ını canlı güncelleyebilsin
                     # diye zaten var olan bu akışa iğnelendi (ayrı bir
                     # WebSocket açmaya gerek yok).
@@ -820,7 +823,7 @@ def operator_page():
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page():
-    """Admin ekranı — tam erişim (ROI/kalibrasyon, kural tanımlama, ham
+    """Admin ekranı — tam erişim (ROI/kalibrasyon, Kontrol Kriterleri tanımlama, ham
     motor komutları, sistem logları/journal, hareket analizi). Şifre YOK
     (15-09-2026 kararı — bkz. landing() docstring'i)."""
     return _read_ui_file("admin.html")

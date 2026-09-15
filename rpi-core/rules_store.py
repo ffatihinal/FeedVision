@@ -1,13 +1,17 @@
 """
-FeedVision — Kural Motoru: kural listesi kalıcı deposu
+FeedVision — Kontrol Kriterleri: kriter listesi kalıcı deposu
 
-Ne yapar: operatörün tanımladığı izleme kurallarını (ör. "ui_screen/basinc
+Ne yapar: operatörün tanımladığı izleme kriterlerini (ör. "ui_screen/basinc
 2-6 bar olmali, disina cikinca motoru durdur") bir JSON dosyasinda
 (rules_config.json) saklar/okur. roi_store.py / calibration_store.py ile
 BİREBİR AYNI desen (atomik yazim, bozuk/eksik dosyada sessizce bos donme,
 tek modul-seviyesi kilit) — tutarlilik icin kasitli olarak kopyalandi,
 ortak bir taban sinifa cikarmak bu olcekte (3 kucuk dosya) gereksiz
 soyutlama olurdu.
+
+(Dosya/degisken adlari "rules"/RuleDef vb. kod tarafinda İngilizce kaldi —
+proje kurali; sadece kullaniciya gorunen metin/yorumlarda "Kontrol
+Kriterleri" terimi kullaniliyor, 15-09-2026 Fatih karari.)
 """
 
 import json
@@ -20,10 +24,16 @@ CONFIG_PATH = Path(__file__).resolve().parent / "rules_config.json"
 
 _lock = threading.Lock()
 
+# Eski kaynak turu (source="stm32", serbest "field" adiyla) 15-09-2026'da
+# kapsam disi birakildi — artik SADECE "stm" (baglanti timeout'u, "field"
+# yerine "timeout_s"). Eski kayitlarla karsilasirsak veri kaybetmeden/
+# hata vermeden makul bir varsayimla (10sn timeout) tasiyoruz.
+_LEGACY_STM_DEFAULT_TIMEOUT_S = 10.0
+
 
 def _read_all() -> list[dict]:
     """rules_config.json'un tamamini okur. Dosya yoksa/bozuksa bos liste
-    doner (servis cokmesin, "henuz hic kural tanimlanmamis" gibi davransin)."""
+    doner (servis cokmesin, "henuz hic kriter tanimlanmamis" gibi davransin)."""
     if not CONFIG_PATH.exists():
         return []
     try:
@@ -37,21 +47,28 @@ def _read_all() -> list[dict]:
 
 
 def get_rules() -> list[dict]:
-    """Tum kayitli kurallari doner (kayitli degilse bos liste).
+    """Tum kayitli kriterleri doner (kayitli degilse bos liste).
 
-    Her kuralin (source="roi" ise) cam_id alani, eski "cam1"/"cam2" ise
-    bellek icinde yeni isimlere (chamber/ui_screen) tasinir — dosya burada
-    yeniden yazilmaz (roi_store.py'deki ayni desen, bkz. o dosyadaki aciklama)."""
+    İki bellek-içi (dosyayı yeniden yazmayan) geçiş uygulanır:
+    - (source="roi" ise) cam_id alani, eski "cam1"/"cam2" ise yeni isimlere
+      (chamber/ui_screen) tasinir (bkz. roi_store.py'deki ayni desen).
+    - (source="stm32" ise, ESKI kapsam) "stm" olarak yeniden adlandirilir,
+      serbest "field" alani atilir, "timeout_s" yoksa varsayilan verilir.
+    """
     with _lock:
         rules = _read_all()
     for rule in rules:
         if rule.get("source") == "roi" and "cam_id" in rule:
             rule["cam_id"] = migrate_legacy_camera_id(rule["cam_id"])
+        elif rule.get("source") == "stm32":
+            rule["source"] = "stm"
+            rule.pop("field", None)
+            rule.setdefault("timeout_s", _LEGACY_STM_DEFAULT_TIMEOUT_S)
     return rules
 
 
 def save_rules(rules: list[dict]) -> None:
-    """TUM kural listesini degistirir (replace-all, tekil ekle/sil yok —
+    """TUM kriter listesini degistirir (replace-all, tekil ekle/sil yok —
     UI zaten her zaman tam listeyi gonderiyor, roi_store.py'deki ROI
     yonetimiyle ayni desen)."""
     with _lock:

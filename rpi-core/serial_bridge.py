@@ -32,6 +32,9 @@ class STM32Bridge:
         self._lock = threading.Lock()
         self._cmd_lock = threading.Lock()  # tek seferde tek komut+yanıt döngüsü (yarış durumunu önler)
         self._last_status: dict = {}
+        self._last_status_at: Optional[float] = None  # time.time() — Kontrol Kriterleri'nin
+        # "bağlantı koptu/timeout" kriteri icin (bkz. get_status_age()); hic
+        # durum satiri gelmediyse None kalir.
         self._last_reply: Optional[dict] = None
         self._last_reply_raw: Optional[str] = None
         self._reply_event = threading.Event()
@@ -56,6 +59,7 @@ class STM32Bridge:
         kapatıyoruz, yanlış pozitif "Bağlı" göstermeyelim diye."""
         with self._lock:
             self._last_status = {}
+            self._last_status_at = None
         try:
             self._serial = serial.Serial(port, BAUD, timeout=1)
         except Exception as e:
@@ -126,12 +130,26 @@ class STM32Bridge:
             else:
                 with self._lock:
                     self._last_status = data
+                    self._last_status_at = time.time()
 
     def get_status(self) -> dict:
         """UI'ın (WebSocket üzerinden) periyodik olarak sorguladığı, en son bilinen durum.
         Artık SADECE gerçek durum satırlarını içeriyor — ok/err yanıtları karışmıyor."""
         with self._lock:
             return dict(self._last_status)
+
+    def get_status_age(self) -> Optional[float]:
+        """Son gerçek durum satırının üzerinden kaç saniye geçtiğini döner.
+
+        Hiç durum satırı gelmediyse (bağlantı hiç kurulmadı/yeni açıldı)
+        None döner — Kontrol Kriterleri'nin "bağlantı koptu/timeout"
+        kriteri bunu 'henüz değerlendirilemez' (violation değil, skipped)
+        olarak ele alır (bkz. rule_engine.py)."""
+        with self._lock:
+            last_at = self._last_status_at
+        if last_at is None:
+            return None
+        return time.time() - last_at
 
     def send_command(self, command: dict, reply_timeout: float = 0.3) -> dict:
         """Tek satır JSON komutu STM32'ye yollar ve kartın {"ok":...}/{"err":...}
