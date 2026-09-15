@@ -34,12 +34,24 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+import calibration_store
 import roi_store
+from screen_calibration import compute_warp_matrix, detect_screen_corners, warp_roi_rect
 from screen_reader import read_roi
 from serial_bridge import bridge
 from vision import CAMERA_NUMS, STREAM_SIZE, vision
 
 VALID_CAM_IDS = set(CAMERA_NUMS)  # {"cam1", "cam2"}
+
+# ROI drift düzeltme: bir önceki karede gerçekten bulunan bezel köşeleri,
+# kamera başına bellekte tutulur. Neden gerekli: kalibrasyon anındaki
+# REFERANS köşeler sabit ama bezel HER karede yeniden aranıyor — tek bir
+# karede (ör. anlık parlama/glare) bulunamazsa, tamamen ROI'yi düzeltmeden
+# (kalibrasyon-öncesi ham haline) dönmek yerine son bilinen iyi köşeyi
+# kullanmak daha az sıçramalı/daha güvenli bir davranış. Süreç yeniden
+# başlarsa (servis restart) sıfırlanır — sorun değil, bir sonraki başarılı
+# karede yeniden dolar.
+_last_known_corners: dict[str, "np.ndarray"] = {}
 
 
 class _PollingAccessLogFilter(logging.Filter):
@@ -123,11 +135,86 @@ def vision_snapshot(cam_id: str):
     return Response(content=jpg, media_type="image/jpeg")
 
 
+def _adjust_rois_for_drift(cam_id: str, frame: np.ndarray, rois: list[dict]) -> tuple[list[dict], bool]:
+    """Kayıtlı ROI'leri, kamera kaymasını (drift) telafi edecek şekilde günceller.
+
+    Kalibrasyon (bkz. /vision/{cam_id}/calibrate) hiç yapılmamışsa ROI'ler
+    olduğu gibi (düzeltmesiz) döner — bu özellik OPSİYONEL/geriye uyumlu,
+    kalibrasyon yapılmadan da eski davranış (ham ROI) çalışmaya devam eder.
+
+    Döner: (düzeltilmiş roi listesi, uncertain) — uncertain=True ise bezel bu
+    karede bulunamadı ve son bilinen köşe (ya da hiç yoksa referansın kendisi)
+    kullanıldı; çağıran taraf bunu kullanıcıya/Kural Motoru'na "ROI referansı
+    belirsiz" olarak iletmeli (sessizce yanlış okumak yerine açıkça bildirmek).
+    """
+    reference = calibration_store.get_reference(cam_id)
+    if reference is None:
+        return rois, False
+
+    reference_corners = np.array(reference["corners"], dtype=np.float32)
+    current_corners = detect_screen_corners(frame)
+    uncertain = False
+
+    if current_corners is None:
+        current_corners = _last_known_corners.get(cam_id)
+        uncertain = True
+        if current_corners is None:
+            # Hiç iyi kare görülmedi (servis yeni başladı) — düzeltmesiz devam,
+            # ham ROI referansla aynı olduğu için bu, "kalibrasyonsuz" ile aynı.
+            return rois, True
+    else:
+        _last_known_corners[cam_id] = current_corners
+
+    matrix = compute_warp_matrix(reference_corners, current_corners)
+    adjusted = []
+    for roi_def in rois:
+        x, y, w, h = warp_roi_rect((roi_def["x"], roi_def["y"], roi_def["w"], roi_def["h"]), matrix)
+        adjusted.append({**roi_def, "x": x, "y": y, "w": w, "h": h})
+    return adjusted, uncertain
+
+
+@app.post("/vision/{cam_id}/calibrate")
+def vision_calibrate(cam_id: str):
+    """ROI drift düzeltme referansını (bezel köşeleri) şimdiki kareden yeniden kaydeder.
+
+    Ne zaman çağrılır: kamera ilk kurulduğunda/ROI'ler ilk çizildiğinde, ya da
+    kamera fiziksel olarak yeniden konumlandırıldığında (operatör elle
+    tetikler — otomatik değil, çünkü "yeni konum artık doğru" kararı insan
+    kararı). Bulunamazsa eski referans DOKUNULMADAN kalır (yarım/yanlış
+    referansla üzerine yazmamak için).
+    """
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    jpg = vision.capture_jpeg(cam_id)
+    if jpg is None:
+        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı")
+    frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise HTTPException(status_code=500, detail="Kare çözümlenemedi (JPEG decode hatası)")
+    corners = detect_screen_corners(frame)
+    if corners is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Ekran çerçevesi (bezel) bu karede bulunamadı — kamera açısını/ışığı kontrol edip tekrar deneyin.",
+        )
+    entry = calibration_store.save_reference(cam_id, corners.tolist())
+    _last_known_corners[cam_id] = corners
+    return {"success": True, "calibration": entry}
+
+
+@app.get("/vision/{cam_id}/calibration")
+def vision_get_calibration(cam_id: str):
+    """Kamera için kayıtlı kalibrasyon referansını döner (hiç yapılmamışsa null)."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    return {"calibration": calibration_store.get_reference(cam_id)}
+
+
 @app.get("/vision/{cam_id}/read-test")
 def vision_read_test(cam_id: str):
     """AP2 ekran-okuma — tek kare al, o kamera icin KAYITLI TUM ROI'leri
-    sirayla kirpar, her biri icin hem OCR (Tesseract) hem ortalama renk
-    (HSV) sonucu doner.
+    (varsa kalibrasyona göre kaymayi telafi ederek) sirayla kirpar, her biri
+    icin hem OCR (Tesseract) hem ortalama renk (HSV) sonucu doner.
 
     Kayitli ROI yoksa (henuz /vision/{cam_id}/rois ile hic cizilmemis)
     hata degil, bos sonuc listesi doner — bu normal/beklenen bir durum.
@@ -136,7 +223,7 @@ def vision_read_test(cam_id: str):
         raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
     rois = roi_store.get_rois(cam_id)
     if not rois:
-        return {"results": []}
+        return {"results": [], "roi_reference_uncertain": False}
     # Sure olcumu burada basliyor (kare alinmadan hemen once) — "saniyede kac
     # kez bu islemi yapabiliriz" sorusuna cevap vermek icin; JSON serialize/
     # network gonderimi kasitli olarak disarida birakildi (bizim kontrolumuzde
@@ -148,8 +235,9 @@ def vision_read_test(cam_id: str):
     frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise HTTPException(status_code=500, detail="Kare çözümlenemedi (JPEG decode hatası)")
+    adjusted_rois, uncertain = _adjust_rois_for_drift(cam_id, frame, rois)
     results = []
-    for roi_def in rois:
+    for roi_def in adjusted_rois:
         roi_tuple = (roi_def["x"], roi_def["y"], roi_def["w"], roi_def["h"])
         result = read_roi(frame, roi_tuple)
         results.append(
@@ -163,7 +251,7 @@ def vision_read_test(cam_id: str):
             }
         )
     duration_ms = (time.perf_counter() - start) * 1000
-    return {"results": results, "duration_ms": duration_ms}
+    return {"results": results, "duration_ms": duration_ms, "roi_reference_uncertain": uncertain}
 
 
 # ==============================================================================

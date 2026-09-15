@@ -12,3 +12,8 @@ firmware/Release/
 # STM32CubeIDE per-makine/oturum dosyalari (paylasilmaya gerek yok)
 firmware/.osx.project
 firmware/*.launch
+
+# Calisma-zamani yerel durum (her Pi/operator kendi ROI'sini/kalibrasyonunu
+# cizer, repo'ya commit edilecek "kod" degil, cihaza ozel veri)
+rpi-core/roi_config.json
+rpi-core/calibration_config.json
