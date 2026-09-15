@@ -20,6 +20,7 @@
       border-radius: 8px; border: none; background: #2a6; color: white; cursor: pointer;
     }
     button:active { background: #184; }
+    button:disabled { background: #444; color: #888; cursor: not-allowed; }
     img { max-width: 100%; border-radius: 8px; border: 2px solid #333; display: none; }
     img.open { display: block; }
 
@@ -362,13 +363,18 @@
       <input id="step-count" type="number" value="2000" min="1">
       <label>İvme (adım) — rampa:</label>
       <input id="step-accel" type="number" value="0" min="0">
-      <button onclick="sendStep()">Step At</button>
+      <button id="step-at-btn" onclick="sendStep()">Step At</button>
       <button onclick="stopStep()">Durdur</button>
     </div>
     <div class="row-group" style="margin-top:-8px">
       <label style="font-size:12.5px;color:#888">İvme = kaç adımda hedef hıza çıkılıp yine o kadar adımda durmadan önce yavaşlanacağı. 0 = rampasız, direkt hedef hızda başlar (stall riski yüksek).</label>
     </div>
-    <div id="running-warning" class="running-warning">⚠ Step motor şu an zaten hareket halinde — yeni komut önceki hareketin üzerine yazacak.</div>
+    <!-- 15-09-2026 düzeltme: ÖNCEKİ metin ("yeni komut önceki hareketin
+         üzerine yazacak / sıraya alınacak") YANLIŞTI — böyle bir kuyruğa
+         alma/devralma mekanizması ne firmware'de ne backend'de yok, sahada
+         Fatih'i yanılttı. Artık sadece durum bilgisi veriyor; buton zaten
+         hareket halindeyken devre dışı bırakılıyor (bkz. renderStatus). -->
+    <div id="running-warning" class="running-warning">⚠ Step motor şu an hareket halinde — yeni komut gönderilemez, bitmesini bekleyin ya da Durdur'a basın.</div>
 
     <div class="row-group">
       <label>DC motor:</label>
@@ -1562,6 +1568,15 @@
 
     // --- Motor komutları ---
     async function sendStep() {
+      // Buton zaten hareket halindeyken disabled oluyor (renderStatus), ama
+      // yarış durumu/hızlı çift tık/API'ye dolaylı erişim ihtimaline karşı
+      // burada da GERÇEK bir koruma var — "kuyruğa alınacak" gibi olmayan
+      // bir davranışı varmış göstermek yerine acıkca reddediyoruz (15-09-2026 düzeltmesi).
+      if (lastStatus && lastStatus.running) {
+        logToConsole("Step At", "Step komutu hazırla",
+          "Hareket bitmeden yeni komut verilemez. Hareketi durdurun veya bitmesini bekleyin.", true);
+        return;
+      }
       const dir = parseInt(document.getElementById("step-dir").value);
       const delay = parseInt(document.getElementById("step-delay").value);
       const steps = parseInt(document.getElementById("step-count").value);
@@ -1643,9 +1658,13 @@
       document.getElementById("er-e2-mm").textContent = `${(status.e2 * mm2PerCount).toFixed(2)} mm`;
       raw.textContent = JSON.stringify(status);
 
-      // Step At'e basmadan önce operatör "zaten hareket halinde mi" görsün —
-      // yeni bir Step At komutu STM32 tarafında önceki hareketin üzerine yazıyor.
+      // Step At'e basmadan önce operatör "zaten hareket halinde mi" görsün.
+      // Buton GERÇEKTEN devre dışı bırakılıyor (soluk/tıklanamaz) — kuyruğa
+      // alma mekanizması YOK, bu yüzden buton pasif olmalı, "üzerine yazar"
+      // gibi yanlış bir mesajla aktif bırakılmamalı (15-09-2026 düzeltmesi).
       document.getElementById("running-warning").classList.toggle("show", !!status.running);
+      const stepBtn = document.getElementById("step-at-btn");
+      if (stepBtn) stepBtn.disabled = !!status.running;
     }
 
     // Soket bağlantısının kendisi + Kural Motoru alarm banner'ı/sesi artık
