@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<!--
+  FeedVision — Operasyonel Kayıt sayfası (15-09-2026 eklendi)
+
+  Öncelik SIRASI (Fatih talimatı): önce günlük TOPLAM besleme miktarı
+  (büyükçe), sonra e1/e2 uyuşmazlık uyarısı, EN SONDA (ikincil) günün
+  operasyonel journal kayıtlarının ham listesi (/journal/today).
+-->
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FeedVision — Operasyonel Kayıt</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #111; color: #eee;
+      font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+      padding: 14px; display: flex; flex-direction: column; gap: 16px;
+    }
+    .panel { background: #1a1a1a; border-radius: 12px; padding: 16px; }
+    .panel h2 { margin: 0 0 10px; font-size: 16px; color: #ccc; }
+    #back-btn {
+      align-self: flex-start; padding: 8px 16px; font-size: 14px; border-radius: 8px;
+      border: none; background: #333; color: #eee; cursor: pointer;
+    }
+
+    #total-panel { text-align: center; }
+    #total-date { color: #999; font-size: 13px; margin-bottom: 6px; }
+    #total-mm { font-family: "SF Mono", Menlo, monospace; font-size: 64px; font-weight: 800; color: #eee; }
+    #total-unit { font-size: 18px; color: #999; margin-top: -6px; }
+
+    .sub-values { display: flex; gap: 14px; justify-content: center; margin-top: 16px; }
+    .sub-box { background: #111; border-radius: 10px; padding: 12px 20px; text-align: center; }
+    .sub-box .label { font-size: 12px; color: #999; text-transform: uppercase; letter-spacing: .04em; }
+    .sub-box .value { font-family: "SF Mono", Menlo, monospace; font-size: 22px; font-weight: 700; }
+
+    #mismatch-banner {
+      display: none; background: #a86a00; color: #fff; padding: 10px 14px;
+      border-radius: 8px; font-size: 14px; margin-top: 14px; text-align: center;
+    }
+    #mismatch-banner.show { display: block; }
+
+    #journal-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    #journal-table th { text-align: left; color: #888; padding: 4px 8px; border-bottom: 1px solid #333; }
+    #journal-table td { padding: 4px 8px; border-bottom: 1px solid #222; color: #ccc; font-family: "SF Mono", Menlo, monospace; }
+    #journal-empty { color: #888; font-size: 13px; }
+  </style>
+</head>
+<body>
+
+  <button id="back-btn" onclick="location.href='/'">← Ana Ekran</button>
+
+  <!-- Öncelikli: günlük toplam besleme miktarı -->
+  <div class="panel" id="total-panel">
+    <h2>Günlük Toplam Besleme Miktarı</h2>
+    <div id="total-date">—</div>
+    <div id="total-mm">— </div>
+    <div id="total-unit">mm</div>
+    <div class="sub-values">
+      <div class="sub-box"><div class="label">Encoder 1</div><div class="value" id="total-e1">— mm</div></div>
+      <div class="sub-box"><div class="label">Encoder 2</div><div class="value" id="total-e2">— mm</div></div>
+    </div>
+    <!-- Bilgilendirme amaçlı — motoru DURDURMAZ, Kontrol Kriterleri'nin
+         davranışından kasıtlı olarak farklı (bkz. feed_totalizer.py). -->
+    <div id="mismatch-banner">⚠ Encoder 1 ve Encoder 2'nin hesapladığı miktar belirgin şekilde farklı — sensör/patinaj kontrolü önerilir.</div>
+  </div>
+
+  <!-- İkincil: günün ham operasyonel journal kayıtları -->
+  <div class="panel">
+    <h2>Bugünün Kayıtları (ham)</h2>
+    <div id="journal-empty">Yükleniyor…</div>
+    <table id="journal-table" style="display:none;">
+      <thead>
+        <tr><th>Saat</th><th>Kullanıcı</th><th>Bağlı</th><th>İhlal</th></tr>
+      </thead>
+      <tbody id="journal-tbody"></tbody>
+    </table>
+  </div>
+
+  <script>
+    async function loadFeedTotal() {
+      let response;
+      try {
+        response = await fetch("/feed-total/today");
+      } catch (e) {
+        document.getElementById("total-mm").textContent = "Yüklenemedi";
+        return;
+      }
+      if (!response.ok) {
+        document.getElementById("total-mm").textContent = "Yüklenemedi";
+        return;
+      }
+      const data = await response.json();
+      document.getElementById("total-date").textContent = data.date;
+      document.getElementById("total-mm").textContent = data.total_mm_average.toFixed(1);
+      document.getElementById("total-e1").textContent = `${data.total_mm_e1.toFixed(1)} mm`;
+      document.getElementById("total-e2").textContent = `${data.total_mm_e2.toFixed(1)} mm`;
+      document.getElementById("mismatch-banner").classList.toggle("show", !!data.mismatch_warning);
+    }
+
+    async function loadJournal() {
+      let response;
+      try {
+        response = await fetch("/journal/today?lines=100");
+      } catch (e) {
+        document.getElementById("journal-empty").textContent = "Yüklenemedi.";
+        return;
+      }
+      if (!response.ok) {
+        document.getElementById("journal-empty").textContent = "Yüklenemedi.";
+        return;
+      }
+      const data = await response.json();
+      const entries = data.entries || [];
+      if (entries.length === 0) {
+        document.getElementById("journal-empty").textContent = "Bugün henüz kayıt yok.";
+        return;
+      }
+      document.getElementById("journal-empty").style.display = "none";
+      const table = document.getElementById("journal-table");
+      table.style.display = "table";
+      const tbody = document.getElementById("journal-tbody");
+      tbody.textContent = "";
+      // En yeni en üstte gösterilsin diye ters çevriliyor; DOM'a hep textContent
+      // ile basılıyor (kullanıcı adı serbest metin — innerHTML ile stored XSS riski olmasın).
+      entries.slice().reverse().forEach((entry) => {
+        const tr = document.createElement("tr");
+        const time = new Date(entry.timestamp * 1000).toLocaleTimeString("tr-TR");
+        const cells = [
+          time,
+          entry.operator_username || "—",
+          entry.stm32_connected ? "Evet" : "Hayır",
+          String((entry.rule_violations || []).length),
+        ];
+        cells.forEach((text) => {
+          const td = document.createElement("td");
+          td.textContent = text;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+    }
+
+    loadFeedTotal();
+    loadJournal();
+    setInterval(loadFeedTotal, 10000);
+  </script>
+</body>
+</html>

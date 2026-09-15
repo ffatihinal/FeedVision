@@ -36,6 +36,8 @@
     #operator-btn:hover { border-color: #40916c; background: #16211c; }
     #admin-btn { border-color: #555; }
     #admin-btn:hover { border-color: #888; background: #1c1c1c; }
+    #oplog-btn { border-color: #4a4a70; }
+    #oplog-btn:hover { border-color: #7676ad; background: #1a1a2a; }
 
     /* Basit kullanıcı adı modalı — gerçek bir login DEĞİL, doğrulama yok. */
     dialog#username-dialog {
@@ -67,6 +69,9 @@
     </button>
     <button class="choice-btn" id="admin-btn" onclick="location.href='/admin'">
       <span class="icon">⚙️</span> Admin
+    </button>
+    <button class="choice-btn" id="oplog-btn" onclick="location.href='/operational-log'">
+      <span class="icon">📊</span> Operasyonel Kayıt
     </button>
   </div>
 

@@ -850,6 +850,13 @@ def admin_page():
     return _read_ui_file("admin.html")
 
 
+@app.get("/operational-log", response_class=HTMLResponse)
+def operational_log_page():
+    """Operasyonel Kayıt sayfası (15-09-2026) — günlük toplam besleme miktarı
+    (öncelikli rakam) + günün operasyonel journal kayıtları (ikincil, ham liste)."""
+    return _read_ui_file("operational_log.html")
+
+
 @app.get("/shared.js")
 def shared_js():
     """Operatör + Admin sayfalarının paylaştığı JS (bkz. ui/shared.js docstring'i).
