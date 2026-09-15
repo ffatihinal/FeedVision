@@ -19,6 +19,7 @@ gerektirir — bu Raspberry Pi OS dışında kurulamaz, Mac/Windows'ta
 """
 
 import asyncio
+import json
 import logging
 import re
 import subprocess
@@ -35,6 +36,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response, Streami
 from pydantic import BaseModel, Field
 
 import calibration_store
+import journal
 import roi_store
 import rules_store
 from rule_engine import evaluate_rules
@@ -59,6 +61,13 @@ RULE_CHECK_INTERVAL_S = 2.0
 _current_violations: list[dict] = []
 _current_skipped: list[dict] = []
 _rule_engine_task: "asyncio.Task | None" = None
+
+# Operasyonel journal (madde 6): kural motorundan (2sn) daha seyrek —
+# ekrandaki değerler bu sıklıkta değişse bile her 2sn'de bir diske yazmak
+# günlük dosyayı gereksiz şişirir; 10sn "ne oldu" sorusuna cevap vermek için
+# yeterli çözünürlük, disk/CPU yükü ihmal edilebilir düzeyde kalır.
+JOURNAL_INTERVAL_S = 10.0
+_journal_task: "asyncio.Task | None" = None
 
 # ROI drift düzeltme: bir önceki karede gerçekten bulunan bezel köşeleri,
 # kamera başına bellekte tutulur. Neden gerekli: kalibrasyon anındaki
@@ -110,7 +119,7 @@ SERVER_START_TIME = time.time()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _rule_engine_task
+    global _rule_engine_task, _journal_task
     # Servis açılırken iki kamerayı da açmayı dener (biri takılı değilse
     # diğerini/motor kontrolünü engellemez), kapanırken serbest bırakır —
     # systemd restart'ta "device busy" ile kilitlenmesin diye.
@@ -118,8 +127,10 @@ async def lifespan(app: FastAPI):
     psutil.cpu_percent()  # priming cagrisi: ilk cagri referans alir, anlamli deger dondurmez —
     # asagidaki /system/resources'daki interval=None cagrilari bastan itibaren dogru deger versin diye.
     _rule_engine_task = asyncio.create_task(_rule_engine_loop())
+    _journal_task = asyncio.create_task(_journal_loop())
     yield
     _rule_engine_task.cancel()
+    _journal_task.cancel()
     vision.stop()
 
 
@@ -456,6 +467,36 @@ async def _rule_engine_loop():
         await asyncio.sleep(RULE_CHECK_INTERVAL_S)
 
 
+async def _journal_loop():
+    """Arka planda sürekli çalışır: JOURNAL_INTERVAL_S'te bir, o an ekrandan
+    takip edilen TÜM değerleri (kural motorunun baktığı belirli ROI'lerle
+    sınırlı değil — kayıtlı her iki kameranın da tüm ROI'leri + STM32
+    durumu) günün journal dosyasına ekler (bkz. journal.py). lifespan()
+    içinde başlatılır/iptal edilir."""
+    while True:
+        try:
+            roi_readings: dict = {}
+            for cam_id in VALID_CAM_IDS:
+                if not roi_store.get_rois(cam_id):
+                    continue
+                frame = _capture_frame(cam_id)
+                if frame is None:
+                    continue
+                results, uncertain = _read_all_rois(cam_id, frame)
+                roi_readings[cam_id] = {"results": results, "roi_reference_uncertain": uncertain}
+            journal.write_entry(
+                {
+                    "stm32_status": bridge.get_status(),
+                    "stm32_connected": bridge.is_connected,
+                    "roi_readings": roi_readings,
+                    "rule_violations": _current_violations,
+                }
+            )
+        except Exception:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
+            logging.getLogger("feedvision.journal").exception("Journal dongusunde beklenmeyen hata")
+        await asyncio.sleep(JOURNAL_INTERVAL_S)
+
+
 # ==============================================================================
 #  STM32 KÖPRÜSÜ — seri port bağlantısı + motor komutları
 #  Protokol: /docs/protocol.md (STM32 firmware'i ile aynı JSON sözleşmesi)
@@ -581,6 +622,44 @@ def system_logs(lines: int = 200):
         raise HTTPException(status_code=500, detail=f"journalctl hata verdi: {result.stderr.strip()}")
 
     return result.stdout
+
+
+# ==============================================================================
+#  OPERASYONEL JOURNAL (madde 6) — yukaridaki sistemsel journal'dan AYRI:
+#  bu, servis basladi/durdu degil, EKRANDAN TAKIP EDILEN DEGERLERIN periyodik
+#  kaydi (bkz. journal.py + yukaridaki _journal_loop). Gun basina bir
+#  .jsonl dosyasi.
+# ==============================================================================
+
+OPERATIONAL_JOURNAL_MAX_LINES = 2000
+
+
+@app.get("/journal/today")
+def journal_today(lines: int = 200):
+    """Bugunun operasyonel journal dosyasindan son N satiri (parse edilmis
+    JSON listesi olarak) doner. Henuz hic yazilmadiysa (servis yeni acildi,
+    ilk JOURNAL_INTERVAL_S dolmadi) bos liste doner — hata degil."""
+    if lines < 1:
+        raise HTTPException(status_code=400, detail="lines 1 veya daha buyuk olmali")
+    lines = min(lines, OPERATIONAL_JOURNAL_MAX_LINES)
+
+    path = journal._file_path_for_today()
+    if not path.exists():
+        return {"date": path.stem, "entries": []}
+
+    with open(path, encoding="utf-8") as f:
+        all_lines = f.readlines()
+    tail = all_lines[-lines:]
+    entries = []
+    for raw_line in tail:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            entries.append(json.loads(raw_line))
+        except json.JSONDecodeError:
+            continue  # yarim yazilmis son satir olabilir (crash aninda) — sessizce atla
+    return {"date": path.stem, "entries": entries}
 
 
 # ==============================================================================
