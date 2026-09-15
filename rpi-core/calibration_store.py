@@ -1,7 +1,7 @@
 """
 FeedVision — ROI drift düzeltme: referans köşe kalıcı deposu
 
-Ne yapar: Kamera başına (cam1/cam2), kalibrasyon anında tespit edilen 4
+Ne yapar: Kamera başına (chamber/ui_screen), kalibrasyon anında tespit edilen 4
 ekran köşesini bir JSON dosyasında (calibration_config.json) saklar/okur.
 roi_store.py'nin aynı deseni (atomik yazım, bozuk/eksik dosyada sessizce
 boş dönme) burada da uygulanıyor — iki depo kasıtlı olarak AYRI dosyalar:
@@ -13,6 +13,8 @@ import json
 import threading
 import time
 from pathlib import Path
+
+from camera_ids import migrate_legacy_camera_keys
 
 CONFIG_PATH = Path(__file__).resolve().parent / "calibration_config.json"
 
@@ -31,7 +33,9 @@ def _read_all() -> dict[str, dict]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return data
+    # Eski "cam1"/"cam2" anahtarli bir dosya olabilir — bkz. roi_store.py
+    # ayni desendeki aciklama (bellek ici tasima, dosya burada yeniden yazilmaz).
+    return migrate_legacy_camera_keys(data)
 
 
 def get_reference(cam_id: str) -> dict | None:

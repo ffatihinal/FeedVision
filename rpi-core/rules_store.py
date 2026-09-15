@@ -1,17 +1,20 @@
 """
 FeedVision — Kural Motoru: kural listesi kalıcı deposu
 
-Ne yapar: operatörün tanımladığı izleme kurallarını (ör. "cam2/basinc 2-6 bar
-olmali, disina cikinca motoru durdur") bir JSON dosyasinda (rules_config.json)
-saklar/okur. roi_store.py / calibration_store.py ile BİREBİR AYNI desen
-(atomik yazim, bozuk/eksik dosyada sessizce bos donme, tek modul-seviyesi
-kilit) — tutarlilik icin kasitli olarak kopyalandi, ortak bir taban sinifa
-cikarmak bu olcekte (3 kucuk dosya) gereksiz soyutlama olurdu.
+Ne yapar: operatörün tanımladığı izleme kurallarını (ör. "ui_screen/basinc
+2-6 bar olmali, disina cikinca motoru durdur") bir JSON dosyasinda
+(rules_config.json) saklar/okur. roi_store.py / calibration_store.py ile
+BİREBİR AYNI desen (atomik yazim, bozuk/eksik dosyada sessizce bos donme,
+tek modul-seviyesi kilit) — tutarlilik icin kasitli olarak kopyalandi,
+ortak bir taban sinifa cikarmak bu olcekte (3 kucuk dosya) gereksiz
+soyutlama olurdu.
 """
 
 import json
 import threading
 from pathlib import Path
+
+from camera_ids import migrate_legacy_camera_id
 
 CONFIG_PATH = Path(__file__).resolve().parent / "rules_config.json"
 
@@ -34,9 +37,17 @@ def _read_all() -> list[dict]:
 
 
 def get_rules() -> list[dict]:
-    """Tum kayitli kurallari doner (kayitli degilse bos liste)."""
+    """Tum kayitli kurallari doner (kayitli degilse bos liste).
+
+    Her kuralin (source="roi" ise) cam_id alani, eski "cam1"/"cam2" ise
+    bellek icinde yeni isimlere (chamber/ui_screen) tasinir — dosya burada
+    yeniden yazilmaz (roi_store.py'deki ayni desen, bkz. o dosyadaki aciklama)."""
     with _lock:
-        return _read_all()
+        rules = _read_all()
+    for rule in rules:
+        if rule.get("source") == "roi" and "cam_id" in rule:
+            rule["cam_id"] = migrate_legacy_camera_id(rule["cam_id"])
+    return rules
 
 
 def save_rules(rules: list[dict]) -> None:

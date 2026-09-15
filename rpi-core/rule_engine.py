@@ -2,7 +2,7 @@
 FeedVision — İzleme + Kural Motoru (madde 1: ROI kural mantığı, madde 2:
 güvenlik interlock, madde 7: aralık dışı alarm — üçü TEK motor)
 
-Ne yapar: operatörün tanımladığı kurallar (ör. "cam2/basinc ROI'si 2-6 bar
+Ne yapar: operatörün tanımladığı kurallar (ör. "ui_screen/basinc ROI'si 2-6 bar
 aralığında olmalı") ile o an okunan değerleri (ROI OCR metni ya da STM32
 durum alanı) karşılaştırır, aralık dışına çıkanları "ihlal" olarak döner.
 main.py bu ihlalleri kullanarak motoru durdurur + UI'da alarm gösterir
@@ -33,7 +33,7 @@ class RuleViolation:
     min: float | None
     max: float | None
     stop_motor: bool
-    source_label: str  # ör. "cam2 / basinc" ya da "stm32 / e1" — kullanıcıya gösterilecek kısa açıklama
+    source_label: str  # ör. "ui_screen / basinc" ya da "stm32 / e1" — kullanıcıya gösterilecek kısa açıklama
 
 
 @dataclass

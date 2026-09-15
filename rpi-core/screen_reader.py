@@ -1,7 +1,7 @@
 """
-FeedVision — AP2 ekran okuma (screen reading) modulu
+FeedVision — UI Screen Camera ekran okuma (screen reading) modulu
 
-Ne yapar: AP2 kamerasinin gordugu bir karede, sabit bir ROI (region of
+Ne yapar: UI Screen Camera'nin gordugu bir karede, sabit bir ROI (region of
 interest) tanimlar, o bolgeyi kirpar; ortalama rengini HSV olarak hesaplar
 ve Tesseract (pytesseract) ile ROI icindeki metni/sayiyi okumaya calisir.
 
@@ -10,7 +10,7 @@ mevcut kamera akisi) dokunmadan, tamamen izole gelistirilebilsin diye.
 main.py bu modulu sadece yeni /vision/{cam_id}/read-test endpoint'inde
 (Adim 3) kullanacak.
 
-ONEMLI — bugunku ROI koordinatlari GECICI/TEST amaclidir: gercek AP2 HMI
+ONEMLI — bugunku ROI koordinatlari GECICI/TEST amaclidir: gercek UA HMI
 ekraninin fotografi/olculeri henuz elde degil (saha ziyareti yarin).
 Bu yuzden DEFAULT_ROI, vision.py'deki STREAM_SIZE (1280x720) karesinin
 ortasinda, herhangi bir telefon ekranini kaplayacak kadar buyuk keyfi bir

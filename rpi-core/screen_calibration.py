@@ -1,7 +1,7 @@
 """
 FeedVision — ROI drift düzeltme: ekran köşe tespiti (calibration) modülü
 
-Ne yapar: AP2 kamerasının gördüğü karede, izlenen ekranın (UA cihazı HMI'ı)
+Ne yapar: UI Screen Camera'nın gördüğü karede, izlenen ekranın (UA cihazı HMI'ı)
 4 köşesini tespit eder. Bu köşeler "referans" olarak saklanınca (bkz.
 calibration_store.py), sonraki karelerde köşeler tekrar bulunup referansla
 karşılaştırılır — kamera titrer/kayarsa aradaki fark perspektif dönüşümle

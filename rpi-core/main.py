@@ -1,5 +1,5 @@
 """
-FeedVision RPi Core — AP1/AP2 kamera akış sunucusu + STM32 köprüsü
+FeedVision RPi Core — Chamber Camera / UI Screen Camera akış sunucusu + STM32 köprüsü
 
 Ne yapar: FastAPI ile küçük bir web sunucusu açar, tarayıcıdan "Kamera Aç"
 butonlarına basınca canlı görüntüyü MJPEG olarak akıtır (picamera2/libcamera
@@ -45,7 +45,7 @@ from screen_reader import read_roi
 from serial_bridge import bridge
 from vision import CAMERA_NUMS, STREAM_SIZE, vision
 
-VALID_CAM_IDS = set(CAMERA_NUMS)  # {"cam1", "cam2"}
+VALID_CAM_IDS = set(CAMERA_NUMS)  # {"chamber", "ui_screen"}
 
 # Kural Motoru (madde 1 ROI kural mantığı + madde 2 güvenlik interlock +
 # madde 7 aralık dışı alarm — bkz. rule_engine.py docstring'i) kaç saniyede
@@ -144,7 +144,7 @@ JOURNAL_MAX_LINES = 1000
 
 @app.get("/vision/{cam_id}/stream")
 def vision_stream(cam_id: str):
-    """MJPEG canlı akış. cam_id: cam1 (AP1 — chamber) / cam2 (AP2 — UA ekranı)."""
+    """MJPEG canlı akış. cam_id: chamber (Chamber Camera) / ui_screen (UI Screen Camera)."""
     if cam_id not in VALID_CAM_IDS:
         raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
     if vision.get(cam_id) is None:
@@ -157,7 +157,7 @@ def vision_stream(cam_id: str):
 
 @app.get("/vision/{cam_id}/snapshot")
 def vision_snapshot(cam_id: str):
-    """Tek kare JPEG — AP2 OCR/debug için (ileride görüntü işleme adımı)."""
+    """Tek kare JPEG — UI Screen Camera OCR/debug için (ileride görüntü işleme adımı)."""
     if cam_id not in VALID_CAM_IDS:
         raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
     jpg = vision.capture_jpeg(cam_id)
@@ -310,7 +310,7 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
 
 @app.get("/vision/{cam_id}/read-test")
 def vision_read_test(cam_id: str):
-    """AP2 ekran-okuma — tek kare al, o kamera icin KAYITLI TUM ROI'leri
+    """UI Screen Camera ekran-okuma — tek kare al, o kamera icin KAYITLI TUM ROI'leri
     (varsa kalibrasyona göre kaymayi telafi ederek) sirayla kirpar, her biri
     icin hem OCR (Tesseract) hem ortalama renk (HSV) sonucu doner.
 
@@ -770,7 +770,7 @@ def index():
 
 @app.get("/wall", response_class=HTMLResponse)
 def wall():
-    """Canlı yayın duvarı: 2x2 grid (AP1, AP2, FeedVision UI, custom alan) —
+    """Canlı yayın duvarı: 2x2 grid (Chamber Camera, UI Screen Camera, FeedVision UI, custom alan) —
     TV/telefon gibi izleme amaçlı bağımsız sayfa, ana kontrol UI'sinden ayrı
     (bkz. ui/wall.html üstündeki mimari not). Mevcut hiçbir endpoint'in
     davranışı değişmiyor, sadece statik HTML servis eden yeni bir uç."""

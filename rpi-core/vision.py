@@ -1,11 +1,11 @@
 """
-FeedVision — AP1/AP2 kamera yonetimi (picamera2/libcamera tabanli)
+FeedVision — Chamber Camera / UI Screen Camera yonetimi (picamera2/libcamera tabanli)
 
-Ne yapar: Pi Camera'larin iki CSI portunu (cam1 = AP1 chamber izleme,
-cam2 = AP2 UA cihazi ekran okuma) picamera2 ile acar/kapatir; MJPEG
-canli akis ve tek kare (snapshot) uretir. Motor/seri koduna (main.py'deki
-STM32 koprusu, serial_bridge.py) dokunmaz, main.py'nin router'ina
-ayrica eklenir.
+Ne yapar: Pi Camera'larin iki CSI portunu (Chamber Camera = chamber icini
+izleyen kamera, UI Screen Camera = UA cihazinin ekranini okuyan kamera)
+picamera2 ile acar/kapatir; MJPEG canli akis ve tek kare (snapshot) uretir.
+Motor/seri koduna (main.py'deki STM32 koprusu, serial_bridge.py) dokunmaz,
+main.py'nin router'ina ayrica eklenir.
 
 Neden picamera2: RPi 5 + Pi Camera CSI modulleri libcamera gerektiriyor;
 eski OpenCV/V4L2 (cv2.VideoCapture) yaklasimi Pi'de calismiyordu
@@ -18,6 +18,8 @@ import time
 
 import cv2
 
+from camera_ids import CAMERA_NUMS
+
 try:
     from picamera2 import Picamera2
 
@@ -28,9 +30,6 @@ except ImportError:
     # denemesi start()'ta yapilir ve hata mesaji olarak saklanir.
     Picamera2 = None
     PICAMERA2_AVAILABLE = False
-
-# cam_id (HTTP'ye/UI'a donuk isim) -> picamera2 camera_num (donanim CSI indeksi)
-CAMERA_NUMS = {"cam1": 0, "cam2": 1}  # cam1 = AP1 chamber, cam2 = AP2 ekran
 
 STREAM_SIZE = (1280, 720)  # 720p hedefi — TV/tablet icin yeterli, Pi 5 CPU'yu bogmaz
 STREAM_FPS = 12.0  # 10-15fps hedef araligi (kamera_entegrasyon_onerisi.md Bolum 1)

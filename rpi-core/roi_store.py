@@ -1,8 +1,8 @@
 """
 FeedVision — ROI (region of interest) kalici depolama modulu
 
-Ne yapar: Kamera basina (cam1/cam2) adlandirilmis ROI listesini bir JSON
-dosyasinda (roi_config.json) saklar/okur. screen_reader.py'deki sabit
+Ne yapar: Kamera basina (chamber/ui_screen) adlandirilmis ROI listesini bir
+JSON dosyasinda (roi_config.json) saklar/okur. screen_reader.py'deki sabit
 DEFAULT_ROI'nin yerini alir — operatorun canvas uzerinde cizdigi ROI'ler
 servis restart'inda kaybolmasin diye diske yazilir.
 
@@ -14,6 +14,8 @@ izole cozer.
 import json
 import threading
 from pathlib import Path
+
+from camera_ids import migrate_legacy_camera_keys
 
 CONFIG_PATH = Path(__file__).resolve().parent / "roi_config.json"
 
@@ -35,7 +37,11 @@ def _read_all() -> dict[str, list[dict]]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return data
+    # Eski "cam1"/"cam2" anahtarlariyla kaydedilmis bir dosya olabilir
+    # (15-09-2026 oncesi) — bellek icinde yeni isimlere (chamber/ui_screen)
+    # tasi, dosyayi burada YENIDEN YAZMA (bir sonraki save_rois cagrisinda
+    # dogal olarak kalicilasir).
+    return migrate_legacy_camera_keys(data)
 
 
 def get_rois(cam_id: str) -> list[dict]:
