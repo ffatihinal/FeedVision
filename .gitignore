@@ -19,3 +19,4 @@ rpi-core/roi_config.json
 rpi-core/calibration_config.json
 rpi-core/rules_config.json
 rpi-core/journal/
+rpi-core/scans/

@@ -166,6 +166,32 @@ def vision_snapshot(cam_id: str):
     return Response(content=jpg, media_type="image/jpeg")
 
 
+# "Scan Save" (madde 8): operatör bir anı (ör. şüpheli bir okuma) kalıcı
+# olarak kaydetmek isterse tek tıkla — tarih-saat dosya adıyla diske yazılır.
+# snapshot endpoint'inden FARKI: o tarayıcıya gösterir/indirtir, bu SUNUCUDA
+# kalıcı olarak saklar (operatör dosyayı sonra Pi'den alabilsin diye).
+SCANS_DIR = Path(__file__).resolve().parent / "scans"
+
+
+@app.post("/vision/{cam_id}/scan-save")
+def vision_scan_save(cam_id: str):
+    """Şimdiki kareyi tarih-saat isimli bir JPEG olarak SCANS_DIR'e kaydeder."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    jpg = vision.capture_jpeg(cam_id)
+    if jpg is None:
+        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı")
+    SCANS_DIR.mkdir(parents=True, exist_ok=True)
+    # Dosya adında ':' gibi karakterler olmasın diye (bazı dosya sistemleri/
+    # araçlar sorun çıkarır) saat kısmı da '-' ile ayrılıyor.
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"{cam_id}_{timestamp}.jpg"
+    path = SCANS_DIR / filename
+    with open(path, "wb") as f:
+        f.write(jpg)
+    return {"success": True, "filename": filename}
+
+
 def _adjust_rois_for_drift(cam_id: str, frame: np.ndarray, rois: list[dict]) -> tuple[list[dict], bool]:
     """Kayıtlı ROI'leri, kamera kaymasını (drift) telafi edecek şekilde günceller.
 

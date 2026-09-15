@@ -216,11 +216,15 @@
   <div class="cameras">
     <div class="camera-block">
       <button onclick="toggleCamera('cam1')">AP1 – Chamber Aç/Kapat</button>
+      <button onclick="scanSave('cam1')">Scan Save</button>
+      <span id="scan-save-status-cam1" style="color:#888; font-size:12.5px; margin-left:6px;"></span>
       <br>
       <img id="camera-cam1">
     </div>
     <div class="camera-block">
       <button onclick="toggleCamera('cam2')">AP2 – Ekran Aç/Kapat</button>
+      <button onclick="scanSave('cam2')">Scan Save</button>
+      <span id="scan-save-status-cam2" style="color:#888; font-size:12.5px; margin-left:6px;"></span>
       <br>
       <img id="camera-cam2">
     </div>
@@ -578,6 +582,35 @@
     // body'sine erişim yok) — bu yüzden <img>'e src vermeden ÖNCE gerçek bir
     // fetch('/vision/{id}/snapshot') isteği atıp GERÇEK status code + body'yi
     // okuyoruz. Konsol'da görünen her satır bu fetch'in gerçek sonucu.
+    async function scanSave(camId) {
+      const statusEl = document.getElementById(`scan-save-status-${camId}`);
+      const buttonName = `Scan Save (${camId})`;
+      const task = `POST /vision/${camId}/scan-save`;
+      statusEl.textContent = "Kaydediliyor…";
+      let response;
+      try {
+        response = await fetch(`/vision/${camId}/scan-save`, { method: "POST" });
+      } catch (e) {
+        statusEl.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        const detail = data?.detail ?? "bilinmeyen hata";
+        statusEl.textContent = `Kaydedilemedi: ${detail}`;
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      statusEl.textContent = `Kaydedildi: ${data.filename}`;
+      logToConsole(buttonName, task, `Sunucu 200 OK — ${data.filename} kaydedildi.`, false);
+    }
+
     async function toggleCamera(id) {
       const img = document.getElementById("camera-" + id);
       const isCurrentlyOpen = img.classList.contains("open");
