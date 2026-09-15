@@ -293,6 +293,16 @@
     <div id="rules-save-status" style="color:#888; font-size:13px; margin-top:6px;"></div>
     <hr style="border-color:#292929; margin:16px 0;">
     <div id="rules-skipped-info" style="color:#888; font-size:13px;">Okunamayan kural yok.</div>
+    <hr style="border-color:#292929; margin:16px 0;">
+    <!-- Sesli alarm (madde 9): donanım (USB hoparlör) sahada bağlanacak,
+         burada SADECE hangi durumda hangi ses çalınacağının mantığı var.
+         Web Audio API ile üretiliyor (dosya gerekmez) - kiosk tarayıcısı
+         Pi üzerinde çalıştığı için ses, Pi'nin sistem ses çıkışından
+         (USB hoparlöre yönlendirilmiş) gelir. -->
+    <label style="font-size:13px;">
+      <input type="checkbox" id="alarm-sound-mute" onchange="alarmMuted = this.checked">
+      Sesli alarmı sustur
+    </label>
   </div>
 
   <div id="side-panels">
@@ -860,8 +870,69 @@
       logToConsole(buttonName, task, `Sunucu 200 OK — ${ruleRows.length} kural kaydedildi.`, false);
     }
 
+    // --- Sesli alarm (madde 9): Web Audio API ile ton üretimi, dosya yok ---
+    let alarmMuted = false;
+    let alarmAudioCtx = null;
+    let lastAlarmSignature = "";
+    let lastAlarmPlayedAt = 0;
+    const ALARM_REPEAT_MS = 8000;  // alarm devam ederken hatirlatma araligi — her 100ms'de tekrar tekrar calmasin diye
+
+    function getAlarmAudioCtx() {
+      // Tarayicilar AudioContext'i kullanici bir kez etkilesime gecmeden
+      // (tiklama vb.) baslatmaya izin vermeyebilir — ilk cagri sayfa
+      // acildiktan sonraki herhangi bir tiklamada (ör. bir buton) calisir,
+      // bu yuzden burada lazy-init ediliyor (sayfa yuklenirken degil).
+      if (!alarmAudioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        alarmAudioCtx = new Ctx();
+      }
+      return alarmAudioCtx;
+    }
+
+    function beep(frequency, durationMs, times) {
+      const ctx = getAlarmAudioCtx();
+      if (!ctx) return;
+      let t = ctx.currentTime;
+      for (let i = 0; i < times; i++) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "square";
+        osc.frequency.value = frequency;
+        gain.gain.value = 0.2;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + durationMs / 1000);
+        t += (durationMs + 120) / 1000;
+      }
+    }
+
+    function playAlarmSound(violations) {
+      if (alarmMuted || violations.length === 0) {
+        lastAlarmSignature = "";  // alarm bittiginde sifirla — bir sonraki yeni ihlal hemen calsin
+        return;
+      }
+      // Aynı ihlal seti sürerken her 100ms'lik WebSocket mesajında yeniden
+      // çalmasın diye "imza" (hangi kurallar + durumları) + son çalma
+      // zamanına bakılıyor — sadece YENİ bir ihlal setinde ya da
+      // ALARM_REPEAT_MS geçtiğinde tekrar çalar (sürekli/örtüşen bip
+      // gürültüsü yerine kontrollü hatırlatma).
+      const signature = violations.map((v) => `${v.rule_id}:${v.stop_motor}`).sort().join(",");
+      const now = Date.now();
+      if (signature === lastAlarmSignature && now - lastAlarmPlayedAt < ALARM_REPEAT_MS) return;
+      lastAlarmSignature = signature;
+      lastAlarmPlayedAt = now;
+      const critical = violations.some((v) => v.stop_motor);
+      // Kritik (motor durduran): yüksek frekans, 3 kısa bip — daha aciliyetli.
+      // Uyarı (sadece bilgi): tek, daha alçak/uzun bip.
+      if (critical) beep(880, 200, 3);
+      else beep(440, 300, 1);
+    }
+
     function renderRuleAlarm(violations, skipped) {
       const banner = document.getElementById("rule-alarm-banner");
+      playAlarmSound(violations);
       if (violations.length === 0) {
         banner.style.display = "none";
       } else {
