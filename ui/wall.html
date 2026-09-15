@@ -84,10 +84,20 @@
     }
     #back-btn:active { background: #184; }
     body.fullscreen-mode #back-btn { display: block; }
+
+    /* Ana ekrana dönüş — sadece grid görünümünde (tam ekranda değilken)
+       görünür, tam ekrandaki "Grid'e Dön" (#back-btn) ile karışmasın. */
+    #home-btn {
+      position: fixed; top: 16px; left: 16px; z-index: 20;
+      font-size: 14px; padding: 10px 16px; border-radius: 8px; border: none;
+      background: #333; color: #eee; cursor: pointer;
+    }
+    body.fullscreen-mode #home-btn { display: none; }
   </style>
 </head>
 <body>
 
+  <button id="home-btn" onclick="location.href='/'">← Ana Ekran</button>
   <button id="back-btn" onclick="exitFullscreen()">&larr; Grid'e Dön</button>
 
   <div class="wall-grid" id="wall-grid">
