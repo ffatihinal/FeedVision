@@ -38,6 +38,8 @@
     #admin-btn:hover { border-color: #888; background: #1c1c1c; }
     #oplog-btn { border-color: #4a4a70; }
     #oplog-btn:hover { border-color: #7676ad; background: #1a1a2a; }
+    #wall-btn { border-color: #7a5a2a; }
+    #wall-btn:hover { border-color: #b98a45; background: #221c12; }
 
     /* Basit kullanıcı adı modalı — gerçek bir login DEĞİL, doğrulama yok. */
     dialog#username-dialog {
@@ -72,6 +74,9 @@
     </button>
     <button class="choice-btn" id="oplog-btn" onclick="location.href='/operational-log'">
       <span class="icon">📊</span> Operasyonel Kayıt
+    </button>
+    <button class="choice-btn" id="wall-btn" onclick="location.href='/wall'">
+      <span class="icon">📺</span> TV Görüntüsü
     </button>
   </div>
 
