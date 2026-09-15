@@ -31,9 +31,20 @@ MAX_SCREEN_AREA_RATIO = 0.95
 # GRADYAN tabanlı Canny tercih edildi — düz/tekdüze bölgelerde (ör. ekranın
 # arkasındaki boş duvar) adaptiveThreshold yanlış pozitif üretebiliyordu
 # (sentetik test sırasında görüldü), Canny gerçek kenar olmayan yerde
-# sessiz kalıyor.
+# sessiz kalıyor. (Sadece FALLBACK yolunda kullanılıyor, bkz. asağıda.)
 CANNY_LOW = 50
 CANNY_HIGH = 150
+
+# Gerçek hedef ekranın (Amazemet Plasma Atomization HMI) fotoğrafında dış
+# çerçeve (bezel) kalın SİYAH plastik, içerik (menü/renk) ise değişken —
+# "en parlak/en büyük iç bölge = ekran" varsayımı bu yüzden kırılgan. Bunun
+# yerine PRİMER yöntem: gri seviyesi bu eşiğin ALTINDAKİ (near-black) piksel
+# kümesinin dış konturu — bezel içeriği sarmaladığı için, içerik ne renk/
+# parlaklıkta olursa olsun dış kontur her zaman bezelin GERÇEK fiziksel
+# sınırını verir (içerik maskeye dahil olsa da olmasa da dış sınır değişmez).
+# 40/255 başlangıç değeri — saha fotoğrafları/gerçek kamerayla kalibre
+# edilecek (bkz. Açık Kalanlar), şimdilik makul bir "neredeyse siyah" eşiği.
+DARK_BEZEL_THRESHOLD = 40
 
 # approxPolyDP toleransı: kontur çevresinin bu oranı kadar sapmaya izin verir
 # — küçük tutulursa gerçek dörtgen bile 5-6 köşeli algılanıp reddedilebilir,
@@ -68,53 +79,113 @@ def order_points(pts: np.ndarray) -> np.ndarray:
     return ordered
 
 
-def detect_screen_corners(frame: np.ndarray) -> np.ndarray | None:
-    """Karede izlenen ekranın 4 köşesini bulmaya çalışır.
+def _largest_quad_in_contours(
+    contours: list[np.ndarray], min_area: float, max_area: float
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Verilen kontur listesinde alan sınırları içindeki EN BÜYÜK konturu VE
+    (varsa) EN BÜYÜK temiz-4-köşeli-dışbükey konturu ayrı ayrı bulup döner.
 
-    Adımlar: gri tonlama -> bulanıklaştırma -> Canny kenar tespiti -> dilate
-    (kopuk kenar parçalarını birleştir) -> kontur tespiti -> en büyük alanlı,
-    4 köşeye yaklaştırılabilen (approxPolyDP) dörtgen kontur seçilir.
-
-    Döner: (4, 2) float32 sıralı köşe dizisi [sol-üst, sağ-üst, sağ-alt,
-    sol-alt] ya da uygun bir dörtgen bulunamazsa None (ör. ekran kapalı,
-    çok karanlık, kamera tamamen kapalı bir şeye bakıyor — "sessizce yanlış
-    okumak yerine açıkça bulunamadı" davranışı burada başlıyor).
+    Döner: (best_quad_or_None, best_contour_or_None) — best_contour, best_quad
+    bulunamazsa minAreaRect fallback'i için kullanılır (bkz. çağıran).
     """
-    if frame is None or frame.size == 0:
-        return None
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, CANNY_LOW, CANNY_HIGH)
-    # Ekranın çerçeve kenarı bazen tek bir kesintisiz kontur olarak çıkmaz
-    # (parlama/gölge kenarı böler) — hafif dilate ile kopuk parçalar birleşir.
-    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
-
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-
-    frame_area = frame.shape[0] * frame.shape[1]
-    min_area = frame_area * MIN_SCREEN_AREA_RATIO
-    max_area = frame_area * MAX_SCREEN_AREA_RATIO
+    def in_bounds(area: float) -> bool:
+        return min_area <= area <= max_area
 
     best_quad: np.ndarray | None = None
-    best_area = 0.0
+    best_quad_area = 0.0
+    best_contour: np.ndarray | None = None
+    best_contour_area = 0.0
 
     for contour in contours:
         area = cv2.contourArea(contour)
-        if area < min_area or area > max_area or area <= best_area:
+        if not in_bounds(area):
+            continue
+        if area > best_contour_area:
+            best_contour = contour
+            best_contour_area = area
+        if area <= best_quad_area:
             continue
         perimeter = cv2.arcLength(contour, True)
         approx = cv2.approxPolyDP(contour, APPROX_POLY_EPSILON_RATIO * perimeter, True)
         if len(approx) == 4 and cv2.isContourConvex(approx):
             best_quad = approx.reshape(4, 2).astype(np.float32)
-            best_area = area
+            best_quad_area = area
 
-    if best_quad is None:
+    return best_quad, best_contour
+
+
+def _corners_from_mask(mask: np.ndarray, min_area: float, max_area: float) -> np.ndarray | None:
+    """Bir ikili maskede (255=aday bölge) en büyük geçerli konturdan 4 köşe çıkarır.
+
+    Önce temiz 4-köşeli dışbükey kontur denenir (en isabetli); bulunamazsa
+    (ör. yansıma konturu kısmen kırmışsa) en büyük konturun convex hull'unun
+    minAreaRect'i ile kaba bir dörtgen tahmini üretilir — RETR_EXTERNAL
+    kullanıldığı için (sadece dış sınır) bu her koşulda maskenin dış sınırını
+    temsil eder, iç boşluklar/delikler etkilemez.
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
         return None
 
-    return order_points(best_quad)
+    best_quad, best_contour = _largest_quad_in_contours(contours, min_area, max_area)
+    if best_quad is not None:
+        return order_points(best_quad)
+    if best_contour is None:
+        return None
+
+    hull = cv2.convexHull(best_contour)
+    rect = cv2.minAreaRect(hull)
+    box = cv2.boxPoints(rect).astype(np.float32)
+    return order_points(box)
+
+
+def detect_screen_corners(frame: np.ndarray) -> np.ndarray | None:
+    """Karede izlenen ekranın DIŞ SİYAH BEZEL (çerçeve) köşelerini bulmaya çalışır.
+
+    Neden bezel (ekranın aktif içeriği değil): gerçek hedef HMI (Amazemet
+    Plasma Atomization) fotoğrafında ekran içeriği (menü/parlaklık/standby'a
+    göre) değişken, ama etrafındaki kalın siyah fiziksel çerçeve her koşulda
+    sabit ve yüksek kontrastlı. "En parlak/en büyük iç bölge = ekran" varsayımı
+    bu yüzden kırılgan.
+
+    PRİMER yöntem — karanlık maske: gri seviyesi DARK_BEZEL_THRESHOLD altındaki
+    piksellerden ikili maske çıkarılır (morfolojik CLOSE ile yansımanın açtığı
+    küçük kopukluklar köprülenir), maskenin DIŞ sınırı bezelin fiziksel
+    köşelerini verir — içerik ne renk/parlaklıkta olursa olsun dış sınır
+    değişmez (içerik maskeye dahil olsa da bezelin İÇİNDE kaldığı için dış
+    kontur etkilenmez).
+
+    YEDEK yöntem — Canny kenar tespiti: karanlık maske hiçbir aday bulamazsa
+    (ör. eşik gerçek ışıkla uyuşmuyorsa) genel kenar tabanlı yaklaşıma düşülür.
+
+    Döner: (4, 2) float32 sıralı köşe dizisi [sol-üst, sağ-üst, sağ-alt,
+    sol-alt] ya da hiçbir aday bulunamazsa None (ör. bezel kamera görüşünde
+    hiç yok, kare tamamen karanlık/aydınlık — "sessizce yanlış okumak yerine
+    açıkça bulunamadı" davranışı burada başlıyor; çağıran taraf bu durumda
+    son bilinen referansı kullanıp "referans belirsiz" uyarısı düşürecek).
+    """
+    if frame is None or frame.size == 0:
+        return None
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    frame_area = gray.shape[0] * gray.shape[1]
+    min_area = frame_area * MIN_SCREEN_AREA_RATIO
+    max_area = frame_area * MAX_SCREEN_AREA_RATIO
+    close_kernel = np.ones((5, 5), np.uint8)
+
+    # --- 1) Primer: karanlık bezel maskesi ---
+    _, dark_mask = cv2.threshold(gray, DARK_BEZEL_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+    dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
+    corners = _corners_from_mask(dark_mask, min_area, max_area)
+    if corners is not None:
+        return corners
+
+    # --- 2) Yedek: Canny kenar tespiti ---
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, CANNY_LOW, CANNY_HIGH)
+    edges = cv2.dilate(edges, close_kernel, iterations=2)
+    return _corners_from_mask(edges, min_area, max_area)
 
 
 def compute_warp_matrix(reference_corners: np.ndarray, current_corners: np.ndarray) -> np.ndarray:
