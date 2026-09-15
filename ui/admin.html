@@ -2,7 +2,7 @@
 <html lang="tr">
 <head>
   <meta charset="utf-8">
-  <title>FeedVision</title>
+  <title>FeedVision — Admin</title>
   <style>
     body { font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 24px; }
     h1 { font-size: 28px; }
@@ -14,7 +14,7 @@
     #roi-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid #292929; font-size: 14px; }
     #roi-list li button { font-size: 13px; padding: 4px 10px; margin: 0; background: #a33; }
     #roi-list li button:active { background: #722; }
-    #ap2-read-test-result div { padding: 4px 0; }
+    #ui-screen-read-test-result div { padding: 4px 0; }
     button {
       font-size: 20px; padding: 16px 24px; margin: 8px 8px 8px 0;
       border-radius: 8px; border: none; background: #2a6; color: white; cursor: pointer;
@@ -192,7 +192,7 @@
   </style>
 </head>
 <body>
-  <h1>FeedVision — Kamera Paneli</h1>
+  <h1>FeedVision — Admin</h1>
 
   <button id="logs-open-btn" onclick="openLogsDialog()">Sistem Logları</button>
 
@@ -219,28 +219,27 @@
 
   <div class="cameras">
     <div class="camera-block">
-      <button onclick="toggleCamera('cam1')">AP1 – Chamber Aç/Kapat</button>
-      <button onclick="scanSave('cam1')">Scan Save</button>
-      <span id="scan-save-status-cam1" style="color:#888; font-size:12.5px; margin-left:6px;"></span>
+      <button onclick="toggleCamera('chamber')">Chamber Camera Aç/Kapat</button>
+      <!-- Scan Save kasitli olarak SADECE UI Screen Camera'da var (15-09-2026 karar) -->
       <br>
-      <img id="camera-cam1">
+      <img id="camera-chamber">
     </div>
     <div class="camera-block">
-      <button onclick="toggleCamera('cam2')">AP2 – Ekran Aç/Kapat</button>
-      <button onclick="scanSave('cam2')">Scan Save</button>
-      <span id="scan-save-status-cam2" style="color:#888; font-size:12.5px; margin-left:6px;"></span>
+      <button onclick="toggleCamera('ui_screen')">UI Screen Camera Aç/Kapat</button>
+      <button onclick="scanSave()">Scan Save</button>
+      <span id="scan-save-status" style="color:#888; font-size:12.5px; margin-left:6px;"></span>
       <br>
-      <img id="camera-cam2">
+      <img id="camera-ui_screen">
     </div>
   </div>
 
-  <!-- AP2 ROI yonetimi — operator kamera goruntusu uzerinde fare/parmakla
+  <!-- UI Screen Camera ROI yonetimi — operator kamera goruntusu uzerinde fare/parmakla
        dikdortgen (ROI) cizer, her birine isim verir; kayitli ROI'ler
        roi_config.json'da (rpi-core/roi_store.py) kalici tutulur. Bu nihai
        operator UI'i degil, calisma/kurulum araci — dikdortgenler eksene
        paralel, dondurulemez; kamera acisi degisirse yeniden cizilmeli. -->
-  <div class="panel" id="ap2-roi-panel">
-    <h2>AP2 ROI Yönetimi</h2>
+  <div class="panel" id="ui-screen-roi-panel">
+    <h2>UI Screen Camera — ROI Yönetimi</h2>
     <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
       Görüntü üzerinde tıkla-sürükle ile dikdörtgen çiz, isim ver. "Kaydet" ile kalıcı yapılır.
     </div>
@@ -266,8 +265,8 @@
       <span id="calibration-status" style="color:#888; font-size:13px;">Kalibrasyon durumu yükleniyor…</span>
     </div>
     <hr style="border-color:#292929; margin:16px 0;">
-    <button onclick="readTestAp2()">AP2 Ekranını Oku (Test)</button>
-    <div id="ap2-read-test-result">Henüz okunmadı.</div>
+    <button onclick="readTestUiScreen()">UI Screen Camera Ekranını Oku (Test)</button>
+    <div id="ui-screen-read-test-result">Henüz okunmadı.</div>
   </div>
 
   <!-- Kural Motoru — madde 1 (ROI kural mantığı) + madde 2 (güvenlik
@@ -516,28 +515,10 @@
     </div>
   </dialog>
 
+  <script src="/shared.js"></script>
   <script>
-    // --- Konsol yardımcı fonksiyonu ---
-    // Her satır: [saat] BUTON: hangi butona basıldı | GÖREV: ne yapmaya çalışıyor | SONUÇ: ne oldu
-    const CONSOLE_MAX_LINES = 500;  // performans için cap — tam log geçmişi önemli değil
-
-    function logToConsole(buttonName, task, result, isError) {
-      const box = document.getElementById("console");
-      const time = new Date().toLocaleTimeString("tr-TR");
-      const line = document.createElement("div");
-      line.className = "line";
-      line.innerHTML =
-        `<span class="time">[${time}]</span> ` +
-        `<span class="button-name">${buttonName}</span> — ` +
-        `<span class="task">Görev: ${task}</span> — ` +
-        `<span class="${isError ? 'error' : 'result'}">Sonuç: ${result}</span>`;
-      box.appendChild(line);
-      while (box.children.length > CONSOLE_MAX_LINES) {
-        box.removeChild(box.firstChild);  // en eski satırları at
-      }
-      box.scrollTop = box.scrollHeight;  // en son satır her zaman görünsün
-    }
-
+    // logToConsole artik /shared.js'de (Operator sayfasiyla ortak) - burada
+    // sadece admin'e ozgu "Konsolu Temizle" kaliyor.
     function clearConsole() {
       document.getElementById("console").innerHTML = "";
     }
@@ -602,14 +583,16 @@
     // body'sine erişim yok) — bu yüzden <img>'e src vermeden ÖNCE gerçek bir
     // fetch('/vision/{id}/snapshot') isteği atıp GERÇEK status code + body'yi
     // okuyoruz. Konsol'da görünen her satır bu fetch'in gerçek sonucu.
-    async function scanSave(camId) {
-      const statusEl = document.getElementById(`scan-save-status-${camId}`);
-      const buttonName = `Scan Save (${camId})`;
-      const task = `POST /vision/${camId}/scan-save`;
+    async function scanSave() {
+      // Sadece UI Screen Camera icin gecerli (15-09-2026 karar) - Chamber
+      // Camera'da bu buton hic yok, bu yuzden parametre almiyor.
+      const statusEl = document.getElementById("scan-save-status");
+      const buttonName = "Scan Save";
+      const task = "POST /vision/ui_screen/scan-save";
       statusEl.textContent = "Kaydediliyor…";
       let response;
       try {
-        response = await fetch(`/vision/${camId}/scan-save`, { method: "POST" });
+        response = await fetch("/vision/ui_screen/scan-save", { method: "POST" });
       } catch (e) {
         statusEl.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
         logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
@@ -627,8 +610,14 @@
         logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
         return;
       }
-      statusEl.textContent = `Kaydedildi: ${data.filename}`;
-      logToConsole(buttonName, task, `Sunucu 200 OK — ${data.filename} kaydedildi.`, false);
+      const path = `scans/${data.filename}`;
+      statusEl.textContent = `Kaydedildi: ${path}`;
+      logToConsole(
+        buttonName,
+        task,
+        `Scan Save tuşuna basıldı. UI Screen kamerasının görüntüsü ${path} konumuna kaydedildi.`,
+        false,
+      );
     }
 
     async function toggleCamera(id) {
@@ -678,7 +667,7 @@
         false);
     }
 
-    // AP2 ekran-okuma — GET /vision/cam2/read-test'i çağırır, kayıtlı HER
+    // UI Screen Camera ekran-okuma — GET /vision/ui_screen/read-test'i çağırır, kayıtlı HER
     // ROI için ayrı bir satır (isim/OCR metni/ortalama RGB rengi) gösterir.
     // İç hesaplama (alarm mantığı için) HSV kalıyor — ışık/parlaklık
     // değişiminden daha az etkileniyor (bkz. screen_reader.py docstring) —
@@ -688,7 +677,7 @@
       const statusEl = document.getElementById("calibration-status");
       let response;
       try {
-        response = await fetch("/vision/cam2/calibration");
+        response = await fetch("/vision/ui_screen/calibration");
       } catch (e) {
         statusEl.textContent = `Durum alınamadı: ${e.message}`;
         return;
@@ -714,11 +703,11 @@
     async function calibrateScreen() {
       const statusEl = document.getElementById("calibration-status");
       const buttonName = "Ekranı Kalibre Et";
-      const task = "POST /vision/cam2/calibrate";
+      const task = "POST /vision/ui_screen/calibrate";
       statusEl.textContent = "Kalibre ediliyor…";
       let response;
       try {
-        response = await fetch("/vision/cam2/calibrate", { method: "POST" });
+        response = await fetch("/vision/ui_screen/calibrate", { method: "POST" });
       } catch (e) {
         statusEl.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
         logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
@@ -778,14 +767,14 @@
 
         if (rule.source === "roi") {
           const camSel = document.createElement("select");
-          ["cam1", "cam2"].forEach((opt) => {
+          ["chamber", "ui_screen"].forEach((opt) => {
             const o = document.createElement("option");
             o.value = opt; o.textContent = opt;
             if (rule.cam_id === opt) o.selected = true;
             camSel.appendChild(o);
           });
           camSel.onchange = () => rule.cam_id = camSel.value;
-          if (!rule.cam_id) rule.cam_id = "cam2";
+          if (!rule.cam_id) rule.cam_id = "ui_screen";
           tr.appendChild(mkCell(camSel));
           tr.appendChild(mkCell(mkInput(rule.roi_name, (v) => rule.roi_name = v, "text", "100px")));
         } else {
@@ -818,7 +807,7 @@
     function addRuleRow() {
       ruleRows.push({
         id: `rule-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        name: "", source: "roi", cam_id: "cam2", roi_name: "", field: "",
+        name: "", source: "roi", cam_id: "ui_screen", roi_name: "", field: "",
         min: null, max: null, stop_motor: false, enabled: true,
       });
       renderRulesTable();
@@ -870,97 +859,18 @@
       logToConsole(buttonName, task, `Sunucu 200 OK — ${ruleRows.length} kural kaydedildi.`, false);
     }
 
-    // --- Sesli alarm (madde 9): Web Audio API ile ton üretimi, dosya yok ---
-    let alarmMuted = false;
-    let alarmAudioCtx = null;
-    let lastAlarmSignature = "";
-    let lastAlarmPlayedAt = 0;
-    const ALARM_REPEAT_MS = 8000;  // alarm devam ederken hatirlatma araligi — her 100ms'de tekrar tekrar calmasin diye
+    // Sesli alarm + renderRuleAlarm artik /shared.js'de (Operator sayfasiyla
+    // ortak) - "Sesli alarmı sustur" checkbox'i asagida hala var, sadece
+    // shared.js'deki 'alarmMuted' global degiskenini set ediyor.
 
-    function getAlarmAudioCtx() {
-      // Tarayicilar AudioContext'i kullanici bir kez etkilesime gecmeden
-      // (tiklama vb.) baslatmaya izin vermeyebilir — ilk cagri sayfa
-      // acildiktan sonraki herhangi bir tiklamada (ör. bir buton) calisir,
-      // bu yuzden burada lazy-init ediliyor (sayfa yuklenirken degil).
-      if (!alarmAudioCtx) {
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        if (!Ctx) return null;
-        alarmAudioCtx = new Ctx();
-      }
-      return alarmAudioCtx;
-    }
-
-    function beep(frequency, durationMs, times) {
-      const ctx = getAlarmAudioCtx();
-      if (!ctx) return;
-      let t = ctx.currentTime;
-      for (let i = 0; i < times; i++) {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = "square";
-        osc.frequency.value = frequency;
-        gain.gain.value = 0.2;
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(t);
-        osc.stop(t + durationMs / 1000);
-        t += (durationMs + 120) / 1000;
-      }
-    }
-
-    function playAlarmSound(violations) {
-      if (alarmMuted || violations.length === 0) {
-        lastAlarmSignature = "";  // alarm bittiginde sifirla — bir sonraki yeni ihlal hemen calsin
-        return;
-      }
-      // Aynı ihlal seti sürerken her 100ms'lik WebSocket mesajında yeniden
-      // çalmasın diye "imza" (hangi kurallar + durumları) + son çalma
-      // zamanına bakılıyor — sadece YENİ bir ihlal setinde ya da
-      // ALARM_REPEAT_MS geçtiğinde tekrar çalar (sürekli/örtüşen bip
-      // gürültüsü yerine kontrollü hatırlatma).
-      const signature = violations.map((v) => `${v.rule_id}:${v.stop_motor}`).sort().join(",");
-      const now = Date.now();
-      if (signature === lastAlarmSignature && now - lastAlarmPlayedAt < ALARM_REPEAT_MS) return;
-      lastAlarmSignature = signature;
-      lastAlarmPlayedAt = now;
-      const critical = violations.some((v) => v.stop_motor);
-      // Kritik (motor durduran): yüksek frekans, 3 kısa bip — daha aciliyetli.
-      // Uyarı (sadece bilgi): tek, daha alçak/uzun bip.
-      if (critical) beep(880, 200, 3);
-      else beep(440, 300, 1);
-    }
-
-    function renderRuleAlarm(violations, skipped) {
-      const banner = document.getElementById("rule-alarm-banner");
-      playAlarmSound(violations);
-      if (violations.length === 0) {
-        banner.style.display = "none";
-      } else {
-        // Kısa/anlaşılır: teknik detay (perspektif/kontur vb.) yok, sadece
-        // hangi değerin aralık dışına çıktığı + motor durduruldu mu.
-        const lines = violations.map((v) => {
-          const stopNote = v.stop_motor ? " — MOTOR DURDURULDU" : "";
-          return `${v.rule_name} (${v.source_label}): ${v.value} — izin verilen [${v.min ?? "-"}, ${v.max ?? "-"}]${stopNote}`;
-        });
-        banner.textContent = "⚠ " + lines.join("  |  ");
-        banner.style.display = "block";
-      }
-      const skippedEl = document.getElementById("rules-skipped-info");
-      if (skippedEl) {
-        skippedEl.textContent = skipped.length === 0
-          ? "Okunamayan kural yok."
-          : "Şu an okunamayan kurallar: " + skipped.map((s) => `${s.rule_name} (${s.reason})`).join(", ");
-      }
-    }
-
-    async function readTestAp2() {
-      const resultBox = document.getElementById("ap2-read-test-result");
-      const buttonName = "AP2 Ekranını Oku (Test)";
-      const task = "GET /vision/cam2/read-test";
+    async function readTestUiScreen() {
+      const resultBox = document.getElementById("ui-screen-read-test-result");
+      const buttonName = "UI Screen Camera Ekranını Oku (Test)";
+      const task = "GET /vision/ui_screen/read-test";
       resultBox.textContent = "Okunuyor…";
       let response;
       try {
-        response = await fetch("/vision/cam2/read-test");
+        response = await fetch("/vision/ui_screen/read-test");
       } catch (e) {
         resultBox.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
         logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
@@ -1053,11 +963,11 @@
     }
 
     // ==========================================================================
-    //  AP2 ROI YÖNETİMİ — snapshot'ı canvas'a çizer, fare/parmakla dikdörtgen
-    //  (ROI) çizdirir, isimlendirir, GET/POST /vision/cam2/rois ile
+    //  UI SCREEN CAMERA ROI YÖNETİMİ — snapshot'ı canvas'a çizer, fare/parmakla dikdörtgen
+    //  (ROI) çizdirir, isimlendirir, GET/POST /vision/ui_screen/rois ile
     //  yükler/kaydeder. Dikdörtgenler her zaman eksene paralel — döndürme yok.
     // ==========================================================================
-    const ROI_CAM_ID = "cam2";
+    const ROI_CAM_ID = "ui_screen";
     let roiList = [];           // {name, x, y, w, h} — orijinal kare (1280x720) koordinatlarında
     const roiSnapshotImg = new Image();
     let roiDrawing = null;      // aktif çizim: {startX, startY, curX, curY}
@@ -1185,10 +1095,10 @@
       canvas.addEventListener("touchend", roiPointerUp, { passive: false });
     }
 
-    // AP2'nin anlık karesini çekip canvas arka planına koyar (kamera açısı/
+    // UI Screen Camera'nın anlık karesini çekip canvas arka planına koyar (kamera açısı/
     // pozisyonu değiştiyse tekrar çizmek için de kullanılır).
     async function refreshRoiSnapshot() {
-      const buttonName = "AP2 ROI - Yenile";
+      const buttonName = "UI Screen Camera ROI - Yenile";
       const task = `GET /vision/${ROI_CAM_ID}/snapshot`;
       let response;
       try {
@@ -1228,7 +1138,7 @@
 
     // Sayfa açılışında kayıtlı ROI'leri sunucudan çeker (kaldığı yerden devam).
     async function loadRois() {
-      const buttonName = "AP2 ROI - Yükle";
+      const buttonName = "UI Screen Camera ROI - Yükle";
       const task = `GET /vision/${ROI_CAM_ID}/rois`;
       let response;
       try {
@@ -1257,7 +1167,7 @@
 
     // O anki ROI listesini sunucuya "replace-all" olarak kaydeder.
     async function saveRois() {
-      const buttonName = "AP2 ROI - Kaydet";
+      const buttonName = "UI Screen Camera ROI - Kaydet";
       const task = `POST /vision/${ROI_CAM_ID}/rois`;
       let response;
       try {
@@ -1738,38 +1648,31 @@
       document.getElementById("running-warning").classList.toggle("show", !!status.running);
     }
 
-    function startWebSocket() {
-      const proto = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${proto}://${location.host}/ws/status`);
-      ws.onmessage = (ev) => {
-        const data = JSON.parse(ev.data);
-        const dot = document.getElementById("status-dot");
-        const text = document.getElementById("connection-text");
-        dot.className = "status-dot " + (data.is_connected ? "connected" : "disconnected");
-        text.textContent = data.is_connected ? "Bağlı" : (data.last_error || "Bağlı değil");
+    // Soket bağlantısının kendisi + Kural Motoru alarm banner'ı/sesi artık
+    // /shared.js'de (Operator sayfasıyla ortak) — burada SADECE admin'e özgü
+    // durum render'ı (bağlantı noktası metni, ham JSON tablo, grafikler) var.
+    function onStatusMessage(data) {
+      const dot = document.getElementById("status-dot");
+      const text = document.getElementById("connection-text");
+      dot.className = "status-dot " + (data.is_connected ? "connected" : "disconnected");
+      text.textContent = data.is_connected ? "Bağlı" : (data.last_error || "Bağlı değil");
 
-        // Bağlantı durumu değiştiğinde (kopma/kurulma) konsola bir kere yaz —
-        // her 100ms'de tekrar tekrar yazmasın diye önceki durumla kıyaslıyoruz.
-        if (previousConnectionState !== data.is_connected) {
-          previousConnectionState = data.is_connected;
-          logToConsole("Canlı Durum (WebSocket)", "Kontrol kartı bağlantı durumunu izle",
-            data.is_connected ? "Bağlantı kuruldu, durum akışı başladı." : "Bağlantı yok/koptu.",
-            !data.is_connected);
-          if (!data.is_connected) {
-            // Bağlantı koptuğunda eski durumu ekranda "hâlâ geçerliymiş" gibi
-            // bırakmayalım — bariz şekilde bayatladığını göster.
-            document.getElementById("status-raw").textContent = "Bağlantı koptu — aşağıdaki son bilinen durum artık güncel olmayabilir.";
-          }
+      // Bağlantı durumu değiştiğinde (kopma/kurulma) konsola bir kere yaz —
+      // her 100ms'de tekrar tekrar yazmasın diye önceki durumla kıyaslıyoruz.
+      if (previousConnectionState !== data.is_connected) {
+        previousConnectionState = data.is_connected;
+        logToConsole("Canlı Durum (WebSocket)", "Kontrol kartı bağlantı durumunu izle",
+          data.is_connected ? "Bağlantı kuruldu, durum akışı başladı." : "Bağlantı yok/koptu.",
+          !data.is_connected);
+        if (!data.is_connected) {
+          // Bağlantı koptuğunda eski durumu ekranda "hâlâ geçerliymiş" gibi
+          // bırakmayalım — bariz şekilde bayatladığını göster.
+          document.getElementById("status-raw").textContent = "Bağlantı koptu — aşağıdaki son bilinen durum artık güncel olmayabilir.";
         }
+      }
 
-        renderStatus(data.status);
-        if (data.status && Object.keys(data.status).length) pushEncoderSample(data.status);
-        renderRuleAlarm(data.rule_violations || [], data.rule_skipped || []);
-      };
-      ws.onclose = () => {
-        // Sayfa kapanmadıysa (sunucu yeniden başladıysa vb.) birkaç saniye sonra tekrar dene.
-        setTimeout(startWebSocket, 3000);
-      };
+      renderStatus(data.status);
+      if (data.status && Object.keys(data.status).length) pushEncoderSample(data.status);
     }
 
     // ==========================================================================
@@ -2016,7 +1919,7 @@
 
     // Sayfa açılır açılmaz: port listesini çek + canlı durum akışını başlat + teker çaplarını geri yükle + sıcaklık izlemeyi başlat.
     refreshPorts();
-    startWebSocket();
+    startStatusWebSocket(onStatusMessage);
     loadWheelDiameters();
     refreshCalibrationStatus();
     loadRules();
@@ -2026,7 +1929,7 @@
     fetchResources();
     setInterval(fetchResources, RESOURCE_POLL_MS);
 
-    // AP2 ROI paneli: çizim olaylarını bağla, kayıtlı ROI'leri yükle, ilk kareyi çek.
+    // UI Screen Camera ROI paneli: çizim olaylarını bağla, kayıtlı ROI'leri yükle, ilk kareyi çek.
     setupRoiCanvasEvents();
     loadRois();
     refreshRoiSnapshot();

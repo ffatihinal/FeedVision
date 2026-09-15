@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>FeedVision — Canlı Yayın Duvarı</title>
   <style>
-    /* TV/tarayıcı ekranını komple kaplasın diye — ana index.html'in aksine
+    /* TV/tarayıcı ekranını komple kaplasın diye — ana operator.html/admin.html'in aksine
        burada sayfa kaydırma/margin yok, tam ekran bir "duvar" hedefleniyor. */
     html, body {
       margin: 0; padding: 0; width: 100%; height: 100%;
@@ -92,18 +92,18 @@
 
   <div class="wall-grid" id="wall-grid">
 
-    <div class="cell" id="cell-cam1" onclick="enterFullscreen('cell-cam1')">
-      <div class="label">AP1 — Chamber<span class="sub">canlı kamera</span></div>
+    <div class="cell" id="cell-chamber" onclick="enterFullscreen('cell-chamber')">
+      <div class="label">Chamber Camera<span class="sub">canlı kamera</span></div>
       <div class="hint">Büyütmek için dokun</div>
-      <img id="wall-cam1" alt="AP1 kamera akışı">
-      <div class="cam-status" id="cam1-status"></div>
+      <img id="wall-chamber" alt="Chamber Camera akışı">
+      <div class="cam-status" id="chamber-status"></div>
     </div>
 
-    <div class="cell" id="cell-cam2" onclick="enterFullscreen('cell-cam2')">
-      <div class="label">AP2 — Ekran<span class="sub">canlı kamera</span></div>
+    <div class="cell" id="cell-ui_screen" onclick="enterFullscreen('cell-ui_screen')">
+      <div class="label">UI Screen Camera<span class="sub">canlı kamera</span></div>
       <div class="hint">Büyütmek için dokun</div>
-      <img id="wall-cam2" alt="AP2 kamera akışı">
-      <div class="cam-status" id="cam2-status"></div>
+      <img id="wall-ui_screen" alt="UI Screen Camera akışı">
+      <div class="cam-status" id="ui_screen-status"></div>
     </div>
 
     <div class="cell" id="cell-ui" onclick="enterFullscreen('cell-ui')">
@@ -131,7 +131,7 @@
   <script>
     // ==========================================================================
     //  KAMERA AKIŞLARI — grid görünümünde her iki kamera da otomatik başlar
-    //  (bir "TV kanalı" gibi sürekli yayın amaçlandığı için index.html'deki
+    //  (bir "TV kanalı" gibi sürekli yayın amaçlandığı için operator.html'deki
     //  Aç/Kapat butonlarının aksine burada kullanıcı etkileşimi beklenmez).
     //  Aynı /vision/{cam_id}/stream endpoint'i, kod tekrarı yok.
     // ==========================================================================
@@ -145,8 +145,8 @@
       img.onload = () => statusEl.classList.remove("show");
       img.src = `/vision/${camId}/stream?_=${Date.now()}`;
     }
-    startCamera("cam1");
-    startCamera("cam2");
+    startCamera("chamber");
+    startCamera("ui_screen");
 
     // ==========================================================================
     //  FEEDVISION UI HÜCRESİ — grid'de sadece statik kart, gerçek sayfa (kendi
@@ -158,7 +158,7 @@
     function loadUiFrame() {
       const iframe = document.getElementById("ui-iframe");
       const placeholder = document.getElementById("ui-placeholder");
-      iframe.src = "/";
+      iframe.src = "/operator";  // "/" artik landing (secim) sayfasi, TV'de dogrudan Operator gorunumu istiyoruz
       iframe.style.display = "block";
       placeholder.style.display = "none";
     }

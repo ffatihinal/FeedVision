@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<!--
+  FeedVision — Operatör Ekranı (15-09-2026 eklendi, G grubu)
+
+  Kapsam bilinçli olarak DAR tutuldu (bkz. UI/UX planı, Fatih onayı): sadece
+  DURDUR, canlı encoder mm, kamera görüntüleri + Scan Save (yalnız UI Screen
+  Camera), kural ihlali alarm banner'ı. ROI/kalibrasyon, kural tanımlama, ham
+  motor komutları, sistem sağlığı/loglar — hepsi admin.html'de, burada YOK.
+
+  Not (bilinen sınırlama): Encoder mm dönüşümü için teker çapı değerleri
+  (Admin'de girilir) tarayıcının localStorage'ında tutuluyor — Operatör bu
+  sayfayı Admin'in teker çapını girdiği İLE AYNI tarayıcıda/cihazda açarsa
+  doğru mm gösterir, farklı bir cihazdaysa 40mm varsayılanına düşer. Teker
+  çapının sunucu tarafında (tüm cihazlarda ortak) saklanması ileride ayrı
+  bir iyileştirme olarak değerlendirilebilir.
+-->
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>FeedVision — Operatör</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #111; color: #eee;
+      font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+      padding: 14px; display: flex; flex-direction: column; gap: 14px;
+    }
+    .topbar { display: flex; justify-content: space-between; align-items: center; font-size: 14px; color: #999; }
+    .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+    .status-dot.connected { background: #2ecc71; }
+    .status-dot.disconnected { background: #c0392b; }
+
+    #rule-alarm-banner {
+      display: none; background: #a33; color: #fff; padding: 14px; border-radius: 8px;
+      font-weight: bold; font-size: 17px; text-align: center;
+    }
+
+    #stop-btn {
+      width: 100%; padding: 34px 0; font-size: 34px; font-weight: 800; letter-spacing: .05em;
+      background: #c0392b; color: #fff; border: none; border-radius: 14px; cursor: pointer;
+    }
+    #stop-btn:active { background: #922b21; }
+    #stop-status { text-align: center; color: #999; font-size: 13px; min-height: 16px; }
+
+    .encoders { display: flex; gap: 14px; }
+    .encoder-box {
+      flex: 1; background: #1a1a1a; border-radius: 12px; padding: 18px; text-align: center;
+    }
+    .encoder-box .label { font-size: 14px; color: #999; text-transform: uppercase; letter-spacing: .05em; }
+    .encoder-box .value { font-family: "SF Mono", Menlo, monospace; font-size: 56px; font-weight: 800; color: #eee; }
+    #machine-state { text-align: center; font-size: 18px; color: #ccc; }
+
+    .cameras { display: flex; gap: 14px; flex-wrap: wrap; }
+    .camera-block { flex: 1; min-width: 280px; background: #1a1a1a; border-radius: 12px; padding: 12px; }
+    .camera-block h3 { margin: 0 0 8px; font-size: 15px; color: #ccc; }
+    .camera-block img { width: 100%; border-radius: 8px; background: #000; display: none; }
+    .camera-block img.open { display: block; }
+    .camera-block .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
+    .camera-block button {
+      padding: 10px 14px; font-size: 14px; border-radius: 8px; border: none;
+      background: #333; color: #eee; cursor: pointer;
+    }
+    .camera-block button:active { background: #444; }
+    #scan-save-status { color: #888; font-size: 12.5px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div><span id="status-dot" class="status-dot disconnected"></span><span id="connection-text">Bağlı değil</span></div>
+    <div>FeedVision — Operatör</div>
+  </div>
+
+  <div id="rule-alarm-banner"></div>
+
+  <button id="stop-btn" onclick="emergencyStop()">DURDUR</button>
+  <div id="stop-status"></div>
+
+  <div class="encoders">
+    <div class="encoder-box">
+      <div class="label">Encoder 1</div>
+      <div class="value" id="er-e1-mm">— mm</div>
+    </div>
+    <div class="encoder-box">
+      <div class="label">Encoder 2</div>
+      <div class="value" id="er-e2-mm">— mm</div>
+    </div>
+  </div>
+  <div id="machine-state">Durum: —</div>
+
+  <div class="cameras">
+    <div class="camera-block">
+      <h3>Chamber Camera</h3>
+      <div class="row">
+        <button onclick="toggleCamera('chamber')">Aç/Kapat</button>
+      </div>
+      <img id="camera-chamber">
+    </div>
+    <div class="camera-block">
+      <h3>UI Screen Camera</h3>
+      <div class="row">
+        <button onclick="toggleCamera('ui_screen')">Aç/Kapat</button>
+        <button onclick="scanSave()">Scan Save</button>
+        <span id="scan-save-status"></span>
+      </div>
+      <img id="camera-ui_screen">
+    </div>
+  </div>
+
+  <script src="/shared.js"></script>
+  <script>
+    let mm1PerCount = 0;
+    let mm2PerCount = 0;
+
+    function loadWheelDiameters() {
+      // Admin'de girilen teker çapı (bkz. dosya başındaki "bilinen sınırlama"
+      // notu) — aynı anahtar adları (feedvision_wheel-enc1/2) admin.html'de
+      // de kullanılıyor, aynı tarayıcıda tutarlı kalır.
+      const d1 = parseFloat(localStorage.getItem("feedvision_wheel-enc1")) || 40;
+      const d2 = parseFloat(localStorage.getItem("feedvision_wheel-enc2")) || 40;
+      // 600 PPR encoder x4 quadrature kenar çarpanı = 2400 sayım/tur — admin.html
+      // ile BİREBİR AYNI sabit olmalı, yoksa iki ekran farklı mm gösterir.
+      const ENC_COUNTS_PER_REV = 600 * 4;
+      mm1PerCount = (Math.PI * d1) / ENC_COUNTS_PER_REV;
+      mm2PerCount = (Math.PI * d2) / ENC_COUNTS_PER_REV;
+    }
+
+    function renderStatus(status) {
+      if (!status || !Object.keys(status).length) return;
+      document.getElementById("er-e1-mm").textContent = `${(status.e1 * mm1PerCount).toFixed(1)} mm`;
+      document.getElementById("er-e2-mm").textContent = `${(status.e2 * mm2PerCount).toFixed(1)} mm`;
+      const running = status.running === 1 || status.dc > 0;
+      document.getElementById("machine-state").textContent = `Durum: ${running ? "HAREKET EDİYOR" : "BOŞTA"}`;
+    }
+
+    let previousConnectionState = null;
+
+    function onStatusMessage(data) {
+      const dot = document.getElementById("status-dot");
+      const text = document.getElementById("connection-text");
+      dot.className = "status-dot " + (data.is_connected ? "connected" : "disconnected");
+      text.textContent = data.is_connected ? "Bağlı" : "Bağlı değil";
+      if (previousConnectionState !== data.is_connected) {
+        previousConnectionState = data.is_connected;
+        logToConsole("Canlı Durum", "Kontrol kartı bağlantısını izle",
+          data.is_connected ? "Bağlantı kuruldu." : "Bağlantı yok/koptu.", !data.is_connected);
+      }
+      renderStatus(data.status);
+    }
+
+    async function emergencyStop() {
+      const statusEl = document.getElementById("stop-status");
+      statusEl.textContent = "Durduruluyor…";
+      try {
+        await fetch("/motor/stop", { method: "POST" });
+        await fetch("/motor/dc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dir: "stop" }),
+        });
+        statusEl.textContent = "Durduruldu.";
+        logToConsole("DURDUR", "Step + DC motoru durdur", "Komutlar gönderildi.", false);
+      } catch (e) {
+        statusEl.textContent = `Durdurma komutu gönderilemedi: ${e.message}`;
+        logToConsole("DURDUR", "Step + DC motoru durdur", `Ağ hatası: ${e.message}`, true);
+      }
+    }
+
+    async function toggleCamera(camId) {
+      const img = document.getElementById("camera-" + camId);
+      const isOpen = img.classList.contains("open");
+      if (isOpen) {
+        img.classList.remove("open");
+        img.removeAttribute("src");
+        return;
+      }
+      try {
+        const check = await fetch(`/vision/${camId}/snapshot`);
+        if (!check.ok) {
+          logToConsole("Kamera Aç/Kapat", `${camId} görüntüsünü göster`, `Sunucu ${check.status}`, true);
+          return;
+        }
+      } catch (e) {
+        logToConsole("Kamera Aç/Kapat", `${camId} görüntüsünü göster`, `Ağ hatası: ${e.message}`, true);
+        return;
+      }
+      img.src = `/vision/${camId}/stream?t=${Date.now()}`;
+      img.classList.add("open");
+    }
+
+    async function scanSave() {
+      // Sadece UI Screen Camera icin gecerli (Chamber Camera'da bu buton hic yok).
+      const statusEl = document.getElementById("scan-save-status");
+      statusEl.textContent = "Kaydediliyor…";
+      let response;
+      try {
+        response = await fetch("/vision/ui_screen/scan-save", { method: "POST" });
+      } catch (e) {
+        statusEl.textContent = "Kaydedilemedi (ağ hatası).";
+        logToConsole("Scan Save", "POST /vision/ui_screen/scan-save", `Ağ hatası: ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        const detail = data?.detail ?? "bilinmeyen hata";
+        statusEl.textContent = `Kaydedilemedi: ${detail}`;
+        logToConsole("Scan Save", "POST /vision/ui_screen/scan-save", `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      const path = `scans/${data.filename}`;
+      statusEl.textContent = `Kaydedildi: ${path}`;
+      logToConsole(
+        "Scan Save",
+        "POST /vision/ui_screen/scan-save",
+        `Scan Save tuşuna basıldı. UI Screen kamerasının görüntüsü ${path} konumuna kaydedildi.`,
+        false,
+      );
+    }
+
+    loadWheelDiameters();
+    startStatusWebSocket(onStatusMessage);
+  </script>
+</body>
+</html>

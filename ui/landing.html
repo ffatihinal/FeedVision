@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<!--
+  FeedVision — Landing Page (15-09-2026 eklendi)
+
+  Ne yapar: "Operatör" / "Admin" seçim ekranı. Admin/Operatör ayrımı
+  GÜVENLİK değil KULLANIM KOLAYLIĞI amaçlı — aynı yetki seviyesindeki
+  insanlar kullanıyor, kimse birbirinden gizlenmiyor. Bu yüzden Admin'e
+  şifre YOK, direkt geçer. Operatör'e tıklayınca sadece kullanıcı adı
+  sorulur (doğrulama yok — amaç operasyonel journal'a "kim kullandı"
+  bilgisini düşmek), sonra /operator sayfasına yönlendirilir.
+-->
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>FeedVision</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 40px;
+      background: #111; color: #eee; font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+    }
+    h1 { font-size: 42px; margin: 0; letter-spacing: .02em; }
+    .sub { color: #999; font-size: 15px; margin-top: -24px; }
+    .choices { display: flex; gap: 28px; flex-wrap: wrap; justify-content: center; }
+    .choice-btn {
+      width: 260px; height: 180px; border-radius: 16px; border: 2px solid #333;
+      background: #1a1a1a; color: #eee; font-size: 26px; font-weight: 700;
+      cursor: pointer; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 10px; transition: background .15s, border-color .15s;
+    }
+    .choice-btn:active { background: #262626; }
+    .choice-btn .icon { font-size: 48px; }
+    #operator-btn { border-color: #2d6a4f; }
+    #operator-btn:hover { border-color: #40916c; background: #16211c; }
+    #admin-btn { border-color: #555; }
+    #admin-btn:hover { border-color: #888; background: #1c1c1c; }
+
+    /* Basit kullanıcı adı modalı — gerçek bir login DEĞİL, doğrulama yok. */
+    dialog#username-dialog {
+      border: 1px solid #333; border-radius: 12px; background: #1a1a1a; color: #eee;
+      padding: 28px; width: 320px;
+    }
+    dialog#username-dialog::backdrop { background: rgba(0,0,0,.6); }
+    dialog#username-dialog h2 { margin: 0 0 6px; font-size: 19px; }
+    dialog#username-dialog .sub2 { color: #999; font-size: 13px; margin-bottom: 16px; }
+    dialog#username-dialog input {
+      width: 100%; padding: 10px; font-size: 16px; border-radius: 6px;
+      border: 1px solid #444; background: #111; color: #eee; margin-bottom: 16px;
+    }
+    dialog#username-dialog .actions { display: flex; gap: 10px; justify-content: flex-end; }
+    dialog#username-dialog button {
+      padding: 10px 18px; font-size: 15px; border-radius: 6px; border: none; cursor: pointer;
+    }
+    #username-cancel { background: #333; color: #ccc; }
+    #username-confirm { background: #2d6a4f; color: #fff; }
+  </style>
+</head>
+<body>
+  <h1>FeedVision</h1>
+  <div class="sub">Ultrasonik Atomizasyon — İzleme &amp; Besleme Sistemi</div>
+
+  <div class="choices">
+    <button class="choice-btn" id="operator-btn" onclick="openUsernameDialog()">
+      <span class="icon">🟢</span> Operatör
+    </button>
+    <button class="choice-btn" id="admin-btn" onclick="location.href='/admin'">
+      <span class="icon">⚙️</span> Admin
+    </button>
+  </div>
+
+  <dialog id="username-dialog">
+    <h2>Kullanıcı adı</h2>
+    <div class="sub2">Şifre gerekmez — sadece kim kullandığını kaydetmek için.</div>
+    <input id="username-input" type="text" placeholder="Adınız" autocomplete="off">
+    <div class="actions">
+      <button id="username-cancel" onclick="closeUsernameDialog()">Vazgeç</button>
+      <button id="username-confirm" onclick="confirmUsername()">Devam</button>
+    </div>
+  </dialog>
+
+  <script>
+    function openUsernameDialog() {
+      const dlg = document.getElementById("username-dialog");
+      document.getElementById("username-input").value = "";
+      dlg.showModal();
+      document.getElementById("username-input").focus();
+    }
+
+    function closeUsernameDialog() {
+      document.getElementById("username-dialog").close();
+    }
+
+    async function confirmUsername() {
+      const input = document.getElementById("username-input");
+      const username = input.value.trim();
+      if (!username) {
+        input.focus();
+        return;
+      }
+      // Sunucuya kaydet (doğrulama yok — sadece journal'a düşecek etiket).
+      // Ağ hatası olsa bile operatör ekranına geçişi ENGELLEMİYORUZ; "kim
+      // kullandı" bilgisi kaybolsa da operasyon durmamalı.
+      try {
+        await fetch("/operator/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username }),
+        });
+      } catch (e) {
+        console.error("Kullanıcı adı kaydedilemedi (ağ hatası):", e.message);
+      }
+      location.href = "/operator";
+    }
+
+    // Enter tuşuyla da onaylanabilsin.
+    window.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("username-input").addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") confirmUsername();
+      });
+    });
+  </script>
+</body>
+</html>

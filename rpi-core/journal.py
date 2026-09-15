@@ -5,7 +5,7 @@ Ne yapar: ekrandan takip edilen tüm değerleri (STM32 durumu + kayıtlı ROI
 okumaları + o anki kural ihlalleri) belirli periyotla diske yazar. main.py
 STM32 komut geçmişini/besleme miktarını AYRICA loglamıyor — bu journal
 SADECE "operatörün o an gördüğü değerler zaman içinde ne oldu" kaydı
-(bkz. ui/index.html'deki yorum: motor komutu/besleme miktarı journal'ı
+(bkz. ui/admin.html'deki yorum: motor komutu/besleme miktarı journal'ı
 kapsam dışı, bu operasyonel journal ONDAN AYRI).
 
 Neden gün başına yeni dosya: tek büyük dosya zamanla şişer (arama/açma

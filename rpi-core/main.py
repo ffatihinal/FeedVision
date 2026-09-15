@@ -512,6 +512,7 @@ async def _journal_loop():
                 roi_readings[cam_id] = {"results": results, "roi_reference_uncertain": uncertain}
             journal.write_entry(
                 {
+                    "operator_username": _current_operator["username"],
                     "stm32_status": bridge.get_status(),
                     "stm32_connected": bridge.is_connected,
                     "roi_readings": roi_readings,
@@ -759,13 +760,78 @@ def system_uptime():
     }
 
 
-@app.get("/", response_class=HTMLResponse)
-def index():
-    # __file__'e göre yol kur — script'in nereden calistirildigina (VS Code
-    # Play, terminalden farkli bir klasorden vb.) bagli kalmasin diye.
-    ui_path = Path(__file__).resolve().parent.parent / "ui" / "index.html"
+def _read_ui_file(filename: str) -> str:
+    """ui/ klasöründen bir HTML dosyasını okur. __file__'e göre yol kurar —
+    script'in nereden çalıştırıldığına (VS Code Play, terminalden farklı
+    bir klasörden vb.) bağlı kalmasın diye. Landing/operator/admin/wall
+    sayfalarının hepsi bu ortak yardımcıyı kullanır."""
+    ui_path = Path(__file__).resolve().parent.parent / "ui" / filename
     with open(ui_path, encoding="utf-8") as f:
         return f.read()
+
+
+@app.get("/", response_class=HTMLResponse)
+def landing():
+    """FeedVision landing page — "Operatör" / "Admin" seçim ekranı.
+
+    15-09-2026 karar: Admin/Operatör ayrımı GÜVENLİK değil KULLANIM
+    KOLAYLIĞI amaçlı (aynı yetki seviyesindeki insanlar kullanıyor) — bu
+    yüzden admin tarafında şifre YOK. Operatör'e giden kullanıcı adı
+    sorusu da gerçek bir login değil, sadece "kim kullandı" bilgisini
+    operasyonel journal'a düşmek için (bkz. /operator/session).
+    """
+    return _read_ui_file("landing.html")
+
+
+# Şu an operasyon başında olan kişinin adı — gerçek bir auth/oturum SİSTEMİ
+# DEĞİL (madde 1'deki karar: şifre yok, sadece "kim kullandı" bilgisi).
+# Operatör ekranı açılıp isim girildiğinde /operator/session ile güncellenir;
+# journal döngüsü (bkz. _journal_loop) bunu her kayda ekler. Tek kiosk
+# istasyonu senaryosuna uygun tek/paylaşılan bir global — birden fazla
+# operatörün aynı anda ayrı oturumu yok, en son giren "şu an kullanan" sayılır.
+_current_operator: dict = {"username": None, "since": None}
+
+
+class OperatorSessionPayload(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+
+
+@app.post("/operator/session")
+def set_operator_session(payload: OperatorSessionPayload):
+    """Operatör ekranı açılırken girilen kullanıcı adını kaydeder — DOĞRULAMA
+    YOK (parola değil), sadece journal kayıtlarına düşecek bir etiket."""
+    _current_operator["username"] = payload.username.strip()
+    _current_operator["since"] = time.time()
+    return {"success": True, "operator": dict(_current_operator)}
+
+
+@app.get("/operator/session")
+def get_operator_session():
+    """Şu an kayıtlı operatör adını döner (hiç girilmediyse username=None)."""
+    return {"operator": dict(_current_operator)}
+
+
+@app.get("/operator", response_class=HTMLResponse)
+def operator_page():
+    """Operatör ekranı — sade, teknik detaysız (bkz. UI/UX planı: DURDUR,
+    canlı encoder mm, kamera görüntüleri, alarm banner, Scan Save)."""
+    return _read_ui_file("operator.html")
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page():
+    """Admin ekranı — tam erişim (ROI/kalibrasyon, kural tanımlama, ham
+    motor komutları, sistem logları/journal, hareket analizi). Şifre YOK
+    (15-09-2026 kararı — bkz. landing() docstring'i)."""
+    return _read_ui_file("admin.html")
+
+
+@app.get("/shared.js")
+def shared_js():
+    """Operatör + Admin sayfalarının paylaştığı JS (bkz. ui/shared.js docstring'i).
+    Tek dosya, statik dosya sunucusu (StaticFiles) kurmaya gerek olmayacak
+    kadar küçük bir yüzey — diğer sayfa route'larıyla aynı basit desen."""
+    return Response(content=_read_ui_file("shared.js"), media_type="application/javascript")
 
 
 @app.get("/wall", response_class=HTMLResponse)
@@ -774,9 +840,7 @@ def wall():
     TV/telefon gibi izleme amaçlı bağımsız sayfa, ana kontrol UI'sinden ayrı
     (bkz. ui/wall.html üstündeki mimari not). Mevcut hiçbir endpoint'in
     davranışı değişmiyor, sadece statik HTML servis eden yeni bir uç."""
-    wall_path = Path(__file__).resolve().parent.parent / "ui" / "wall.html"
-    with open(wall_path, encoding="utf-8") as f:
-        return f.read()
+    return _read_ui_file("wall.html")
 
 
 if __name__ == "__main__":
