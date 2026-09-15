@@ -104,16 +104,38 @@ function beep(frequency, durationMs, times) {
   }
 }
 
+// MP3 tabanlı alarm (15-09-2026, USB hoparlör altyapısı — donanım bugün
+// yok, tarayıcı çalma testi yapılabilir). Her Kontrol Kriteri kendi
+// alarm_sound'unu (ui/alarm_sounds/ içindeki dosya adı) seçebilir; hiçbiri
+// seçilmemişse aşağıdaki Web Audio ton sistemine (kritik/uyarı bip) düşülür.
+function playAlarmSoundFile(filename) {
+  const audio = new Audio(`/alarm-sounds/${encodeURIComponent(filename)}`);
+  audio.play().catch((e) => {
+    // Otomatik oynatma engeli (tarayıcı henüz kullanıcı etkileşimi görmedi)
+    // ya da dosya bulunamadı/bozuk — sessizce ton sistemine düş, hata
+    // fırlatıp sayfayı bozma.
+    console.warn(`Alarm MP3 çalınamadı (${filename}), ton sistemine düşülüyor:`, e.message);
+    beep(880, 200, 3);
+  });
+}
+
 function playAlarmSound(violations) {
   if (alarmMuted || violations.length === 0) {
     lastAlarmSignature = "";
     return;
   }
-  const signature = violations.map((v) => `${v.rule_id}:${v.stop_motor}`).sort().join(",");
+  const signature = violations.map((v) => `${v.rule_id}:${v.stop_motor}:${v.alarm_sound || ""}`).sort().join(",");
   const now = Date.now();
   if (signature === lastAlarmSignature && now - lastAlarmPlayedAt < ALARM_REPEAT_MS) return;
   lastAlarmSignature = signature;
   lastAlarmPlayedAt = now;
+  // İlk (varsa) MP3 seçilmiş ihlali çal — birden fazla ihlal aynı anda
+  // olsa bile üst üste binen sesler yerine tek bir alarm sesi tercih edilir.
+  const withSound = violations.find((v) => v.alarm_sound);
+  if (withSound) {
+    playAlarmSoundFile(withSound.alarm_sound);
+    return;
+  }
   const critical = violations.some((v) => v.stop_motor);
   if (critical) beep(880, 200, 3);
   else beep(440, 300, 1);

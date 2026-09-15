@@ -285,7 +285,7 @@
     <table id="rules-table" style="width:100%; border-collapse:collapse; margin-bottom:10px;">
       <thead>
         <tr style="text-align:left; color:#888; font-size:12.5px;">
-          <th>Ad</th><th>Kaynak</th><th>Kamera</th><th>ROI adı / Timeout (sn)</th><th>Min</th><th>Max</th><th>Motoru Durdur</th><th>Aktif</th><th></th>
+          <th>Ad</th><th>Kaynak</th><th>Kamera</th><th>ROI adı / Timeout (sn)</th><th>Min</th><th>Max</th><th>Motoru Durdur</th><th>Alarm Sesi</th><th>Aktif</th><th></th>
         </tr>
       </thead>
       <tbody id="rules-tbody"></tbody>
@@ -767,7 +767,20 @@
     //  satirinda kamera/ROI/min-max yok, sadece Timeout (sn) girisi var.
     // ==========================================================================
 
-    let ruleRows = [];  // {id, name, source, cam_id, roi_name, timeout_s, min, max, stop_motor, enabled}
+    let ruleRows = [];  // {id, name, source, cam_id, roi_name, timeout_s, min, max, stop_motor, alarm_sound, enabled}
+    let availableAlarmSounds = [];  // ui/alarm_sounds/ icindeki .mp3 dosya adlari (bkz. loadAlarmSounds)
+
+    async function loadAlarmSounds() {
+      try {
+        const r = await fetch("/alarm-sounds");
+        if (!r.ok) return;
+        const data = await r.json();
+        availableAlarmSounds = data.sounds || [];
+        renderRulesTable();  // dropdown'lar guncel listeyle yeniden cizilsin
+      } catch {
+        // Sessizce atla — liste bos kalir, "Varsayilan (ton)" secenegi yine calisir.
+      }
+    }
 
     function renderRulesTable() {
       const tbody = document.getElementById("rules-tbody");
@@ -825,6 +838,21 @@
         stopCb.onchange = () => rule.stop_motor = stopCb.checked;
         tr.appendChild(mkCell(stopCb));
 
+        // Alarm Sesi — bkz. rpi-core/alarm_sounds.py. Boş seçenek = "Varsayılan
+        // (ton)" -> rule.alarm_sound = null, UI'da Web Audio ton sistemine düşer.
+        const soundSel = document.createElement("select");
+        const defaultOpt = document.createElement("option");
+        defaultOpt.value = ""; defaultOpt.textContent = "Varsayılan (ton)";
+        soundSel.appendChild(defaultOpt);
+        availableAlarmSounds.forEach((filename) => {
+          const o = document.createElement("option");
+          o.value = filename; o.textContent = filename;
+          if (rule.alarm_sound === filename) o.selected = true;
+          soundSel.appendChild(o);
+        });
+        soundSel.onchange = () => { rule.alarm_sound = soundSel.value || null; };
+        tr.appendChild(mkCell(soundSel));
+
         const enabledCb = document.createElement("input");
         enabledCb.type = "checkbox"; enabledCb.checked = rule.enabled !== false;
         enabledCb.onchange = () => rule.enabled = enabledCb.checked;
@@ -843,7 +871,7 @@
       ruleRows.push({
         id: `rule-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         name: "", source: "roi", cam_id: "ui_screen", roi_name: "", timeout_s: null,
-        min: null, max: null, stop_motor: false, enabled: true,
+        min: null, max: null, stop_motor: false, alarm_sound: null, enabled: true,
       });
       renderRulesTable();
     }
@@ -2025,6 +2053,7 @@
     refreshCalibrationStatus();
     loadRules();
     loadVisionRawLogInterval();
+    loadAlarmSounds();
     fetchTemp();
     setInterval(fetchTemp, TEMP_POLL_MS);
 
