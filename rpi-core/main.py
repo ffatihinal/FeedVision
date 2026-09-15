@@ -32,9 +32,10 @@ import cv2
 import numpy as np
 import psutil
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+import alarm_sounds
 import calibration_store
 import journal
 import roi_store
@@ -419,6 +420,8 @@ class RuleDef(BaseModel):
     max: float | None = None
     stop_motor: bool = False
     enabled: bool = True
+    alarm_sound: str | None = None  # ui/alarm_sounds/ icindeki bir dosya adi (ör. "kritik.mp3"),
+    # None ise UI'daki Web Audio ton sistemi (fallback) calar (bkz. shared.js).
 
 
 class RuleListPayload(BaseModel):
@@ -777,6 +780,32 @@ def set_vision_raw_log_config(payload: VisionRawLogConfigPayload):
     önceki periyot kadar gecikmeli devreye girer)."""
     vision_raw_log.set_interval_s(payload.interval_s)
     return {"success": True, "interval_s": payload.interval_s}
+
+
+# ==============================================================================
+#  SESLİ ALARM — MP3 ALTYAPISI (15-09-2026) — bkz. alarm_sounds.py. Fiziksel
+#  USB hoparlör donanımı BUGÜN YOK, bu yüzden gerçek ses çıkışı sahada test
+#  edilemiyor — ama dosya seçimi + tarayıcı üzerinden çalma test edilebilir.
+# ==============================================================================
+
+
+@app.get("/alarm-sounds")
+def get_alarm_sounds():
+    """ui/alarm_sounds/ klasöründeki mevcut MP3 dosyalarını listeler (Admin'de
+    Kontrol Kriteri başına 'Alarm Sesi' dropdown'ını doldurmak için)."""
+    return {"sounds": alarm_sounds.list_alarm_sounds()}
+
+
+@app.get("/alarm-sounds/{filename}")
+def get_alarm_sound_file(filename: str):
+    """Tek bir MP3 dosyasını servis eder (tarayıcı <audio>/Audio() ile çalar).
+
+    Güvenlik: filename'de yol ayıracı (path traversal) varsa ya da klasör
+    dışına çıkıyorsa 404 döner (bkz. alarm_sounds.resolve_sound_path)."""
+    path = alarm_sounds.resolve_sound_path(filename)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"Ses dosyası bulunamadı: {filename}")
+    return FileResponse(path, media_type="audio/mpeg")
 
 
 # ==============================================================================

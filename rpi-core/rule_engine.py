@@ -43,6 +43,7 @@ class RuleViolation:
     max: float | None
     stop_motor: bool
     source_label: str  # ör. "ui_screen / basinc" ya da "stm / bağlantı" — kullanıcıya gösterilecek kısa açıklama
+    alarm_sound: str | None = None  # ui/alarm_sounds/ icindeki dosya adi, yoksa None (UI ton fallback'ine düşer)
 
 
 @dataclass
@@ -185,6 +186,7 @@ def evaluate_rules(
                     max=max_v,
                     stop_motor=bool(rule.get("stop_motor", False)),
                     source_label=_source_label(rule),
+                    alarm_sound=rule.get("alarm_sound"),
                 )
             )
 
