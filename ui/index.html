@@ -49,8 +49,12 @@
     .encoder-readouts { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
     .encoder-readout { background: #000; border: 1.5px solid #333; border-radius: 8px; padding: 10px 20px; min-width: 170px; }
     .encoder-readout .er-label { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
-    .encoder-readout .er-count { font-family: "SF Mono", Menlo, monospace; font-size: 26px; font-weight: 700; color: #eee; line-height: 1.3; }
-    .encoder-readout .er-mm { font-family: "SF Mono", Menlo, monospace; font-size: 15px; color: #999; }
+    /* Büyük/öne çıkan rakam MM (fiziksel birim, operatörün asıl ilgilendiği
+       değer) — ham encoder sayımı (er-count) küçük/soluk ikincil bilgi.
+       (14-09-2026 Fatih notu: "UI'da büyük rakamın birimi mm olacak" —
+       öncesinde bu tam tersiydi, sayım büyük/mm küçüktü.) */
+    .encoder-readout .er-mm { font-family: "SF Mono", Menlo, monospace; font-size: 26px; font-weight: 700; color: #eee; line-height: 1.3; }
+    .encoder-readout .er-count { font-family: "SF Mono", Menlo, monospace; font-size: 15px; color: #999; }
 
     /* --- Giden komut / gelen yanıt paneli --- */
     .io-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
@@ -320,13 +324,13 @@
     <div class="encoder-readouts">
       <div class="encoder-readout">
         <div class="er-label" style="color:#6cf">Encoder 1</div>
-        <div class="er-count" id="er-e1-count">— sayım</div>
         <div class="er-mm" id="er-e1-mm">— mm</div>
+        <div class="er-count" id="er-e1-count">— sayım</div>
       </div>
       <div class="encoder-readout">
         <div class="er-label" style="color:#fb4">Encoder 2</div>
-        <div class="er-count" id="er-e2-count">— sayım</div>
         <div class="er-mm" id="er-e2-mm">— mm</div>
+        <div class="er-count" id="er-e2-count">— sayım</div>
       </div>
     </div>
 
@@ -407,6 +411,12 @@
     </div>
     <div class="row-group" style="margin-top:-8px">
       <label style="font-size:12.5px;color:#888">Bu değerler yalnızca bu tarayıcıda saklanır. Motor teker çapı "Gönderilen Komut" grafiğini, encoder teker çapları "Encoder Verisi" grafiğini hesaplamakta kullanılır.</label>
+    </div>
+    <div class="row-group" style="margin-top:-8px">
+      <!-- 40mm varsayilan deger, cetvelle henuz olculmedi (bkz. saha notlari
+           'TEKER_CAP_MM') — olculunce buradaki 3 kutu gercek degerle
+           guncellenecek, o ana kadar mm gosterimleri TAHMINI. -->
+      <label style="font-size:12.5px;color:#e0a800">⚠ Varsayılan 40mm bir TAHMİN — gerçek çap cetvelle ölçülüp buraya girilene kadar mm değerleri yaklaşıktır.</label>
     </div>
 
     <div class="motion-grid">
