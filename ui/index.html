@@ -245,6 +245,14 @@
       </div>
     </div>
     <hr style="border-color:#292929; margin:16px 0;">
+    <!-- ROI drift düzeltme: kamera titrer/kayarsa ROI'ler yanlış bölgeyi
+         okumasın diye ekranın çerçevesi (bezel) referans olarak kaydedilir.
+         Operatör kamerayı yeni monte ettiğinde/oynattığında bu butona basar. -->
+    <div class="row-group">
+      <button onclick="calibrateScreen()">Ekranı Kalibre Et</button>
+      <span id="calibration-status" style="color:#888; font-size:13px;">Kalibrasyon durumu yükleniyor…</span>
+    </div>
+    <hr style="border-color:#292929; margin:16px 0;">
     <button onclick="readTestAp2()">AP2 Ekranını Oku (Test)</button>
     <div id="ap2-read-test-result">Henüz okunmadı.</div>
   </div>
@@ -593,6 +601,64 @@
     // değişiminden daha az etkileniyor (bkz. screen_reader.py docstring) —
     // ama operatör için ekranda RGB gösteriliyor, insan için daha okunaklı.
     // Bu nihai operatör UI'ı değil, geliştirme/kurulum aşaması test aracı.
+    async function refreshCalibrationStatus() {
+      const statusEl = document.getElementById("calibration-status");
+      let response;
+      try {
+        response = await fetch("/vision/cam2/calibration");
+      } catch (e) {
+        statusEl.textContent = `Durum alınamadı: ${e.message}`;
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok || !data) {
+        statusEl.textContent = "Durum alınamadı.";
+        return;
+      }
+      if (!data.calibration) {
+        statusEl.textContent = "Henüz kalibre edilmedi (ROI'ler düzeltmesiz okunuyor).";
+        return;
+      }
+      const when = new Date(data.calibration.calibrated_at * 1000);
+      statusEl.textContent = `Son kalibrasyon: ${when.toLocaleString("tr-TR")}`;
+    }
+
+    async function calibrateScreen() {
+      const statusEl = document.getElementById("calibration-status");
+      const buttonName = "Ekranı Kalibre Et";
+      const task = "POST /vision/cam2/calibrate";
+      statusEl.textContent = "Kalibre ediliyor…";
+      let response;
+      try {
+        response = await fetch("/vision/cam2/calibrate", { method: "POST" });
+      } catch (e) {
+        statusEl.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        // 422: ekran cercevesi (bezel) bu karede bulunamadi — operatore
+        // acik/anlasilir bir mesaj, teknik detay (Canny/kontur vb.) yok.
+        const detail = data?.detail ?? "bilinmeyen hata";
+        statusEl.textContent = `Kalibrasyon başarısız: ${detail}`;
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      logToConsole(buttonName, task, "Sunucu 200 OK — kalibrasyon kaydedildi.", false);
+      await refreshCalibrationStatus();
+    }
+
     async function readTestAp2() {
       const resultBox = document.getElementById("ap2-read-test-result");
       const buttonName = "AP2 Ekranını Oku (Test)";
@@ -620,6 +686,17 @@
       }
       const results = data.results || [];
       resultBox.textContent = "";
+      if (data.roi_reference_uncertain) {
+        // Bezel (ekran çerçevesi) bu karede bulunamadı — kaydırma telafisi
+        // son bilinen köşeyle yapıldı ama gerçekten kaymış olabilir de
+        // olmayabilir de. Sessizce yanlış okumak yerine operatöre açıkça
+        // bildiriyoruz; gerekirse "Ekranı Kalibre Et" ile referans tazelenir.
+        const warnLine = document.createElement("div");
+        warnLine.style.color = "#e0a800";
+        warnLine.style.fontWeight = "bold";
+        warnLine.textContent = "⚠ ROI referansı belirsiz (ekran çerçevesi bu karede bulunamadı — ışık/açı kontrol edin).";
+        resultBox.appendChild(warnLine);
+      }
       if (typeof data.duration_ms === "number") {
         // Kare alma -> tum ROI'lerin OCR+renk okumasi bitene kadar gecen
         // sure (network/serialize haric) — "saniyede kac kez yapabiliriz"
@@ -1646,6 +1723,7 @@
     refreshPorts();
     startWebSocket();
     loadWheelDiameters();
+    refreshCalibrationStatus();
     fetchTemp();
     setInterval(fetchTemp, TEMP_POLL_MS);
 
