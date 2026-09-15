@@ -1,7 +1,7 @@
 // FeedVision — Operatör ve Admin sayfaları arasında PAYLAŞILAN JS.
 //
 // Ne var burada: konsol log yardımcısı (logToConsole), canlı durum
-// WebSocket bağlantısı (startStatusWebSocket) ve Kural Motoru alarm
+// WebSocket bağlantısı (startStatusWebSocket) ve Kontrol Kriterleri alarm
 // banner'ı + sesli alarm (renderRuleAlarm/playAlarmSound). Bu üçü hem
 // Operatör hem Admin ekranında birebir aynı davranmalı — ayrı kopyalar
 // zamanla birbirinden sapardı (15-09-2026, G grubu: Operatör/Admin
@@ -65,7 +65,7 @@ function startStatusWebSocket(onMessage) {
 }
 
 // ==========================================================================
-//  KURAL MOTORU ALARM BANNER + SESLİ ALARM (madde 1+2+7 görüntüsü, madde 9
+//  KONTROL KRİTERLERİ ALARM BANNER + SESLİ ALARM (madde 1+2+7 görüntüsü, madde 9
 //  sesi) — her iki sayfada da #rule-alarm-banner elementi bulunmalı.
 //  #rules-skipped-info SADECE Admin'de var (Operatör'e teknik "okunamayan
 //  kural" detayı gösterilmiyor, bkz. UI/UX planı) — yoksa sessizce atlanır.

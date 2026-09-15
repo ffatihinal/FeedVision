@@ -155,29 +155,28 @@
     #guide-body td { color: #ddd; }
     #guide-body .note { font-size: 12.5px; color: #888; margin-top: 4px; }
 
-    /* --- Sağ taraf sistem widget'ları (SoC sıcaklığı, CPU, RAM): sayfanın
-       normal akışında (sabit/fixed konum değil — sayfayla birlikte kayar),
-       küçük kare grafikler dikey bir sütun halinde alt alta. */
+    /* --- Sistem widget'ları (SoC sıcaklığı, CPU, RAM): 15-09-2026'da alt
+       alta dizilimden (dar/uzun sidebar) YAN YANA 3 sütuna geçirildi — alt
+       alta gereksiz dikey yer kaplıyordu (Fatih notu). */
     #side-panels {
-      display: flex; flex-direction: column; gap: 16px;
-      width: 150px; margin-left: auto;
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+      width: 100%; margin: 16px 0;
     }
     #side-panels .panel { margin-top: 0; }
     #temp-panel, .resource-panel {
-      width: 150px; padding: 10px;
+      width: auto; padding: 14px;
     }
-    #temp-panel h2, .resource-panel h2 { font-size: 11px; margin: 0 0 6px; line-height: 1.3; }
+    #temp-panel h2, .resource-panel h2 { font-size: 13px; margin: 0 0 6px; line-height: 1.3; }
     #temp-panel .chart-box, .resource-panel .chart-box { max-width: none; padding: 4px; margin-bottom: 0; }
-    #temp-panel .chart-box .chart-title, .resource-panel .chart-box .chart-title { font-size: 9px; margin-bottom: 2px; }
-    #temp-panel .chart-box canvas, .resource-panel .chart-box canvas { width: 100%; height: auto; aspect-ratio: 1 / 1; display: block; }
-    #temp-current, .resource-current { font-family: "SF Mono", Menlo, monospace; font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+    #temp-panel .chart-box .chart-title, .resource-panel .chart-box .chart-title { font-size: 10px; margin-bottom: 2px; }
+    #temp-panel .chart-box canvas, .resource-panel .chart-box canvas { width: 100%; height: auto; aspect-ratio: 2 / 1; display: block; }
+    #temp-current, .resource-current { font-family: "SF Mono", Menlo, monospace; font-size: 17px; font-weight: 700; margin-bottom: 4px; }
     #temp-error, .resource-error { color: #f77; font-size: 10.5px; margin-top: 4px; display: none; line-height: 1.3; }
     #temp-error.show, .resource-error.show { display: block; }
 
     @media (max-width: 900px) {
-      #side-panels { width: auto; }
-      #temp-panel, .resource-panel { width: auto; padding: 16px; }
-      #temp-panel .chart-box canvas, .resource-panel .chart-box canvas { max-width: 160px; }
+      /* Dar ekranda 3 sütun sıkışır — tek sütuna düşsün, okunaksız olmasın. */
+      #side-panels { grid-template-columns: 1fr; }
     }
 
     /* Kritik sıcaklık (>=85°C) — sayfa genelinde yanıp sönen kırmızı uyarı çerçevesi. */
@@ -197,7 +196,7 @@
 
   <button id="logs-open-btn" onclick="openLogsDialog()">Sistem Logları</button>
 
-  <!-- Kural Motoru alarm banner'i — /ws/status uzerinden gelen rule_violations
+  <!-- Kontrol Kriterleri alarm banner'i — /ws/status uzerinden gelen rule_violations
        ile canli guncellenir. Sayfanin en ustunde, hangi panelde olursa olsun
        gorunur olmasi icin - guvenlik-kritik bir uyari gozden kacmamali. -->
   <div id="rule-alarm-banner" style="display:none; background:#a33; color:#fff; padding:10px 14px; border-radius:4px; margin-bottom:12px; font-weight:bold;"></div>
@@ -270,29 +269,31 @@
     <div id="ui-screen-read-test-result">Henüz okunmadı.</div>
   </div>
 
-  <!-- Kural Motoru — madde 1 (ROI kural mantığı) + madde 2 (güvenlik
-       interlock) + madde 7 (aralık dışı alarm) TEK panel. Bir kural
-       kaynağını (ROI adı ya da STM32 durum alanı) min/max aralığına
-       bağlar; "Motoru Durdur" işaretliyse aralık dışına çıkınca motor
-       otomatik durur (bkz. rpi-core/rule_engine.py + main.py döngüsü). -->
+  <!-- Kontrol Kriterleri — madde 1 (ROI kriter mantığı) + madde 2 (güvenlik
+       interlock) + madde 7 (aralık dışı alarm) TEK panel. Bir kriter
+       kaynağını (ROI adı ya da STM bağlantı durumu) min/max aralığına ya da
+       (STM için) zaman aşımına bağlar; "Motoru Durdur" işaretliyse ihlalde
+       motor otomatik durur (bkz. rpi-core/rule_engine.py + main.py döngüsü).
+       STM kaynağı KASITLI OLARAK sadece "bağlantı koptu/timeout" ile
+       sınırlı — protokolde ayrı bir hata/fault alanı yok (15-09-2026 karar). -->
   <div class="panel" id="rules-panel">
-    <h2>Kural Motoru — İzleme &amp; Güvenlik</h2>
+    <h2>Kontrol Kriterleri — İzleme &amp; Güvenlik</h2>
     <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
-      Bir değer (ROI okuması ya da STM32 alanı) aralık dışına çıkarsa: alarm + istenirse motor durdurma.
+      Bir değer (ROI okuması) aralık dışına çıkarsa ya da STM bağlantısı sessiz kalırsa: alarm + istenirse motor durdurma.
     </div>
     <table id="rules-table" style="width:100%; border-collapse:collapse; margin-bottom:10px;">
       <thead>
         <tr style="text-align:left; color:#888; font-size:12.5px;">
-          <th>Ad</th><th>Kaynak</th><th>Kamera</th><th>ROI adı / Alan</th><th>Min</th><th>Max</th><th>Motoru Durdur</th><th>Aktif</th><th></th>
+          <th>Ad</th><th>Kaynak</th><th>Kamera</th><th>ROI adı / Timeout (sn)</th><th>Min</th><th>Max</th><th>Motoru Durdur</th><th>Aktif</th><th></th>
         </tr>
       </thead>
       <tbody id="rules-tbody"></tbody>
     </table>
-    <button onclick="addRuleRow()">+ Kural Ekle</button>
+    <button onclick="addRuleRow()">+ Kriter Ekle</button>
     <button onclick="saveRules()">Kaydet</button>
     <div id="rules-save-status" style="color:#888; font-size:13px; margin-top:6px;"></div>
     <hr style="border-color:#292929; margin:16px 0;">
-    <div id="rules-skipped-info" style="color:#888; font-size:13px;">Okunamayan kural yok.</div>
+    <div id="rules-skipped-info" style="color:#888; font-size:13px;">Okunamayan kriter yok.</div>
     <hr style="border-color:#292929; margin:16px 0;">
     <!-- Sesli alarm (madde 9): donanım (USB hoparlör) sahada bağlanacak,
          burada SADECE hangi durumda hangi ses çalınacağının mantığı var.
@@ -738,10 +739,13 @@
     }
 
     // ==========================================================================
-    //  KURAL MOTORU — kural listesi yönetimi (tablo) + canlı alarm banner'ı
+    //  KONTROL KRİTERLERİ — kriter listesi yönetimi (tablo) + canlı alarm banner'ı
+    //  source="stm" SADECE baglanti/timeout anlamina gelir (protokolde ayri
+    //  bir hata/fault alani yok, 15-09-2026 kapsam karari) - bu yuzden "stm"
+    //  satirinda kamera/ROI/min-max yok, sadece Timeout (sn) girisi var.
     // ==========================================================================
 
-    let ruleRows = [];  // {id, name, source, cam_id, roi_name, field, min, max, stop_motor, enabled}
+    let ruleRows = [];  // {id, name, source, cam_id, roi_name, timeout_s, min, max, stop_motor, enabled}
 
     function renderRulesTable() {
       const tbody = document.getElementById("rules-tbody");
@@ -762,9 +766,9 @@
         tr.appendChild(mkCell(mkInput(rule.name, (v) => rule.name = v, "text", "110px")));
 
         const sourceSel = document.createElement("select");
-        ["roi", "stm32"].forEach((opt) => {
+        ["roi", "stm"].forEach((opt) => {
           const o = document.createElement("option");
-          o.value = opt; o.textContent = opt === "roi" ? "ROI" : "STM32";
+          o.value = opt; o.textContent = opt === "roi" ? "ROI" : "STM";
           if (rule.source === opt) o.selected = true;
           sourceSel.appendChild(o);
         });
@@ -783,13 +787,16 @@
           if (!rule.cam_id) rule.cam_id = "ui_screen";
           tr.appendChild(mkCell(camSel));
           tr.appendChild(mkCell(mkInput(rule.roi_name, (v) => rule.roi_name = v, "text", "100px")));
+          tr.appendChild(mkCell(mkInput(rule.min, (v) => rule.min = v === "" ? null : Number(v), "number")));
+          tr.appendChild(mkCell(mkInput(rule.max, (v) => rule.max = v === "" ? null : Number(v), "number")));
         } else {
+          // STM: kamera/ROI/min-max ANLAMSIZ - sadece "kaç saniye sessiz
+          // kalınca ihlal" (timeout_s). Min/Max hücreleri "—" ile pasif.
           tr.appendChild(mkCell(document.createTextNode("—")));
-          tr.appendChild(mkCell(mkInput(rule.field, (v) => rule.field = v, "text", "100px")));
+          tr.appendChild(mkCell(mkInput(rule.timeout_s, (v) => rule.timeout_s = v === "" ? null : Number(v), "number", "70px")));
+          tr.appendChild(mkCell(document.createTextNode("—")));
+          tr.appendChild(mkCell(document.createTextNode("—")));
         }
-
-        tr.appendChild(mkCell(mkInput(rule.min, (v) => rule.min = v === "" ? null : Number(v), "number")));
-        tr.appendChild(mkCell(mkInput(rule.max, (v) => rule.max = v === "" ? null : Number(v), "number")));
 
         const stopCb = document.createElement("input");
         stopCb.type = "checkbox"; stopCb.checked = !!rule.stop_motor;
@@ -813,7 +820,7 @@
     function addRuleRow() {
       ruleRows.push({
         id: `rule-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        name: "", source: "roi", cam_id: "ui_screen", roi_name: "", field: "",
+        name: "", source: "roi", cam_id: "ui_screen", roi_name: "", timeout_s: null,
         min: null, max: null, stop_motor: false, enabled: true,
       });
       renderRulesTable();
@@ -834,7 +841,7 @@
 
     async function saveRules() {
       const statusEl = document.getElementById("rules-save-status");
-      const buttonName = "Kural Motoru - Kaydet";
+      const buttonName = "Kontrol Kriterleri - Kaydet";
       const task = "POST /rules";
       statusEl.textContent = "Kaydediliyor…";
       let response;
@@ -1667,7 +1674,7 @@
       if (stepBtn) stepBtn.disabled = !!status.running;
     }
 
-    // Soket bağlantısının kendisi + Kural Motoru alarm banner'ı/sesi artık
+    // Soket bağlantısının kendisi + Kontrol Kriterleri alarm banner'ı/sesi artık
     // /shared.js'de (Operator sayfasıyla ortak) — burada SADECE admin'e özgü
     // durum render'ı (bağlantı noktası metni, ham JSON tablo, grafikler) var.
     function onStatusMessage(data) {
