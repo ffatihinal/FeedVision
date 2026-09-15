@@ -20,3 +20,4 @@ rpi-core/calibration_config.json
 rpi-core/rules_config.json
 rpi-core/journal/
 rpi-core/scans/
+rpi-core/feed_total_state.json

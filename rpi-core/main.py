@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 import calibration_store
 import journal
+from feed_totalizer import totalizer as feed_totalizer
 import roi_store
 import rules_store
 from rule_engine import evaluate_rules
@@ -468,15 +469,21 @@ def _collect_roi_readings(cam_ids: set[str]) -> dict[tuple[str, str], dict]:
 async def _rule_engine_loop():
     """Arka planda sürekli çalışır: RULE_CHECK_INTERVAL_S'te bir kayıtlı
     Kontrol Kriterlerini değerlendirir, ihlal varsa motoru durdurur + alarm
-    durumunu günceller. lifespan() içinde başlatılır/iptal edilir (bkz. yukarısı)."""
+    durumunu günceller. AYRICA (15-09-2026) günlük toplam besleme miktarını
+    (feed_totalizer) günceller — STM32 durumunu ZATEN her turda okuyan bu
+    döngüye eklendi, ayrı bir döngü açıp kod/örnekleme tekrarı yaratmamak
+    için (Fatih talimatı: 'TEK BİR yerde hesapla'). lifespan() içinde
+    başlatılır/iptal edilir (bkz. yukarısı)."""
     global _current_violations, _current_skipped
     while True:
         try:
+            stm32_status = bridge.get_status()
+            feed_totalizer.update(stm32_status)
+
             rules = rules_store.get_rules()
             if rules:
                 cam_ids_needed = {r["cam_id"] for r in rules if r.get("source") == "roi" and r.get("cam_id")}
                 roi_readings = _collect_roi_readings(cam_ids_needed) if cam_ids_needed else {}
-                stm32_status = bridge.get_status()
                 stm32_meta = {"is_connected": bridge.is_connected, "status_age_s": bridge.get_status_age()}
                 violations, skipped = evaluate_rules(rules, roi_readings, stm32_status, stm32_meta)
                 _current_violations = [v.__dict__ for v in violations]
@@ -690,6 +697,20 @@ def journal_today(lines: int = 200):
         except json.JSONDecodeError:
             continue  # yarim yazilmis son satir olabilir (crash aninda) — sessizce atla
     return {"date": path.stem, "entries": entries}
+
+
+# ==============================================================================
+#  GÜNLÜK TOPLAM BESLEME MİKTARI (Operasyonel Kayıt sayfası, 15-09-2026) —
+#  bkz. feed_totalizer.py. _rule_engine_loop içinde her turda güncellenir,
+#  burada SADECE en son özeti okuyup döner (hesaplama tek yerde).
+# ==============================================================================
+
+
+@app.get("/feed-total/today")
+def feed_total_today():
+    """Bugünün toplam besleme miktarı özeti (mm) — headline rakam
+    total_mm_average, ayrıca e1/e2 ayrı ayrı + uyuşmazlık uyarısı."""
+    return feed_totalizer.get_summary()
 
 
 # ==============================================================================
