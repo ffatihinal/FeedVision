@@ -21,3 +21,5 @@ rpi-core/rules_config.json
 rpi-core/journal/
 rpi-core/scans/
 rpi-core/feed_total_state.json
+rpi-core/vision_raw_log_config.json
+rpi-core/görüntü\ işleme\ raw\ data/

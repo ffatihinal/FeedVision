@@ -37,9 +37,10 @@ from pydantic import BaseModel, Field
 
 import calibration_store
 import journal
-from feed_totalizer import totalizer as feed_totalizer
 import roi_store
 import rules_store
+import vision_raw_log
+from feed_totalizer import totalizer as feed_totalizer
 from rule_engine import evaluate_rules
 from screen_calibration import compute_warp_matrix, detect_screen_corners, warp_roi_rect
 from screen_reader import read_roi
@@ -69,6 +70,13 @@ _rule_engine_task: "asyncio.Task | None" = None
 # yeterli çözünürlük, disk/CPU yükü ihmal edilebilir düzeyde kalır.
 JOURNAL_INTERVAL_S = 10.0
 _journal_task: "asyncio.Task | None" = None
+
+# Görüntü İşleme Ham Veri Kaydı (15-09-2026): journal.py'den AYRI, sadece
+# ROI-kaynaklı Kontrol Kriterlerinin ham okumalarını insan-gözüyle-okunur
+# sabit-genişlikli bir .txt'ye yazar (bkz. vision_raw_log.py). Periyodu
+# Admin'den ayarlanabilir (GET/POST /vision-raw-log/config) — varsayılan
+# vision_raw_log.DEFAULT_INTERVAL_S.
+_vision_raw_log_task: "asyncio.Task | None" = None
 
 # ROI drift düzeltme: bir önceki karede gerçekten bulunan bezel köşeleri,
 # kamera başına bellekte tutulur. Neden gerekli: kalibrasyon anındaki
@@ -120,7 +128,7 @@ SERVER_START_TIME = time.time()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _rule_engine_task, _journal_task
+    global _rule_engine_task, _journal_task, _vision_raw_log_task
     # Servis açılırken iki kamerayı da açmayı dener (biri takılı değilse
     # diğerini/motor kontrolünü engellemez), kapanırken serbest bırakır —
     # systemd restart'ta "device busy" ile kilitlenmesin diye.
@@ -129,9 +137,11 @@ async def lifespan(app: FastAPI):
     # asagidaki /system/resources'daki interval=None cagrilari bastan itibaren dogru deger versin diye.
     _rule_engine_task = asyncio.create_task(_rule_engine_loop())
     _journal_task = asyncio.create_task(_journal_loop())
+    _vision_raw_log_task = asyncio.create_task(_vision_raw_log_loop())
     yield
     _rule_engine_task.cancel()
     _journal_task.cancel()
+    _vision_raw_log_task.cancel()
     vision.stop()
 
 
@@ -534,6 +544,37 @@ async def _journal_loop():
         await asyncio.sleep(JOURNAL_INTERVAL_S)
 
 
+async def _vision_raw_log_loop():
+    """Arka planda sürekli çalışır: vision_raw_log.get_interval_s()'te bir
+    (Admin'den ayarlanabilir), SADECE ROI-kaynaklı Kontrol Kriterlerinin
+    şu anki HAM okumalarını (parse edilmemiş OCR metni) sabit-genişlikli
+    günün .txt dosyasına ekler (bkz. vision_raw_log.py). lifespan()
+    içinde başlatılır/iptal edilir."""
+    while True:
+        interval = vision_raw_log.get_interval_s()
+        try:
+            roi_rules = [
+                r for r in rules_store.get_rules()
+                if r.get("source") == "roi" and r.get("enabled", True) and r.get("cam_id") and r.get("roi_name")
+            ]
+            if roi_rules:
+                cam_ids_needed = {r["cam_id"] for r in roi_rules}
+                roi_readings = _collect_roi_readings(cam_ids_needed)
+                # Sütun adları "{cam_id}/{roi_name}" — ayni roi_name farkli
+                # kameralarda kullanilsa bile karismasin diye. Deterministik
+                # sira icin alfabetik.
+                columns = sorted({f"{r['cam_id']}/{r['roi_name']}" for r in roi_rules})
+                values: dict[str, str | None] = {}
+                for r in roi_rules:
+                    col = f"{r['cam_id']}/{r['roi_name']}"
+                    reading = roi_readings.get((r["cam_id"], r["roi_name"]))
+                    values[col] = reading.get("text") if reading else None
+                vision_raw_log.logger.write_entry(columns, values)
+        except Exception:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
+            logging.getLogger("feedvision.vision_raw_log").exception("Goruntu isleme ham veri dongusunde beklenmeyen hata")
+        await asyncio.sleep(interval)
+
+
 # ==============================================================================
 #  STM32 KÖPRÜSÜ — seri port bağlantısı + motor komutları
 #  Protokol: /docs/protocol.md (STM32 firmware'i ile aynı JSON sözleşmesi)
@@ -711,6 +752,31 @@ def feed_total_today():
     """Bugünün toplam besleme miktarı özeti (mm) — headline rakam
     total_mm_average, ayrıca e1/e2 ayrı ayrı + uyuşmazlık uyarısı."""
     return feed_totalizer.get_summary()
+
+
+# ==============================================================================
+#  GÖRÜNTÜ İŞLEME HAM VERİ KAYDI (15-09-2026) — bkz. vision_raw_log.py +
+#  yukarıdaki _vision_raw_log_loop. Admin'den periyot ayarlanabilir.
+# ==============================================================================
+
+
+class VisionRawLogConfigPayload(BaseModel):
+    interval_s: float = Field(gt=0, le=3600)
+
+
+@app.get("/vision-raw-log/config")
+def get_vision_raw_log_config():
+    """Şu an ayarlı yazım periyodunu (saniye) döner."""
+    return {"interval_s": vision_raw_log.get_interval_s()}
+
+
+@app.post("/vision-raw-log/config")
+def set_vision_raw_log_config(payload: VisionRawLogConfigPayload):
+    """Yazım periyodunu değiştirir — bir sonraki döngü turundan itibaren
+    geçerli olur (o an uyuyan görev kesintiye uğratılmaz, en fazla bir
+    önceki periyot kadar gecikmeli devreye girer)."""
+    vision_raw_log.set_interval_s(payload.interval_s)
+    return {"success": True, "interval_s": payload.interval_s}
 
 
 # ==============================================================================

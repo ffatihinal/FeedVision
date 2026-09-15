@@ -307,6 +307,27 @@
     </label>
   </div>
 
+  <!-- Görüntü İşleme Ham Veri Kaydı (15-09-2026) — journal.py'den AYRI,
+       sadece ROI-kaynaklı Kontrol Kriterlerinin ham OCR okumasını sabit
+       genişlikli bir .txt'ye periyodik yazar (bkz. rpi-core/vision_raw_log.py). -->
+  <div class="panel" id="vision-raw-log-panel">
+    <h2>Görüntü İşleme Ham Veri Kaydı</h2>
+    <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
+      Kontrol Kriterlerinin ham (OCR) okumaları, gün başına bir .txt dosyasına, aşağıdaki periyotla yazılır.
+    </div>
+    <div class="row-group">
+      <label>Yazım periyodu:</label>
+      <select id="vision-raw-log-interval">
+        <option value="5">5 saniye</option>
+        <option value="10">10 saniye</option>
+        <option value="30">30 saniye</option>
+        <option value="60">1 dakika</option>
+      </select>
+      <button onclick="saveVisionRawLogInterval()">Uygula</button>
+      <span id="vision-raw-log-status" style="color:#888; font-size:13px;"></span>
+    </div>
+  </div>
+
   <div id="side-panels">
     <div class="panel" id="temp-panel">
       <h2>SoC Sıcaklığı (Raspberry Pi)</h2>
@@ -838,6 +859,59 @@
       const data = await response.json();
       ruleRows = data.rules || [];
       renderRulesTable();
+    }
+
+    // --- Görüntü İşleme Ham Veri Kaydı periyodu ---
+    async function loadVisionRawLogInterval() {
+      let response;
+      try {
+        response = await fetch("/vision-raw-log/config");
+      } catch {
+        return;
+      }
+      if (!response.ok) return;
+      const data = await response.json();
+      const select = document.getElementById("vision-raw-log-interval");
+      // Sunucudaki deger dropdown secenekleriyle birebir eslesmiyorsa (ör.
+      // elle config dosyasi degistirilmisse) en yakin secenegi degil, ham
+      // sayiyi statuse yaziyoruz - sessizce yanlis bir secenek secili
+      // gorunmesin diye.
+      const match = [...select.options].find((o) => Number(o.value) === data.interval_s);
+      if (match) {
+        select.value = match.value;
+        document.getElementById("vision-raw-log-status").textContent = "";
+      } else {
+        document.getElementById("vision-raw-log-status").textContent = `Şu an: ${data.interval_s}sn (listede yok)`;
+      }
+    }
+
+    async function saveVisionRawLogInterval() {
+      const statusEl = document.getElementById("vision-raw-log-status");
+      const intervalS = Number(document.getElementById("vision-raw-log-interval").value);
+      const buttonName = "Görüntü İşleme Ham Veri Kaydı - Uygula";
+      const task = "POST /vision-raw-log/config";
+      statusEl.textContent = "Kaydediliyor…";
+      let response;
+      try {
+        response = await fetch("/vision-raw-log/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ interval_s: intervalS }),
+        });
+      } catch (e) {
+        statusEl.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
+        logToConsole(buttonName, task, `Ağ hatası: ${e.message}`, true);
+        return;
+      }
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        const detail = data?.detail ?? "bilinmeyen hata";
+        statusEl.textContent = `Kaydedilemedi: ${detail}`;
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      statusEl.textContent = `Kaydedildi (${intervalS}sn).`;
+      logToConsole(buttonName, task, `Periyot ${intervalS}sn olarak ayarlandı.`, false);
     }
 
     async function saveRules() {
@@ -1950,6 +2024,7 @@
     loadWheelDiameters();
     refreshCalibrationStatus();
     loadRules();
+    loadVisionRawLogInterval();
     fetchTemp();
     setInterval(fetchTemp, TEMP_POLL_MS);
 
