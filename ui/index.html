@@ -192,6 +192,11 @@
 
   <button id="logs-open-btn" onclick="openLogsDialog()">Sistem Logları</button>
 
+  <!-- Kural Motoru alarm banner'i — /ws/status uzerinden gelen rule_violations
+       ile canli guncellenir. Sayfanin en ustunde, hangi panelde olursa olsun
+       gorunur olmasi icin - guvenlik-kritik bir uyari gozden kacmamali. -->
+  <div id="rule-alarm-banner" style="display:none; background:#a33; color:#fff; padding:10px 14px; border-radius:4px; margin-bottom:12px; font-weight:bold;"></div>
+
   <!-- Systemd/journalctl servis loglari (baslama/durma/hata/crash) — operasyonel
        journal (motor komutu/besleme miktari) DEGIL, o ayri ve kapsam disi. -->
   <dialog id="logs-dialog">
@@ -255,6 +260,31 @@
     <hr style="border-color:#292929; margin:16px 0;">
     <button onclick="readTestAp2()">AP2 Ekranını Oku (Test)</button>
     <div id="ap2-read-test-result">Henüz okunmadı.</div>
+  </div>
+
+  <!-- Kural Motoru — madde 1 (ROI kural mantığı) + madde 2 (güvenlik
+       interlock) + madde 7 (aralık dışı alarm) TEK panel. Bir kural
+       kaynağını (ROI adı ya da STM32 durum alanı) min/max aralığına
+       bağlar; "Motoru Durdur" işaretliyse aralık dışına çıkınca motor
+       otomatik durur (bkz. rpi-core/rule_engine.py + main.py döngüsü). -->
+  <div class="panel" id="rules-panel">
+    <h2>Kural Motoru — İzleme &amp; Güvenlik</h2>
+    <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
+      Bir değer (ROI okuması ya da STM32 alanı) aralık dışına çıkarsa: alarm + istenirse motor durdurma.
+    </div>
+    <table id="rules-table" style="width:100%; border-collapse:collapse; margin-bottom:10px;">
+      <thead>
+        <tr style="text-align:left; color:#888; font-size:12.5px;">
+          <th>Ad</th><th>Kaynak</th><th>Kamera</th><th>ROI adı / Alan</th><th>Min</th><th>Max</th><th>Motoru Durdur</th><th>Aktif</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="rules-tbody"></tbody>
+    </table>
+    <button onclick="addRuleRow()">+ Kural Ekle</button>
+    <button onclick="saveRules()">Kaydet</button>
+    <div id="rules-save-status" style="color:#888; font-size:13px; margin-top:6px;"></div>
+    <hr style="border-color:#292929; margin:16px 0;">
+    <div id="rules-skipped-info" style="color:#888; font-size:13px;">Okunamayan kural yok.</div>
   </div>
 
   <div id="side-panels">
@@ -657,6 +687,156 @@
       }
       logToConsole(buttonName, task, "Sunucu 200 OK — kalibrasyon kaydedildi.", false);
       await refreshCalibrationStatus();
+    }
+
+    // ==========================================================================
+    //  KURAL MOTORU — kural listesi yönetimi (tablo) + canlı alarm banner'ı
+    // ==========================================================================
+
+    let ruleRows = [];  // {id, name, source, cam_id, roi_name, field, min, max, stop_motor, enabled}
+
+    function renderRulesTable() {
+      const tbody = document.getElementById("rules-tbody");
+      tbody.textContent = "";
+      ruleRows.forEach((rule, idx) => {
+        const tr = document.createElement("tr");
+
+        const mkInput = (value, onInput, type = "text", width = "70px") => {
+          const input = document.createElement("input");
+          input.type = type;
+          input.value = value ?? "";
+          input.style.width = width;
+          input.oninput = () => onInput(input.value);
+          return input;
+        };
+        const mkCell = (el) => { const td = document.createElement("td"); td.appendChild(el); return td; };
+
+        tr.appendChild(mkCell(mkInput(rule.name, (v) => rule.name = v, "text", "110px")));
+
+        const sourceSel = document.createElement("select");
+        ["roi", "stm32"].forEach((opt) => {
+          const o = document.createElement("option");
+          o.value = opt; o.textContent = opt === "roi" ? "ROI" : "STM32";
+          if (rule.source === opt) o.selected = true;
+          sourceSel.appendChild(o);
+        });
+        sourceSel.onchange = () => { rule.source = sourceSel.value; renderRulesTable(); };
+        tr.appendChild(mkCell(sourceSel));
+
+        if (rule.source === "roi") {
+          const camSel = document.createElement("select");
+          ["cam1", "cam2"].forEach((opt) => {
+            const o = document.createElement("option");
+            o.value = opt; o.textContent = opt;
+            if (rule.cam_id === opt) o.selected = true;
+            camSel.appendChild(o);
+          });
+          camSel.onchange = () => rule.cam_id = camSel.value;
+          if (!rule.cam_id) rule.cam_id = "cam2";
+          tr.appendChild(mkCell(camSel));
+          tr.appendChild(mkCell(mkInput(rule.roi_name, (v) => rule.roi_name = v, "text", "100px")));
+        } else {
+          tr.appendChild(mkCell(document.createTextNode("—")));
+          tr.appendChild(mkCell(mkInput(rule.field, (v) => rule.field = v, "text", "100px")));
+        }
+
+        tr.appendChild(mkCell(mkInput(rule.min, (v) => rule.min = v === "" ? null : Number(v), "number")));
+        tr.appendChild(mkCell(mkInput(rule.max, (v) => rule.max = v === "" ? null : Number(v), "number")));
+
+        const stopCb = document.createElement("input");
+        stopCb.type = "checkbox"; stopCb.checked = !!rule.stop_motor;
+        stopCb.onchange = () => rule.stop_motor = stopCb.checked;
+        tr.appendChild(mkCell(stopCb));
+
+        const enabledCb = document.createElement("input");
+        enabledCb.type = "checkbox"; enabledCb.checked = rule.enabled !== false;
+        enabledCb.onchange = () => rule.enabled = enabledCb.checked;
+        tr.appendChild(mkCell(enabledCb));
+
+        const delBtn = document.createElement("button");
+        delBtn.textContent = "Sil";
+        delBtn.onclick = () => { ruleRows.splice(idx, 1); renderRulesTable(); };
+        tr.appendChild(mkCell(delBtn));
+
+        tbody.appendChild(tr);
+      });
+    }
+
+    function addRuleRow() {
+      ruleRows.push({
+        id: `rule-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        name: "", source: "roi", cam_id: "cam2", roi_name: "", field: "",
+        min: null, max: null, stop_motor: false, enabled: true,
+      });
+      renderRulesTable();
+    }
+
+    async function loadRules() {
+      let response;
+      try {
+        response = await fetch("/rules");
+      } catch {
+        return;
+      }
+      if (!response.ok) return;
+      const data = await response.json();
+      ruleRows = data.rules || [];
+      renderRulesTable();
+    }
+
+    async function saveRules() {
+      const statusEl = document.getElementById("rules-save-status");
+      const buttonName = "Kural Motoru - Kaydet";
+      const task = "POST /rules";
+      statusEl.textContent = "Kaydediliyor…";
+      let response;
+      try {
+        response = await fetch("/rules", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rules: ruleRows }),
+        });
+      } catch (e) {
+        statusEl.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        const detail = data?.detail ?? "bilinmeyen hata";
+        statusEl.textContent = `Kaydedilemedi: ${detail}`;
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      statusEl.textContent = `Kaydedildi (${ruleRows.length} kural).`;
+      logToConsole(buttonName, task, `Sunucu 200 OK — ${ruleRows.length} kural kaydedildi.`, false);
+    }
+
+    function renderRuleAlarm(violations, skipped) {
+      const banner = document.getElementById("rule-alarm-banner");
+      if (violations.length === 0) {
+        banner.style.display = "none";
+      } else {
+        // Kısa/anlaşılır: teknik detay (perspektif/kontur vb.) yok, sadece
+        // hangi değerin aralık dışına çıktığı + motor durduruldu mu.
+        const lines = violations.map((v) => {
+          const stopNote = v.stop_motor ? " — MOTOR DURDURULDU" : "";
+          return `${v.rule_name} (${v.source_label}): ${v.value} — izin verilen [${v.min ?? "-"}, ${v.max ?? "-"}]${stopNote}`;
+        });
+        banner.textContent = "⚠ " + lines.join("  |  ");
+        banner.style.display = "block";
+      }
+      const skippedEl = document.getElementById("rules-skipped-info");
+      if (skippedEl) {
+        skippedEl.textContent = skipped.length === 0
+          ? "Okunamayan kural yok."
+          : "Şu an okunamayan kurallar: " + skipped.map((s) => `${s.rule_name} (${s.reason})`).join(", ");
+      }
     }
 
     async function readTestAp2() {
@@ -1470,6 +1650,7 @@
 
         renderStatus(data.status);
         if (data.status && Object.keys(data.status).length) pushEncoderSample(data.status);
+        renderRuleAlarm(data.rule_violations || [], data.rule_skipped || []);
       };
       ws.onclose = () => {
         // Sayfa kapanmadıysa (sunucu yeniden başladıysa vb.) birkaç saniye sonra tekrar dene.
@@ -1724,6 +1905,7 @@
     startWebSocket();
     loadWheelDiameters();
     refreshCalibrationStatus();
+    loadRules();
     fetchTemp();
     setInterval(fetchTemp, TEMP_POLL_MS);
 
