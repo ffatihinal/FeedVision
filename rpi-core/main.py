@@ -36,12 +36,29 @@ from pydantic import BaseModel, Field
 
 import calibration_store
 import roi_store
+import rules_store
+from rule_engine import evaluate_rules
 from screen_calibration import compute_warp_matrix, detect_screen_corners, warp_roi_rect
 from screen_reader import read_roi
 from serial_bridge import bridge
 from vision import CAMERA_NUMS, STREAM_SIZE, vision
 
 VALID_CAM_IDS = set(CAMERA_NUMS)  # {"cam1", "cam2"}
+
+# Kural Motoru (madde 1 ROI kural mantığı + madde 2 güvenlik interlock +
+# madde 7 aralık dışı alarm — bkz. rule_engine.py docstring'i) kaç saniyede
+# bir kontrol yapacağı. 2sn seçildi: OCR+kırpma işlemi (~birkaç 10ms, bkz.
+# read-test duration_ms) yanında ek yük yaratmaz, ama "nadiren" olan bir
+# arızayı (proje kapsamı) makul sürede yakalar. Sahada gerekirse kısaltılır.
+RULE_CHECK_INTERVAL_S = 2.0
+
+# En son kural değerlendirmesinin sonucu — /rules/status ve /ws/status bunu
+# okur. Modül seviyesinde tutuluyor (bridge/vision ile aynı desen): tek
+# süreç, tek paylaşılan durum, thread/task güvenliği için ekstra kilide
+# gerek yok çünkü SADECE _rule_engine_loop() yazıyor, başkaları sadece okuyor.
+_current_violations: list[dict] = []
+_current_skipped: list[dict] = []
+_rule_engine_task: "asyncio.Task | None" = None
 
 # ROI drift düzeltme: bir önceki karede gerçekten bulunan bezel köşeleri,
 # kamera başına bellekte tutulur. Neden gerekli: kalibrasyon anındaki
@@ -93,13 +110,16 @@ SERVER_START_TIME = time.time()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _rule_engine_task
     # Servis açılırken iki kamerayı da açmayı dener (biri takılı değilse
     # diğerini/motor kontrolünü engellemez), kapanırken serbest bırakır —
     # systemd restart'ta "device busy" ile kilitlenmesin diye.
     vision.start()
     psutil.cpu_percent()  # priming cagrisi: ilk cagri referans alir, anlamli deger dondurmez —
     # asagidaki /system/resources'daki interval=None cagrilari bastan itibaren dogru deger versin diye.
+    _rule_engine_task = asyncio.create_task(_rule_engine_loop())
     yield
+    _rule_engine_task.cancel()
     vision.stop()
 
 
@@ -210,31 +230,29 @@ def vision_get_calibration(cam_id: str):
     return {"calibration": calibration_store.get_reference(cam_id)}
 
 
-@app.get("/vision/{cam_id}/read-test")
-def vision_read_test(cam_id: str):
-    """AP2 ekran-okuma — tek kare al, o kamera icin KAYITLI TUM ROI'leri
-    (varsa kalibrasyona göre kaymayi telafi ederek) sirayla kirpar, her biri
-    icin hem OCR (Tesseract) hem ortalama renk (HSV) sonucu doner.
-
-    Kayitli ROI yoksa (henuz /vision/{cam_id}/rois ile hic cizilmemis)
-    hata degil, bos sonuc listesi doner — bu normal/beklenen bir durum.
-    """
-    if cam_id not in VALID_CAM_IDS:
-        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
-    rois = roi_store.get_rois(cam_id)
-    if not rois:
-        return {"results": [], "roi_reference_uncertain": False}
-    # Sure olcumu burada basliyor (kare alinmadan hemen once) — "saniyede kac
-    # kez bu islemi yapabiliriz" sorusuna cevap vermek icin; JSON serialize/
-    # network gonderimi kasitli olarak disarida birakildi (bizim kontrolumuzde
-    # degil, olcmenin anlami yok).
-    start = time.perf_counter()
+def _capture_frame(cam_id: str) -> np.ndarray | None:
+    """Kameradan tek kare alip decode eder. Kamera kapaliysa/decode
+    basarisizsa None doner (cagiran taraf HTTP hatasi ya da sessiz atlama
+    olarak kendi baglaminda ele alir — bu fonksiyon FastAPI'ye bagli degil,
+    hem endpoint hem arka plan kural dongusu tarafindan kullanilabilsin diye)."""
     jpg = vision.capture_jpeg(cam_id)
     if jpg is None:
-        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı")
-    frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if frame is None:
-        raise HTTPException(status_code=500, detail="Kare çözümlenemedi (JPEG decode hatası)")
+        return None
+    return cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+
+def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
+    """Bir kamera icin kayitli TUM ROI'leri (kalibrasyona gore kaymayi
+    telafi ederek) okur. Hem /vision/{cam_id}/read-test endpoint'i hem
+    Kural Motoru dongusu tarafindan kullanilan ORTAK yol — iki yerde ayni
+    mantigin tekrarlanip zamanla birbirinden sapmasini onler.
+
+    Doner: (okuma sonuc listesi [{"name","roi","text","ocr_error",
+    "avg_color_hsv","avg_color_rgb"}, ...], roi_reference_uncertain)
+    """
+    rois = roi_store.get_rois(cam_id)
+    if not rois:
+        return [], False
     adjusted_rois, uncertain = _adjust_rois_for_drift(cam_id, frame, rois)
     results = []
     for roi_def in adjusted_rois:
@@ -250,6 +268,31 @@ def vision_read_test(cam_id: str):
                 "avg_color_rgb": list(result.avg_color_rgb),
             }
         )
+    return results, uncertain
+
+
+@app.get("/vision/{cam_id}/read-test")
+def vision_read_test(cam_id: str):
+    """AP2 ekran-okuma — tek kare al, o kamera icin KAYITLI TUM ROI'leri
+    (varsa kalibrasyona göre kaymayi telafi ederek) sirayla kirpar, her biri
+    icin hem OCR (Tesseract) hem ortalama renk (HSV) sonucu doner.
+
+    Kayitli ROI yoksa (henuz /vision/{cam_id}/rois ile hic cizilmemis)
+    hata degil, bos sonuc listesi doner — bu normal/beklenen bir durum.
+    """
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    if not roi_store.get_rois(cam_id):
+        return {"results": [], "roi_reference_uncertain": False}
+    # Sure olcumu burada basliyor (kare alinmadan hemen once) — "saniyede kac
+    # kez bu islemi yapabiliriz" sorusuna cevap vermek icin; JSON serialize/
+    # network gonderimi kasitli olarak disarida birakildi (bizim kontrolumuzde
+    # degil, olcmenin anlami yok).
+    start = time.perf_counter()
+    frame = _capture_frame(cam_id)
+    if frame is None:
+        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı / kare çözümlenemedi")
+    results, uncertain = _read_all_rois(cam_id, frame)
     duration_ms = (time.perf_counter() - start) * 1000
     return {"results": results, "duration_ms": duration_ms, "roi_reference_uncertain": uncertain}
 
@@ -304,6 +347,113 @@ def set_rois(cam_id: str, payload: RoiListPayload):
     rois_as_dicts = [r.model_dump() for r in payload.rois]
     roi_store.save_rois(cam_id, rois_as_dicts)
     return {"success": True, "rois": roi_store.get_rois(cam_id)}
+
+
+# ==============================================================================
+#  KURAL MOTORU — madde 1 (ROI kural mantığı) + madde 2 (güvenlik interlock)
+#  + madde 7 (aralık dışı alarm), TEK motor olarak (bkz. rule_engine.py).
+#  Kurallar periyodik arka plan görevinde (_rule_engine_loop) değerlendirilir;
+#  ihlal olunca motor durdurulur + alarm durumu bellekte tutulup UI'a
+#  (/rules/status, /ws/status) yansıtılır.
+# ==============================================================================
+
+
+class RuleDef(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=128)
+    source: str  # "roi" | "stm32"
+    cam_id: str | None = None  # source="roi" ise zorunlu
+    roi_name: str | None = None  # source="roi" ise zorunlu
+    field: str | None = None  # source="stm32" ise zorunlu
+    min: float | None = None
+    max: float | None = None
+    stop_motor: bool = False
+    enabled: bool = True
+
+
+class RuleListPayload(BaseModel):
+    rules: list[RuleDef]
+
+
+@app.get("/rules")
+def get_rules():
+    """Kayıtlı TÜM kuralları döner (hiç tanımlanmamışsa boş liste)."""
+    return {"rules": rules_store.get_rules()}
+
+
+@app.post("/rules")
+def set_rules(payload: RuleListPayload):
+    """TÜM kural listesini değiştirir (replace-all, ROI yönetimiyle aynı desen).
+
+    Basit doğrulama: source="roi" için cam_id+roi_name, source="stm32" için
+    field zorunlu — eksikse kural sessizce yanlış çalışmak yerine 400 ile
+    reddedilir (ör. hangi ROI/alan izleneceği belirsiz bir kural, motor
+    durdurma kararını asla veremeyecek bir kural demektir, kaydedilmemeli).
+    """
+    for rule in payload.rules:
+        if rule.source == "roi" and not (rule.cam_id and rule.roi_name):
+            raise HTTPException(status_code=400, detail=f"Kural '{rule.name}': source=roi için cam_id+roi_name zorunlu")
+        if rule.source == "stm32" and not rule.field:
+            raise HTTPException(status_code=400, detail=f"Kural '{rule.name}': source=stm32 için field zorunlu")
+        if rule.source not in ("roi", "stm32"):
+            raise HTTPException(status_code=400, detail=f"Kural '{rule.name}': bilinmeyen source '{rule.source}'")
+    rules_as_dicts = [r.model_dump() for r in payload.rules]
+    rules_store.save_rules(rules_as_dicts)
+    return {"success": True, "rules": rules_store.get_rules()}
+
+
+@app.get("/rules/status")
+def get_rules_status():
+    """En son kural değerlendirmesinin sonucu — UI'ın alarm banner'ı ve
+    "şu kural şu an okunamıyor" listesi bunu periyodik olarak çeker."""
+    return {"violations": _current_violations, "skipped": _current_skipped}
+
+
+def _collect_roi_readings(cam_ids: set[str]) -> dict[tuple[str, str], dict]:
+    """Verilen kameralardan kayıtlı TÜM ROI'leri okuyup, kural motorunun
+    beklediği {(cam_id, roi_name): {"text":..., "avg_color_hsv":...}}
+    formatına çevirir. Kamera açılamazsa o kamera sessizce atlanır (bağlı
+    kural değerlendirilemez -> skipped listesine düşer, motoru durdurmaz —
+    bkz. rule_engine.py'deki "okunamayan değer ihlal sayılmaz" prensibi)."""
+    readings: dict[tuple[str, str], dict] = {}
+    for cam_id in cam_ids:
+        frame = _capture_frame(cam_id)
+        if frame is None:
+            continue
+        results, _uncertain = _read_all_rois(cam_id, frame)
+        for r in results:
+            readings[(cam_id, r["name"])] = r
+    return readings
+
+
+async def _rule_engine_loop():
+    """Arka planda sürekli çalışır: RULE_CHECK_INTERVAL_S'te bir kayıtlı
+    kuralları değerlendirir, ihlal varsa motoru durdurur + alarm durumunu
+    günceller. lifespan() içinde başlatılır/iptal edilir (bkz. yukarısı)."""
+    global _current_violations, _current_skipped
+    while True:
+        try:
+            rules = rules_store.get_rules()
+            if rules:
+                cam_ids_needed = {r["cam_id"] for r in rules if r.get("source") == "roi" and r.get("cam_id")}
+                roi_readings = _collect_roi_readings(cam_ids_needed) if cam_ids_needed else {}
+                stm32_status = bridge.get_status()
+                violations, skipped = evaluate_rules(rules, roi_readings, stm32_status)
+                _current_violations = [v.__dict__ for v in violations]
+                _current_skipped = [s.__dict__ for s in skipped]
+                # Herhangi bir ihlal stop_motor=true ise motoru durdur. Her
+                # döngüde tekrar gönderiliyor (ihlal sürdüğü sürece) — "bir
+                # kere durdur, unut" değil, interlock ihlal bitene kadar
+                # ısrarla durdurmalı (ör. UI'dan yanlışlıkla tekrar
+                # başlatılırsa bir sonraki döngüde yine durdurulur).
+                if any(v.stop_motor for v in violations):
+                    bridge.send_command({"cmd": "stop"})
+            else:
+                _current_violations = []
+                _current_skipped = []
+        except Exception:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
+            logging.getLogger("feedvision.rules").exception("Kural Motoru dongusunde beklenmeyen hata")
+        await asyncio.sleep(RULE_CHECK_INTERVAL_S)
 
 
 # ==============================================================================
@@ -375,6 +525,12 @@ async def ws_status(websocket: WebSocket):
                     "is_connected": bridge.is_connected,
                     "last_error": bridge.last_error,
                     "status": bridge.get_status(),
+                    # Kural Motoru'nun en son değerlendirmesi — UI polling'e
+                    # gerek kalmadan alarm banner'ını canlı güncelleyebilsin
+                    # diye zaten var olan bu akışa iğnelendi (ayrı bir
+                    # WebSocket açmaya gerek yok).
+                    "rule_violations": _current_violations,
+                    "rule_skipped": _current_skipped,
                 }
             )
             await asyncio.sleep(0.1)
