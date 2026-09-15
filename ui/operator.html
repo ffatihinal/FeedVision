@@ -1,18 +1,17 @@
 <!DOCTYPE html>
 <!--
-  FeedVision — Operatör Ekranı (15-09-2026 eklendi, G grubu)
+  FeedVision — Operatör Ekranı (15-09-2026 eklendi, G grubu; 15-09-2026
+  genişletildi — Fatih'in "kullanım kolaylığı" revizyonu)
 
-  Kapsam bilinçli olarak DAR tutuldu (bkz. UI/UX planı, Fatih onayı): sadece
-  DURDUR, canlı encoder mm, kamera görüntüleri + Scan Save (yalnız UI Screen
-  Camera), kural ihlali alarm banner'ı. ROI/kalibrasyon, kural tanımlama, ham
-  motor komutları, sistem sağlığı/loglar — hepsi admin.html'de, burada YOK.
+  Sıralama (yukarıdan aşağı, Fatih'in kararı): 1) ana ekrana dönüş,
+  2) port/bağlantı, 3) konsol, 4) step motor kontrolleri, 5) büyük DURDUR +
+  küçük Alarm Sustur, 6) DC motor kontrolleri, 7) encoder + sıfırlama,
+  8) kameralar. ROI/kalibrasyon, Kontrol Kriterleri tanımlama, ham sistem
+  logları, Hareket Analizi, sıcaklık/CPU/RAM grafikleri — hâlâ Admin-only.
 
-  Not (bilinen sınırlama): Encoder mm dönüşümü için teker çapı değerleri
-  (Admin'de girilir) tarayıcının localStorage'ında tutuluyor — Operatör bu
-  sayfayı Admin'in teker çapını girdiği İLE AYNI tarayıcıda/cihazda açarsa
-  doğru mm gösterir, farklı bir cihazdaysa 40mm varsayılanına düşer. Teker
-  çapının sunucu tarafında (tüm cihazlarda ortak) saklanması ileride ayrı
-  bir iyileştirme olarak değerlendirilebilir.
+  Not (bilinen sınırlama): Encoder mm dönüşümü için teker çapı (Admin'de
+  girilir) tarayıcının localStorage'ında tutuluyor — aynı cihaz/tarayıcıda
+  açılmazsa 40mm varsayılanına düşer (bkz. admin.html'deki aynı not).
 -->
 <html lang="tr">
 <head>
@@ -24,9 +23,16 @@
     body {
       margin: 0; background: #111; color: #eee;
       font-family: -apple-system, "Segoe UI", Arial, sans-serif;
-      padding: 14px; display: flex; flex-direction: column; gap: 14px;
+      padding: 14px; display: flex; flex-direction: column; gap: 16px;
     }
-    .topbar { display: flex; justify-content: space-between; align-items: center; font-size: 14px; color: #999; }
+    .panel { background: #1a1a1a; border-radius: 12px; padding: 16px; }
+    .panel h2 { margin: 0 0 10px; font-size: 16px; color: #ccc; }
+
+    #back-btn {
+      align-self: flex-start; padding: 8px 16px; font-size: 14px; border-radius: 8px;
+      border: none; background: #333; color: #eee; cursor: pointer;
+    }
+
     .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
     .status-dot.connected { background: #2ecc71; }
     .status-dot.disconnected { background: #c0392b; }
@@ -36,74 +42,162 @@
       font-weight: bold; font-size: 17px; text-align: center;
     }
 
+    .row-group { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    .row-group label { font-size: 13px; color: #aaa; }
+    .row-group input, .row-group select {
+      padding: 8px; font-size: 14px; border-radius: 6px; border: 1px solid #444;
+      background: #111; color: #eee; width: 90px;
+    }
+    button {
+      padding: 10px 16px; font-size: 14px; border-radius: 8px; border: none;
+      background: #333; color: #eee; cursor: pointer;
+    }
+    button:active { background: #444; }
+    button:disabled { background: #292929; color: #666; cursor: not-allowed; }
+
+    #console { background: #0c0c0c; border-radius: 8px; padding: 10px; height: 160px;
+      overflow-y: auto; font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+    #console .line { padding: 2px 0; border-bottom: 1px solid #1f1f1f; }
+    #console .time { color: #666; }
+    #console .button-name { color: #6cf; }
+    #console .error { color: #f66; }
+    #console .result { color: #9d9; }
+
+    .running-warning { display: none; color: #fb4; font-size: 13px; margin-top: 6px; }
+    .running-warning.show { display: block; }
+
+    #stop-row { display: flex; align-items: center; gap: 14px; }
     #stop-btn {
-      width: 100%; padding: 34px 0; font-size: 34px; font-weight: 800; letter-spacing: .05em;
+      flex: 1; padding: 30px 0; font-size: 30px; font-weight: 800; letter-spacing: .05em;
       background: #c0392b; color: #fff; border: none; border-radius: 14px; cursor: pointer;
     }
     #stop-btn:active { background: #922b21; }
-    #stop-status { text-align: center; color: #999; font-size: 13px; min-height: 16px; }
+    #mute-btn { padding: 12px 18px; font-size: 13px; }
+    #mute-btn.active { background: #654; color: #fd8; }
+    #stop-status { text-align: center; color: #999; font-size: 13px; min-height: 16px; margin-top: 6px; }
 
-    .encoders { display: flex; gap: 14px; }
-    .encoder-box {
-      flex: 1; background: #1a1a1a; border-radius: 12px; padding: 18px; text-align: center;
-    }
-    .encoder-box .label { font-size: 14px; color: #999; text-transform: uppercase; letter-spacing: .05em; }
-    .encoder-box .value { font-family: "SF Mono", Menlo, monospace; font-size: 56px; font-weight: 800; color: #eee; }
-    #machine-state { text-align: center; font-size: 18px; color: #ccc; }
+    .encoders { display: flex; gap: 14px; margin-bottom: 10px; }
+    .encoder-box { flex: 1; background: #111; border-radius: 10px; padding: 16px; text-align: center; }
+    .encoder-box .label { font-size: 13px; color: #999; text-transform: uppercase; letter-spacing: .05em; }
+    .encoder-box .value { font-family: "SF Mono", Menlo, monospace; font-size: 46px; font-weight: 800; color: #eee; }
 
     .cameras { display: flex; gap: 14px; flex-wrap: wrap; }
-    .camera-block { flex: 1; min-width: 280px; background: #1a1a1a; border-radius: 12px; padding: 12px; }
+    .camera-block { flex: 1; min-width: 280px; background: #111; border-radius: 10px; padding: 12px; }
     .camera-block h3 { margin: 0 0 8px; font-size: 15px; color: #ccc; }
     .camera-block img { width: 100%; border-radius: 8px; background: #000; display: none; }
     .camera-block img.open { display: block; }
     .camera-block .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
-    .camera-block button {
-      padding: 10px 14px; font-size: 14px; border-radius: 8px; border: none;
-      background: #333; color: #eee; cursor: pointer;
-    }
-    .camera-block button:active { background: #444; }
     #scan-save-status { color: #888; font-size: 12.5px; }
   </style>
 </head>
 <body>
-  <div class="topbar">
-    <div><span id="status-dot" class="status-dot disconnected"></span><span id="connection-text">Bağlı değil</span></div>
-    <div>FeedVision — Operatör</div>
-  </div>
+
+  <!-- 1) Ana ekrana dönüş -->
+  <button id="back-btn" onclick="location.href='/'">← Ana Ekran</button>
 
   <div id="rule-alarm-banner"></div>
 
-  <button id="stop-btn" onclick="emergencyStop()">DURDUR</button>
-  <div id="stop-status"></div>
-
-  <div class="encoders">
-    <div class="encoder-box">
-      <div class="label">Encoder 1</div>
-      <div class="value" id="er-e1-mm">— mm</div>
-    </div>
-    <div class="encoder-box">
-      <div class="label">Encoder 2</div>
-      <div class="value" id="er-e2-mm">— mm</div>
+  <!-- 2) Port seçimi + STM32 bağlantısı -->
+  <div class="panel">
+    <h2>Kontrol Kartı Bağlantısı</h2>
+    <div class="row-group">
+      <label>Seri port:</label>
+      <select id="port-select"></select>
+      <button onclick="refreshPorts()">Yenile</button>
+      <button onclick="connectSerial()">Bağlan</button>
+      <button onclick="disconnectSerial()">Bağlantıyı Kes</button>
+      <span id="status-dot" class="status-dot disconnected"></span>
+      <span id="connection-text">Bağlı değil</span>
     </div>
   </div>
-  <div id="machine-state">Durum: —</div>
 
-  <div class="cameras">
-    <div class="camera-block">
-      <h3>Chamber Camera</h3>
-      <div class="row">
-        <button onclick="toggleCamera('chamber')">Aç/Kapat</button>
-      </div>
-      <img id="camera-chamber">
+  <!-- 3) Konsol -->
+  <div class="panel">
+    <h2>Konsol</h2>
+    <div class="row-group" style="margin-bottom:6px;">
+      <button onclick="clearConsole()">Konsolu Temizle</button>
     </div>
-    <div class="camera-block">
-      <h3>UI Screen Camera</h3>
-      <div class="row">
-        <button onclick="toggleCamera('ui_screen')">Aç/Kapat</button>
-        <button onclick="scanSave()">Scan Save</button>
-        <span id="scan-save-status"></span>
+    <div id="console"></div>
+  </div>
+
+  <!-- 4) Step motor kontrolü -->
+  <div class="panel">
+    <h2>Step Motor</h2>
+    <div class="row-group">
+      <label>Yön:</label>
+      <select id="step-dir"><option value="1">1</option><option value="0">0</option></select>
+      <label>Gecikme (µs):</label>
+      <input id="step-delay" type="number" value="500" min="1">
+      <label>Adım:</label>
+      <input id="step-count" type="number" value="2000" min="1">
+      <label>İvme (adım):</label>
+      <input id="step-accel" type="number" value="0" min="0">
+      <button id="step-at-btn" onclick="sendStep()">Step At</button>
+      <button onclick="stopStep()">Durdur</button>
+    </div>
+    <!-- 15-09-2026: "yeni komut önceki hareketin üzerine yazacak" gibi bir
+         kuyruğa alma mekanizması YOK — sadece durum bilgisi, buton zaten
+         hareket halindeyken devre dışı (bkz. renderStatus). -->
+    <div id="running-warning" class="running-warning">⚠ Step motor şu an hareket halinde — yeni komut gönderilemez, bitmesini bekleyin ya da Durdur'a basın.</div>
+  </div>
+
+  <!-- 5) Büyük DURDUR + küçük Alarm Sustur -->
+  <div class="panel">
+    <div id="stop-row">
+      <button id="stop-btn" onclick="emergencyStop()">DURDUR</button>
+      <button id="mute-btn" onclick="toggleAlarmMute()">🔇 Alarm Sustur</button>
+    </div>
+    <div id="stop-status"></div>
+  </div>
+
+  <!-- 6) DC motor kontrolü -->
+  <div class="panel">
+    <h2>DC Motor</h2>
+    <div class="row-group">
+      <button onclick="sendDc('forward', 'İleri')">İleri</button>
+      <button onclick="sendDc('backward', 'Geri')">Geri</button>
+      <button onclick="sendDc('stop', 'Dur')">Dur</button>
+    </div>
+  </div>
+
+  <!-- 7) Encoder bilgileri + sıfırlama -->
+  <div class="panel">
+    <h2>Encoder</h2>
+    <div class="encoders">
+      <div class="encoder-box">
+        <div class="label">Encoder 1</div>
+        <div class="value" id="er-e1-mm">— mm</div>
       </div>
-      <img id="camera-ui_screen">
+      <div class="encoder-box">
+        <div class="label">Encoder 2</div>
+        <div class="value" id="er-e2-mm">— mm</div>
+      </div>
+    </div>
+    <div class="row-group">
+      <button onclick="resetEncoders()">Encoder'ları Sıfırla</button>
+    </div>
+  </div>
+
+  <!-- 8) Kameralar -->
+  <div class="panel">
+    <h2>Kameralar</h2>
+    <div class="cameras">
+      <div class="camera-block">
+        <h3>Chamber Camera</h3>
+        <div class="row">
+          <button onclick="toggleCamera('chamber')">Aç/Kapat</button>
+        </div>
+        <img id="camera-chamber">
+      </div>
+      <div class="camera-block">
+        <h3>UI Screen Camera</h3>
+        <div class="row">
+          <button onclick="toggleCamera('ui_screen')">Aç/Kapat</button>
+          <button onclick="scanSave()">Scan Save</button>
+          <span id="scan-save-status"></span>
+        </div>
+        <img id="camera-ui_screen">
+      </div>
     </div>
   </div>
 
@@ -111,11 +205,9 @@
   <script>
     let mm1PerCount = 0;
     let mm2PerCount = 0;
+    let lastStatus = {};
 
     function loadWheelDiameters() {
-      // Admin'de girilen teker çapı (bkz. dosya başındaki "bilinen sınırlama"
-      // notu) — aynı anahtar adları (feedvision_wheel-enc1/2) admin.html'de
-      // de kullanılıyor, aynı tarayıcıda tutarlı kalır.
       const d1 = parseFloat(localStorage.getItem("feedvision_wheel-enc1")) || 40;
       const d2 = parseFloat(localStorage.getItem("feedvision_wheel-enc2")) || 40;
       // 600 PPR encoder x4 quadrature kenar çarpanı = 2400 sayım/tur — admin.html
@@ -127,10 +219,12 @@
 
     function renderStatus(status) {
       if (!status || !Object.keys(status).length) return;
+      lastStatus = status;
       document.getElementById("er-e1-mm").textContent = `${(status.e1 * mm1PerCount).toFixed(1)} mm`;
       document.getElementById("er-e2-mm").textContent = `${(status.e2 * mm2PerCount).toFixed(1)} mm`;
-      const running = status.running === 1 || status.dc > 0;
-      document.getElementById("machine-state").textContent = `Durum: ${running ? "HAREKET EDİYOR" : "BOŞTA"}`;
+      document.getElementById("running-warning").classList.toggle("show", !!status.running);
+      const stepBtn = document.getElementById("step-at-btn");
+      if (stepBtn) stepBtn.disabled = !!status.running;
     }
 
     let previousConnectionState = null;
@@ -148,7 +242,19 @@
       renderStatus(data.status);
     }
 
+    function toggleAlarmMute() {
+      alarmMuted = !alarmMuted;
+      const btn = document.getElementById("mute-btn");
+      btn.classList.toggle("active", alarmMuted);
+      btn.textContent = alarmMuted ? "🔇 Alarm Susturuldu" : "🔇 Alarm Sustur";
+      logToConsole("Alarm Sustur", "Sesli alarmı aç/kapat", alarmMuted ? "Susturuldu." : "Tekrar açıldı.", false);
+    }
+
     async function emergencyStop() {
+      // Step + DC motoru BİRLİKTE, anında durdurur (bkz. /motor/stop +
+      // /motor/dc dir=stop) — bu davranış Kontrol Kriterleri/Step At
+      // değişikliklerinden BAĞIMSIZ, dokunulmadı (15-09-2026 regresyon testiyle
+      // ayrıca doğrulandı).
       const statusEl = document.getElementById("stop-status");
       statusEl.textContent = "Durduruluyor…";
       try {
@@ -166,6 +272,105 @@
       }
     }
 
+    // --- Seri port ---
+    async function refreshPorts() {
+      const task = "Bilgisayara takılı seri portları listele";
+      try {
+        const r = await fetch("/serial/ports");
+        const data = await r.json();
+        const select = document.getElementById("port-select");
+        select.innerHTML = "";
+        data.ports.forEach((p) => {
+          const opt = document.createElement("option");
+          opt.value = p; opt.textContent = p;
+          select.appendChild(opt);
+        });
+        logToConsole("Yenile", task, `${data.ports.length} port bulundu.`, false);
+      } catch (e) {
+        logToConsole("Yenile", task, `İstek başarısız: ${e}`, true);
+      }
+    }
+
+    async function connectSerial() {
+      const port = document.getElementById("port-select").value;
+      const task = `Kontrol kartına ${port} portundan bağlan`;
+      if (!port) {
+        logToConsole("Bağlan", task, "Önce bir port seçmelisin (Yenile'ye bas).", true);
+        return;
+      }
+      try {
+        const r = await fetch(`/serial/connect?port=${encodeURIComponent(port)}`, { method: "POST" });
+        const data = await r.json();
+        logToConsole("Bağlan", task, data.success ? "Bağlantı kuruldu." : `Bağlanamadı: ${data.error}`, !data.success);
+      } catch (e) {
+        logToConsole("Bağlan", task, `İstek başarısız: ${e}`, true);
+      }
+    }
+
+    async function disconnectSerial() {
+      const task = "Kontrol kartı bağlantısını kapat";
+      await fetch("/serial/disconnect", { method: "POST" });
+      logToConsole("Bağlantıyı Kes", task, "Bağlantı kapatıldı.", false);
+    }
+
+    // --- Motor komutları — admin.html'deki ham "Giden Komut/Yanıt" kutuları
+    // burada YOK (kasıtlı, sade arayüz), sonuç sadece Konsol'a yazılıyor. ---
+    function logCmdResult(buttonName, data) {
+      const resultText = !data.sent ? "Gönderilemedi (bağlı değil)."
+        : data.timed_out ? "Gönderildi, yanıt gelmedi (timeout)."
+        : `Gönderildi → Kontrol kartı: ${data.raw_reply}`;
+      const isError = !data.sent || data.timed_out || (data.reply && data.reply.err);
+      logToConsole(buttonName, buttonName, resultText, !!isError);
+    }
+
+    async function sendStep() {
+      // Buton zaten hareket halindeyken disabled oluyor (renderStatus), ama
+      // yarış durumu/hızlı çift tık ihtimaline karşı burada da GERÇEK bir
+      // koruma var — olmayan bir "kuyruğa alma" davranışı varmış gibi
+      // göstermek yerine açıkça reddediyoruz (15-09-2026 düzeltmesi).
+      if (lastStatus && lastStatus.running) {
+        logToConsole("Step At", "Step komutu hazırla",
+          "Hareket bitmeden yeni komut verilemez. Hareketi durdurun veya bitmesini bekleyin.", true);
+        return;
+      }
+      const dir = parseInt(document.getElementById("step-dir").value);
+      const delay = parseInt(document.getElementById("step-delay").value);
+      const steps = parseInt(document.getElementById("step-count").value);
+      const accel = parseInt(document.getElementById("step-accel").value) || 0;
+      if (!(delay > 0) || !(steps > 0)) {
+        logToConsole("Step At", "Step komutu hazırla", "Geçersiz değer — gecikme ve adım 0'dan büyük olmalı, gönderilmedi.", true);
+        return;
+      }
+      if (accel < 0) {
+        logToConsole("Step At", "Step komutu hazırla", "İvme negatif olamaz, gönderilmedi.", true);
+        return;
+      }
+      const r = await fetch("/motor/step", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dir, delay, steps, accel }),
+      });
+      logCmdResult("Step At", await r.json());
+    }
+
+    async function stopStep() {
+      const r = await fetch("/motor/stop", { method: "POST" });
+      logCmdResult("Durdur", await r.json());
+    }
+
+    async function sendDc(dir, label) {
+      const r = await fetch("/motor/dc", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dir }),
+      });
+      logCmdResult(label, await r.json());
+    }
+
+    async function resetEncoders() {
+      const r = await fetch("/motor/reset", { method: "POST" });
+      logCmdResult("Encoder'ları Sıfırla", await r.json());
+    }
+
+    // --- Kameralar ---
     async function toggleCamera(camId) {
       const img = document.getElementById("camera-" + camId);
       const isOpen = img.classList.contains("open");
@@ -223,6 +428,7 @@
     }
 
     loadWheelDiameters();
+    refreshPorts();
     startStatusWebSocket(onStatusMessage);
   </script>
 </body>
