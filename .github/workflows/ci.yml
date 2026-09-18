@@ -1,0 +1,33 @@
+name: CI
+
+# Sadece saf yazılım mantığını doğrular — kamera/seri port/donanım gerektiren
+# hiçbir adım burada YOK (Pi'de elle test edilir). Firmware (STM32) derleme
+# kontrolü de kapsam dışı, ayrı toolchain gerektirir (bugünkü kapsamda değil).
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies
+        working-directory: rpi-core
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        working-directory: rpi-core
+        run: ruff check .
+
+      - name: Test (pytest)
+        working-directory: rpi-core
+        run: pytest tests/ -v
