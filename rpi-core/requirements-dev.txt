@@ -1,0 +1,7 @@
+# FeedVision RPi Core — gelistirme/CI bagimliliklari (uretimde gerekmez)
+# Kurulum (yerel gelistirme, tum bagimliliklarla):  pip install -r requirements.txt -r requirements-dev.txt
+# CI sadece bu dosyayi kurar (opencv/pyserial/picamera2 gibi donanima bagli
+# paketler CI'da gerekmiyor — test edilen rule_engine.py stdlib disinda
+# bagimlilik kullanmiyor).
+pytest>=8.0
+ruff>=0.6
