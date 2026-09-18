@@ -18,6 +18,16 @@
 
 const CONSOLE_MAX_LINES = 500;  // performans için cap — tam log geçmişi önemli değil
 
+// Küçük yardımcı: metni bir <span>'e textContent ile koyar (innerHTML YOK) —
+// buttonName/task/result değerleri kullanıcı/cihaz kaynaklı olabileceğinden
+// (ör. seri porttan gelen hata metni) XSS'e karşı hep DOM node olarak kurulur.
+function makeConsoleSpan(className, text) {
+  const span = document.createElement("span");
+  span.className = className;
+  span.textContent = text;
+  return span;
+}
+
 function logToConsole(buttonName, task, result, isError) {
   const box = document.getElementById("console");
   const time = new Date().toLocaleTimeString("tr-TR");
@@ -30,11 +40,13 @@ function logToConsole(buttonName, task, result, isError) {
   }
   const line = document.createElement("div");
   line.className = "line";
-  line.innerHTML =
-    `<span class="time">[${time}]</span> ` +
-    `<span class="button-name">${buttonName}</span> — ` +
-    `<span class="task">Görev: ${task}</span> — ` +
-    `<span class="${isError ? 'error' : 'result'}">Sonuç: ${result}</span>`;
+  line.appendChild(makeConsoleSpan("time", `[${time}]`));
+  line.appendChild(document.createTextNode(" "));
+  line.appendChild(makeConsoleSpan("button-name", buttonName));
+  line.appendChild(document.createTextNode(" — "));
+  line.appendChild(makeConsoleSpan("task", `Görev: ${task}`));
+  line.appendChild(document.createTextNode(" — "));
+  line.appendChild(makeConsoleSpan(isError ? "error" : "result", `Sonuç: ${result}`));
   box.appendChild(line);
   while (box.children.length > CONSOLE_MAX_LINES) {
     box.removeChild(box.firstChild);  // en eski satırları at
