@@ -142,3 +142,15 @@ class TestFeedTotalizerSummary:
         totalizer.update({"um1": 0, "um2": 0, "remaining": 500})
         summary = totalizer.update({"um1": 4000, "um2": 2000, "remaining": 300})
         assert summary["total_mm_average"] == 3.0
+
+    def test_no_mismatch_warning_when_absolute_diff_below_min_mm(self, isolated_feed_total_state):
+        # AND mantığının MISMATCH_MIN_MM bacağı: oransal fark eşiği aşsa
+        # bile (diff=4.5 > 0.05*6.5=0.325) mutlak fark 5.0mm eşiğinin
+        # ALTINDAYSA uyarı tetiklenmemeli — sadece oran kontrolü yeterli
+        # değil, min-mm kapısı da geçilmeli.
+        totalizer = FeedTotalizer(state_path=isolated_feed_total_state)
+        totalizer.update({"um1": 0, "um2": 0, "remaining": 500})
+        summary = totalizer.update({"um1": 2000, "um2": 6500, "remaining": 300})
+        assert summary["total_mm_e1"] == 2.0
+        assert summary["total_mm_e2"] == 6.5
+        assert summary["mismatch_warning"] is False
