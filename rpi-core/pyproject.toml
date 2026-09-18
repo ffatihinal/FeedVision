@@ -1,0 +1,12 @@
+[tool.ruff]
+# Bu proje kapalı bir atölyede, 2-3 operatör tarafından kullanılan tek-Pi'lik
+# bir sistem (internete açık değil, çok kullanıcılı bir servis değil). O yüzden
+# ruff'ın varsayılan geniş kural setini (timezone pedantry, import sıralama,
+# syntax modernizasyonu gibi stil meseleleri) DEĞİL, gerçek hataları yakalayan
+# çekirdek seti kullanıyoruz — E (pycodestyle hata) + F (pyflakes: kullanılmayan
+# import/değişken, tanımsız isim gibi gerçek buglar). 18-09-2026 kararı.
+[tool.ruff.lint]
+select = ["E", "F"]
+# E501 (satır çok uzun) kapalı — kod içi Türkçe yorumlar (proje kuralı: yorumlar
+# Türkçe) doğası gereği İngilizce'den daha uzun oluyor, bunu zorlamak anlamsız.
+ignore = ["E501"]
