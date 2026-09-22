@@ -167,10 +167,12 @@ static volatile uint8_t  g_command_ready = 0;
 static uint32_t g_last_status_ms = 0;
 
 /* --- LED ile bağlantı doğrulaması ----------------------------------------
- * host_confirmed: Pi/Mac'ten geçerli bir komut alınca 1 olur (ilk komuttan
- * sonra hep 1 kalır — güç kesilene kadar). LED'i yavaş/hızlı yanıp söndürmek
- * için kullanılır (bkz. USER CODE 3): yavaş = "firmware çalışıyor ama kimse
- * konuşmadı", hızlı = "gerçek bir komut alındı, karşı taraf bağlı". */
+ * host_confirmed: Pi/Mac'ten geçerli bir komut alınca 1 olur. LED'i
+ * yavaş/hızlı yanıp söndürmek için kullanılır (bkz. USER CODE 3): yavaş =
+ * "firmware çalışıyor ama kimse konuşmadı / bağlantı koptu", hızlı = "gerçek
+ * bir komut alındı, karşı taraf bağlı". Host bağlantının koptuğuna karar
+ * verince "bye" komutunu gönderir (bkz. process_command) — bu bayrağı tekrar
+ * 0'a çeker, LED yavaş moda döner (22-09-2026, LED tek-yön latch düzeltmesi). */
 static volatile uint8_t g_host_confirmed = 0;
 static uint16_t          g_led_tick = 0;
 
@@ -516,7 +518,8 @@ static void process_command(const char *line)
 
   /* Geçerli bir komut satırı ayrıştırıldı — karşı tarafın gerçekten bizimle
    * konuştuğu kanıtlandı. LED yanıp sönme hızını buna göre değiştiriyoruz
-   * (bkz. USER CODE 3). Bir daha güç kesilene kadar geri dönmüyor. */
+   * (bkz. USER CODE 3). "bye" hariç her komutta 1'e set edilir; "bye" kendi
+   * branch'inde bunu hemen ardından tekrar 0'a çeker (host bağlantıyı kapattı). */
   g_host_confirmed = 1;
 
   /* ---- Step motoru hareket ettir ---- */
@@ -571,6 +574,15 @@ static void process_command(const char *line)
   /* ---- Bağlantı testi ---- */
   else if (strcmp(cmd, "ping") == 0) {
     uart_send("{\"ok\":\"pong\"}\r\n");
+  }
+
+  /* ---- Host bağlantıyı kapattı: LED'i yavaş moda döndür (22-09-2026) ----
+   * Pi kendi bağlantı-sağlığı mantığıyla (heartbeat/timeout) kopmaya karar
+   * verince bunu gönderir. stop/reset/ping gibi hiçbir gate'e bağlı değil,
+   * her zaman işlenir. */
+  else if (strcmp(cmd, "bye") == 0) {
+    g_host_confirmed = 0;
+    uart_send("{\"ok\":\"bye\"}\r\n");
   }
 
   else {

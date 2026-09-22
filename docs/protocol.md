@@ -17,6 +17,7 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 | `{"cmd":"dc","dir":"stop"}` | DC motor dur |
 | `{"cmd":"reset"}` | İki encoder sayacını da sıfırla |
 | `{"cmd":"ping"}` | Bağlantı testi |
+| `{"cmd":"bye"}` | Host bağlantıyı kapattı (bkz. aşağıda) |
 
 ## STM32 → Pi/PC (durum, saniyede ~20 kez)
 
@@ -55,6 +56,17 @@ fonksiyonel olarak birebir aynı, sadece hangi timer'ın kullanıldığı deği�
 yeni pin/kablo YOK). TIM17 zaten boştaydı, doğrudan kullanıldı.
 
 Gerçek üretim protokolü (Pi tarafı `feedvision-core`) bu test protokolünü temel alacak, komut seti büyüyecek (SE ekibinin ICD'siyle uyumlu hale gelecek).
+
+## `bye` — bağlantı koptuğunda LED'i yavaş moda döndür (22-09-2026 eklendi)
+
+Kart üstü LED (LD3), host'tan geçerli bir komut alınca yavaş (~1 Hz) yanıp
+sönmeden hızlı (~10 Hz) moda geçiyordu (`g_host_confirmed` bayrağı, main.c) —
+ama bu tek yönlüydü: bağlantı koptuktan sonra da LED hızlı kalmaya devam
+ediyordu, çünkü bayrağı geri 0'a çekecek bir yol yoktu. `bye` bu boşluğu
+kapatıyor: Pi kendi bağlantı-sağlığı mantığıyla (heartbeat/timeout) bağlantının
+koptuğuna karar verdiğinde `{"cmd":"bye"}` gönderir, firmware `g_host_confirmed`
+bayrağını 0'a çeker ve LED tekrar yavaş moda döner. `stop`/`reset`/`ping` gibi
+firmware'de hiçbir gate/kilit koşuluna bağlı değil, her zaman işlenir.
 
 ## `delay` ve `accel` — hız ve rampa (03-09-2026 netleştirildi)
 
