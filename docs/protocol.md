@@ -11,8 +11,9 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 | `{"cmd":"step","dir":1,"delay":500,"steps":2000}` | 2000 step at, darbe periyodu 500 µs, yön 1 |
 | `{"cmd":"step","dir":1,"delay":500,"steps":2000,"accel":300}` | Aynısı ama ilk 300 ve son 300 adımda hızlanıp yavaşlıyor (rampa) — bkz. aşağıda |
 | `{"cmd":"stop"}` | Step motoru anında durdur |
-| `{"cmd":"dc","dir":"forward"}` | DC motor ileri |
-| `{"cmd":"dc","dir":"backward"}` | DC motor geri |
+| `{"cmd":"dc","dir":"forward"}` | DC motor ileri, tam hız (speed verilmezse varsayılan %100) |
+| `{"cmd":"dc","dir":"forward","speed":30}` | DC motor ileri, %30 hız (PWM duty) |
+| `{"cmd":"dc","dir":"backward","speed":30}` | DC motor geri, %30 hız |
 | `{"cmd":"dc","dir":"stop"}` | DC motor dur |
 | `{"cmd":"reset"}` | İki encoder sayacını da sıfırla |
 | `{"cmd":"ping"}` | Bağlantı testi |
@@ -20,7 +21,7 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 ## STM32 → Pi/PC (durum, saniyede ~20 kez)
 
 ```json
-{"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"remaining":0,"running":0,"dc":0}
+{"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"remaining":0,"running":0,"dc":0,"dcSpeed":0}
 ```
 
 | Alan          | Anlamı                                                     |
@@ -31,6 +32,27 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 | `remaining`   | Step motorun atmayı bekleyen darbe sayısı                  |
 | `running`     | 1 = step motor hareket halinde                             |
 | `dc`          | 0 = dur, 1 = ileri, 2 = geri                               |
+| `dcSpeed`     | DC motorun o anki PWM duty'si, 0-100 (dur ise 0)           |
+
+## DC motor PWM (22-09-2026 eklendi, backlog #109)
+
+L9110 artık sadece ON/OFF değil, gerçek PWM ile sürülüyor (`speed` alanı 0-100,
+yoksa eski davranışla uyumlu olacak şekilde varsayılan 100 = tam hız). PWM
+frekansı 1 kHz (firmware'de `DC_PWM_PERIOD_TICKS`/`DC_PWM_PRESCALER`, main.c) -
+bu L9110 datasheet'inde belirtilen bir değer DEĞİL (datasheet'te "optimal PWM
+frekansı" diye bir bilgi yok), hobi-seviye DC motor sürücülerinde yaygın kabul
+gören bir başlangıç değeri. **Sahada doğrulanacak:** çok düşük `speed` (ör.
+5-10) değerinde motor gerçekten sürekli dönüyor mu (minimum çalışır duty),
+ses/ısınma sorunlu mu.
+
+**Donanım kaynağı notu:** STM32G031K8'de DC_IA1 (PB8) TIM16_CH1, DC_IB1 (PB9)
+TIM17_CH1 alternate function ile PWM üretebiliyor (RM0444 + community
+doğrulaması). TIM16 daha önce step darbe üretecinin (base/kesme modu) zaman
+tabanıydı - PWM ile aynı anda kullanılamayacağı için (tek sayaç/ARR, step'in
+sürekli değişen 20-60000 us periyoduyla PWM'in sabit periyodu çakışır) step
+darbe üreteci **TIM14'e taşındı** (main.c/stm32g0xx_hal_msp.c/stm32g0xx_it.c,
+fonksiyonel olarak birebir aynı, sadece hangi timer'ın kullanıldığı değişti -
+yeni pin/kablo YOK). TIM17 zaten boştaydı, doğrudan kullanıldı.
 
 Gerçek üretim protokolü (Pi tarafı `feedvision-core`) bu test protokolünü temel alacak, komut seti büyüyecek (SE ekibinin ICD'siyle uyumlu hale gelecek).
 

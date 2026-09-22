@@ -55,7 +55,7 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-extern TIM_HandleTypeDef htim16;
+extern TIM_HandleTypeDef htim14;
 extern UART_HandleTypeDef huart2;
 /* USER CODE BEGIN EV */
 
@@ -142,17 +142,20 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /**
-  * @brief This function handles TIM16 global interrupt.
+  * @brief This function handles TIM14 global interrupt.
+  * (22-09-2026: step darbe üreteci TIM16'dan TIM14'e taşındı - TIM16/TIM17
+  * artık DC motor PWM'de, kesme kullanmıyorlar, ayrı bir IRQHandler'a
+  * ihtiyaçları yok - startup dosyasındaki weak Default_Handler yeterli.)
   */
-void TIM16_IRQHandler(void)
+void TIM14_IRQHandler(void)
 {
-  /* USER CODE BEGIN TIM16_IRQn 0 */
+  /* USER CODE BEGIN TIM14_IRQn 0 */
 
-  /* USER CODE END TIM16_IRQn 0 */
-  HAL_TIM_IRQHandler(&htim16);
-  /* USER CODE BEGIN TIM16_IRQn 1 */
+  /* USER CODE END TIM14_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim14);
+  /* USER CODE BEGIN TIM14_IRQn 1 */
 
-  /* USER CODE END TIM16_IRQn 1 */
+  /* USER CODE END TIM14_IRQn 1 */
 }
 
 /**

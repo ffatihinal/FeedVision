@@ -86,6 +86,18 @@
 /* --- Seri porttan gelen komut satırı tamponu ----------------------------- */
 #define RX_LINE_MAX            96
 
+/* --- DC motor PWM (L9110 hız kontrolü, backlog #109) ---------------------
+ * TIM16/TIM17'yi 1 MHz tick'e böldük (Prescaler=63, 64 MHz APB/64), periyot
+ * 1000 tık = 1 ms -> 1 kHz PWM frekansı. 1 kHz seçimi L9110 datasheet'inde
+ * yazan bir "optimal PWM frekansı" değil (datasheet'te böyle bir değer YOK,
+ * sadece VCC/akım limitleri var) - hobi-seviye DC motor sürücülerinde yaygın
+ * kullanılan, motorun elektriksel zaman sabitine göre güvenli bir orta değer.
+ * SAHADA DOĞRULA: çok düşük duty'de motor gerçekten dönüyor mu (minimum
+ * çalışır duty), ses/ısınma sorunlu mu - gerekirse bu tek satırı değiştir. */
+#define DC_PWM_PRESCALER        63U    /* 64 MHz / 64 = 1 MHz tick (1 us) */
+#define DC_PWM_PERIOD_TICKS    999U    /* 1000 tık = 1 ms periyot -> 1 kHz PWM */
+#define DC_SPEED_DEFAULT_PCT   100U    /* "speed" alanı yoksa eski davranış: tam hız */
+
 
 /* USER CODE END PD */
 
@@ -97,7 +109,9 @@
 /* Private variables ---------------------------------------------------------*/
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim3;
-TIM_HandleTypeDef htim16;
+TIM_HandleTypeDef htim14;   /* step darbe üreteci (base/kesme modu) - eskiden TIM16'daydı */
+TIM_HandleTypeDef htim16;   /* DC motor PWM - IA1/PB8 */
+TIM_HandleTypeDef htim17;   /* DC motor PWM - IB1/PB9 */
 
 UART_HandleTypeDef huart2;
 
@@ -138,8 +152,9 @@ typedef struct {
 static encoder_t g_enc1;        /* TIM1 - motorlu tekerlek */
 static encoder_t g_enc2;        /* TIM3 - boşta tekerlek */
 
-/* --- DC motor durumu: 0=dur, 1=ileri, 2=geri ---------------------------- */
+/* --- DC motor durumu: 0=dur, 1=ileri, 2=geri; hız 0-100 (duty %) --------- */
 static uint8_t g_dc_state = 0;
+static uint8_t g_dc_speed = 0;
 
 /* --- Seri port alım tamponları ------------------------------------------ */
 static uint8_t           g_rx_byte;                    /* kesmede tek tek gelen karakter */
@@ -167,7 +182,9 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_TIM14_Init(void);
 static void MX_TIM16_Init(void);
+static void MX_TIM17_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -183,7 +200,8 @@ static uint32_t step_delay_for_remaining(uint32_t remaining);  // rampanın o an
 static void     step_stop(void);                                              // step motoru anında durdurur
 
 /* --- DC motor fonksiyonu --- */
-static void     dc_set(uint8_t state);  // DC motoru ileri/geri/dur durumuna sokar
+static uint16_t dc_duty_ticks(uint8_t speed_pct);       // 0-100 yüzdeyi timer CCR tık değerine çevirir
+static void     dc_set(uint8_t state, uint8_t speed_pct);  // DC motoru ileri/geri/dur + hız (PWM duty %) durumuna sokar
 
 /* --- Seri port (UART) fonksiyonları --- */
 static void     uart_send(const char *s);              // bir metni Mac'e (seri port üzerinden) gönderir
@@ -277,7 +295,9 @@ static int32_t encoder_to_micrometers(int32_t count)
 
 
 /* ==========================================================================
- *  STEP MOTOR  —  TIM16 kesmesi ile sabit hızda darbe üretimi
+ *  STEP MOTOR  —  TIM14 kesmesi ile sabit hızda darbe üretimi
+ *  (22-09-2026: DC motor PWM eklenirken TIM16'dan TIM14'e taşındı - bkz.
+ *  main.c başındaki "DC motor PWM" bölümü ve INSA_GUNLUGU.md notu.)
  * ========================================================================== */
 
 /* Şu anki adımda (remaining kaç darbe kaldıysa) kullanılması gereken
@@ -340,20 +360,20 @@ static void step_start(uint8_t dir, uint32_t count, uint32_t delay_us, uint32_t 
   g_step.start_delay_us  = (STEP_RAMP_START_DELAY_US > delay_us) ? STEP_RAMP_START_DELAY_US : delay_us;
   g_step.running         = 1;
 
-  /* Timer 1 MHz'de sayıyor (CubeMX'te Prescaler=63 ayarladık), yani 1 tık = 1 us.
+  /* Timer 1 MHz'de sayıyor (Prescaler=63 ayarladık), yani 1 tık = 1 us.
    * Kesme her YARIM periyotta bir gelecek: bir kesmede pini kaldır, sonrakinde indir.
    * Böylece tam bir darbe delay_us kadar sürer. İlk darbe rampa başlangıç
    * hızıyla (ya da rampasızsa doğrudan cruise hızıyla) başlıyor. */
-  __HAL_TIM_SET_AUTORELOAD(&htim16, (step_delay_for_remaining(count) / 2U) - 1U);
-  __HAL_TIM_SET_COUNTER(&htim16, 0);
-  __HAL_TIM_CLEAR_FLAG(&htim16, TIM_FLAG_UPDATE);  /* bekleyen eski bayrağı sil */
+  __HAL_TIM_SET_AUTORELOAD(&htim14, (step_delay_for_remaining(count) / 2U) - 1U);
+  __HAL_TIM_SET_COUNTER(&htim14, 0);
+  __HAL_TIM_CLEAR_FLAG(&htim14, TIM_FLAG_UPDATE);  /* bekleyen eski bayrağı sil */
 
-  HAL_TIM_Base_Start_IT(&htim16);
+  HAL_TIM_Base_Start_IT(&htim14);
 }
 
 static void step_stop(void)
 {
-  HAL_TIM_Base_Stop_IT(&htim16);
+  HAL_TIM_Base_Stop_IT(&htim14);
   g_step.running   = 0;
   g_step.remaining = 0;
   g_step.level     = 0;
@@ -362,32 +382,47 @@ static void step_stop(void)
 
 
 /* ==========================================================================
- *  DC MOTOR  —  L9110, sadece yön ve dur (hız kontrolü yok)
+ *  DC MOTOR  —  L9110, PWM ile yavaş/hızlı sürüş (22-09-2026, backlog #109)
  * ========================================================================== */
 
-/* L9110'da ayrı bir "enable" pini yok:
- *   IA1=1, IB1=0 -> forward (ileri)
- *   IA1=0, IB1=1 -> backward (geri)
- *   IA1=0, IB1=0 -> stop (dur)
- * (İkisini birden 1 yapmak yasak - sürücüyü kısa devre eder.) */
-static void dc_set(uint8_t state)
+/* L9110'da ayrı bir "enable" pini yok - hız kontrolü aktif yöndeki pine PWM
+ * uygulanarak yapılır, diğer pin sabit LOW (duty=0) kalır:
+ *   IA1=PWM(duty), IB1=0   -> forward (ileri), hız = duty
+ *   IA1=0,         IB1=PWM(duty) -> backward (geri), hız = duty
+ *   IA1=0,         IB1=0   -> stop (dur)
+ * (İkisini birden aktif/HIGH yapmak yasak - sürücüyü kısa devre eder; bu
+ * fonksiyon her zaman diğer kanalı 0'a çektiği için bu durum oluşmaz.)
+ * PB8=TIM16_CH1, PB9=TIM17_CH1 - ikisi de artık AF-PWM modunda (bkz.
+ * MX_TIM16_Init/MX_TIM17_Init), GPIO_MODE_OUTPUT_PP DEĞİL. */
+static uint16_t dc_duty_ticks(uint8_t speed_pct)
 {
+  if (speed_pct > 100U) speed_pct = 100U;
+  /* (period+1) tık = 1 PWM periyodu; speed_pct=100 -> tam periyot (sürekli HIGH) */
+  return (uint16_t)(((uint32_t)speed_pct * (DC_PWM_PERIOD_TICKS + 1U)) / 100U);
+}
+
+static void dc_set(uint8_t state, uint8_t speed_pct)
+{
+  uint16_t duty = dc_duty_ticks(speed_pct);
+
   switch (state) {
     case 1: /* forward */
-      HAL_GPIO_WritePin(DC_IA1_GPIO_Port, DC_IA1_Pin, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(DC_IB1_GPIO_Port, DC_IB1_Pin, GPIO_PIN_RESET);
+      __HAL_TIM_SET_COMPARE(&htim16, TIM_CHANNEL_1, duty);
+      __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 0U);
       break;
     case 2: /* backward */
-      HAL_GPIO_WritePin(DC_IA1_GPIO_Port, DC_IA1_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(DC_IB1_GPIO_Port, DC_IB1_Pin, GPIO_PIN_SET);
+      __HAL_TIM_SET_COMPARE(&htim16, TIM_CHANNEL_1, 0U);
+      __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, duty);
       break;
     default: /* stop */
-      HAL_GPIO_WritePin(DC_IA1_GPIO_Port, DC_IA1_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(DC_IB1_GPIO_Port, DC_IB1_Pin, GPIO_PIN_RESET);
+      __HAL_TIM_SET_COMPARE(&htim16, TIM_CHANNEL_1, 0U);
+      __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 0U);
       state = 0;
+      speed_pct = 0;
       break;
   }
   g_dc_state = state;
+  g_dc_speed = (state == 0U) ? 0U : (speed_pct > 100U ? 100U : speed_pct);
 }
 
 
@@ -453,7 +488,7 @@ static void send_status(void)
 
   snprintf(buf, sizeof(buf),
            "{\"t\":%lu,\"e1\":%ld,\"e2\":%ld,\"um1\":%ld,\"um2\":%ld,"
-           "\"remaining\":%lu,\"running\":%u,\"dc\":%u}\r\n",
+           "\"remaining\":%lu,\"running\":%u,\"dc\":%u,\"dcSpeed\":%u}\r\n",
            (unsigned long)HAL_GetTick(),
            (long)g_enc1.total,
            (long)g_enc2.total,
@@ -461,7 +496,8 @@ static void send_status(void)
            (long)encoder_to_micrometers(g_enc2.total),
            (unsigned long)g_step.remaining,
            (unsigned)g_step.running,
-           (unsigned)g_dc_state);
+           (unsigned)g_dc_state,
+           (unsigned)g_dc_speed);
 
   uart_send(buf);
 }
@@ -471,6 +507,7 @@ static void process_command(const char *line)
   char    cmd[16];
   char    dir_str[12];
   int32_t dir_i = 0, delay_i = 500, steps_i = 0, accel_i = 0;
+  int32_t speed_i = (int32_t)DC_SPEED_DEFAULT_PCT;
 
   if (!json_read_str(line, "cmd", cmd, sizeof(cmd))) {
     uart_send("{\"err\":\"missing cmd field\"}\r\n");
@@ -510,9 +547,17 @@ static void process_command(const char *line)
       uart_send("{\"err\":\"missing dir field\"}\r\n");
       return;
     }
-    if      (strcmp(dir_str, "forward")  == 0) dc_set(1);
-    else if (strcmp(dir_str, "backward") == 0) dc_set(2);
-    else                                        dc_set(0);
+    /* "speed" opsiyonel - yoksa DC_SPEED_DEFAULT_PCT (100 = eski tam-hız
+     * davranışı, geriye dönük uyumlu). 0-100 dışına taşarsa dc_set() kırpar. */
+    json_read_int(line, "speed", &speed_i);
+    /* uint8_t'ye cast etmeden ÖNCE 0-100'e kırp - yoksa ör. speed=300
+     * cast sırasında sarıp (300 mod 256 = 44) yanlış bir hıza dönüşür. */
+    if (speed_i < 0)   speed_i = 0;
+    if (speed_i > 100) speed_i = 100;
+
+    if      (strcmp(dir_str, "forward")  == 0) dc_set(1, (uint8_t)speed_i);
+    else if (strcmp(dir_str, "backward") == 0) dc_set(2, (uint8_t)speed_i);
+    else                                        dc_set(0, 0);
     uart_send("{\"ok\":\"dc\"}\r\n");
   }
 
@@ -566,15 +611,22 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM1_Init();
   MX_TIM3_Init();
+  MX_TIM14_Init();
   MX_TIM16_Init();
+  MX_TIM17_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
   /* Motor çıkışlarını güvenli başlangıç durumuna al */
   HAL_GPIO_WritePin(STEP_GPIO_Port,   STEP_Pin,   GPIO_PIN_RESET);
   HAL_GPIO_WritePin(DIR_GPIO_Port,    DIR_Pin,    GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(DC_IA1_GPIO_Port, DC_IA1_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(DC_IB1_GPIO_Port, DC_IB1_Pin, GPIO_PIN_RESET);
+
+  /* DC motor PWM kanallarını 0% duty (dur) ile başlat - PB8/PB9 artık plain
+   * GPIO değil, TIM16_CH1/TIM17_CH1 AF-PWM modunda (bkz. MX_TIM16/17_Init). */
+  HAL_TIM_PWM_Start(&htim16, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim17, TIM_CHANNEL_1);
+  __HAL_TIM_SET_COMPARE(&htim16, TIM_CHANNEL_1, 0U);
+  __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 0U);
 
   /* İki encoder'ın donanım sayacını başlat */
   encoder_init(&g_enc1, &htim1);   /* Encoder 1 - motorlu tekerlek  (PA8 / PA9) */
@@ -783,35 +835,94 @@ static void MX_TIM3_Init(void)
 }
 
 /**
-  * @brief TIM16 Initialization Function
+  * @brief TIM14 Initialization Function - step darbe üreteci (base/kesme modu).
+  *        22-09-2026'da TIM16'dan buraya taşındı (TIM16 DC motor PWM'e ayrıldı).
+  * @param None
+  * @retval None
+  */
+static void MX_TIM14_Init(void)
+{
+  htim14.Instance = TIM14;
+  htim14.Init.Prescaler = 63;
+  htim14.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim14.Init.Period = 499;
+  htim14.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim14.Init.RepetitionCounter = 0;
+  htim14.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim14) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief TIM16 Initialization Function - DC motor PWM, IA1/PB8 (TIM16_CH1).
+  *        22-09-2026 eklendi (backlog #109 - L9110 hız kontrolü).
   * @param None
   * @retval None
   */
 static void MX_TIM16_Init(void)
 {
+  TIM_OC_InitTypeDef sConfigOC = {0};
 
-  /* USER CODE BEGIN TIM16_Init 0 */
-
-  /* USER CODE END TIM16_Init 0 */
-
-  /* USER CODE BEGIN TIM16_Init 1 */
-
-  /* USER CODE END TIM16_Init 1 */
   htim16.Instance = TIM16;
-  htim16.Init.Prescaler = 63;
+  htim16.Init.Prescaler = DC_PWM_PRESCALER;
   htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim16.Init.Period = 499;
+  htim16.Init.Period = DC_PWM_PERIOD_TICKS;
   htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim16.Init.RepetitionCounter = 0;
   htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
+  if (HAL_TIM_PWM_Init(&htim16) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM16_Init 2 */
 
-  /* USER CODE END TIM16_Init 2 */
+  sConfigOC.OCMode       = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse        = 0;                  /* başlangıç duty = 0 (dur) */
+  sConfigOC.OCPolarity   = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity  = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode   = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState  = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim16, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
 
+/**
+  * @brief TIM17 Initialization Function - DC motor PWM, IB1/PB9 (TIM17_CH1).
+  *        22-09-2026 eklendi (backlog #109 - L9110 hız kontrolü).
+  * @param None
+  * @retval None
+  */
+static void MX_TIM17_Init(void)
+{
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  htim17.Instance = TIM17;
+  htim17.Init.Prescaler = DC_PWM_PRESCALER;
+  htim17.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim17.Init.Period = DC_PWM_PERIOD_TICKS;
+  htim17.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim17.Init.RepetitionCounter = 0;
+  htim17.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim17) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sConfigOC.OCMode       = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse        = 0;                  /* başlangıç duty = 0 (dur) */
+  sConfigOC.OCPolarity   = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity  = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode   = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState  = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim17, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 /**
@@ -869,7 +980,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, DC_IB1_Pin|DIR_Pin|DC_IA1_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, DIR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
@@ -877,8 +988,11 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(STEP_GPIO_Port, STEP_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : DC_IB1_Pin DIR_Pin DC_IA1_Pin */
-  GPIO_InitStruct.Pin = DC_IB1_Pin|DIR_Pin|DC_IA1_Pin;
+  /*Configure GPIO pin : DIR_Pin
+   * NOT: DC_IB1_Pin (PB9) ve DC_IA1_Pin (PB8) burada YOK - artık plain GPIO
+   * değiller, TIM16_CH1/TIM17_CH1 AF-PWM modunda (bkz. HAL_TIM_PWM_MspInit,
+   * stm32g0xx_hal_msp.c). 22-09-2026, backlog #109. */
+  GPIO_InitStruct.Pin = DIR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
@@ -912,18 +1026,18 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* --------------------------------------------------------------------------
- * TIM16 kesmesi: step darbesini üreten yer.
+ * TIM14 kesmesi: step darbesini üreten yer (22-09-2026'dan önce TIM16'daydı).
  * Her çağrılışında pini bir kez değiştirir. İki çağrı = bir tam darbe.
  * Burada uzun iş yapılmaz (printf, HAL_Delay vb. YASAK) - zamanlama bozulur.
  * -------------------------------------------------------------------------- */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if (htim->Instance != TIM16) {
+  if (htim->Instance != TIM14) {
     return;
   }
 
   if (!g_step.running) {
-    HAL_TIM_Base_Stop_IT(&htim16);
+    HAL_TIM_Base_Stop_IT(&htim14);
     return;
   }
 
@@ -941,13 +1055,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
     if (g_step.remaining == 0U) {
       g_step.running = 0U;
-      HAL_TIM_Base_Stop_IT(&htim16);
+      HAL_TIM_Base_Stop_IT(&htim14);
     } else {
       /* Rampa varsa (accel_steps>0) sıradaki darbenin hızı bir öncekinden
        * farklı olabilir - her darbede yeniden hesaplayıp timer'a yazıyoruz.
        * Rampasız harekette (accel_steps=0) bu hep aynı değeri döndürür,
        * gereksiz ama zararsız bir yazma. */
-      __HAL_TIM_SET_AUTORELOAD(&htim16, (step_delay_for_remaining(g_step.remaining) / 2U) - 1U);
+      __HAL_TIM_SET_AUTORELOAD(&htim14, (step_delay_for_remaining(g_step.remaining) / 2U) - 1U);
     }
   }
 }

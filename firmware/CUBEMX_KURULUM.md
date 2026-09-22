@@ -20,8 +20,9 @@ konumları ve o pinin destekediği fonksiyonlar:
 | PA7 | 14 | TIM3_CH2 | XML: PA7 → `TIM3_CH2` |
 | PA10 | 21 | GPIO Output (STEP / PUL+) | XML'de GPIO — **04-09'da PA15'ten PA10'a taşındı**, bkz. not aşağıda |
 | PB1 | 16 | GPIO Output (DIR+) | XML'de GPIO |
-| PB8 | 32 | GPIO Output (L9110 IA1) | XML'de GPIO |
-| PB9 | 1 | GPIO Output (L9110 IB1) | XML'de GPIO |
+| PB8 | 32 | TIM16_CH1 PWM (L9110 IA1, hız kontrolü) | XML: PB8 → `TIM16_CH1`; 22-09-2026'da GPIO Output'tan PWM'e geçildi (backlog #109) |
+| PB9 | 1 | TIM17_CH1 PWM (L9110 IB1, hız kontrolü) | XML: PB9 → `TIM17_CH1`; aynı değişiklik |
+| PA/PB (yok, dahili) | - | TIM14 (step darbe üreteci, base/kesme modu) | TIM16 PWM'e ayrılınca step üreteci TIM14'e taşındı - hiçbir fiziksel pin gerektirmiyor (sadece dahili kesme) |
 
 **Neden PA10 (eskiden PA15):** STEP donanımsal bir timer/AF'ye bağlı değil, düz bit-banged
 GPIO — kod hep `STEP_Pin`/`STEP_GPIO_Port` sembolik ismini kullanıyor (main.h'den gelir),
