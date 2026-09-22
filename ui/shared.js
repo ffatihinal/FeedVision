@@ -153,8 +153,47 @@ function playAlarmSound(violations) {
   else beep(440, 300, 1);
 }
 
+// ==========================================================================
+//  MOTOR DURDURAN İHLAL → KONSOL SATIRI (23-09-2026) — sahadan gelen kritik
+//  bulgu: _rule_engine_loop() (main.py) bir stop_motor=true kriteri ihlal
+//  bulup bridge.send_command({"cmd":"stop"}) çağırdığında, bu şu ana kadar
+//  TAMAMEN SESSİZDİ (operatör/admin konsolunda hiçbir iz yok) — "Basinc"
+//  kriteri kalibre edilmemiş bir ROI'den okuyup muhtemelen motoru sürekli
+//  otomatik durduruyordu, hiç fark edilemedi.
+//
+//  _rule_engine_loop ihlal sürdüğü sürece HER 2 saniyede bir aynı "stop"
+//  komutunu tekrar gönderiyor (bilinçli — interlock ısrarcı olsun diye) ve
+//  /ws/status da saniyede 10 kez aynı rule_violations listesini akıtıyor;
+//  bu yüzden burada sadece DURUM DEĞİŞİMİNDE (ihlal yeni başladı/bitti)
+//  konsola satır düşülür — her mesajda tekrar basmak gürültü yaratır.
+//  Kapsam kasıtlı olarak stop_motor=true kriterlerle sınırlı (motoru
+//  gerçekten durduran ihlaller) — sadece banner'da görünen alarm-only
+//  kriterler zaten canlı banner'da görünür, buraya girmez.
+let activeStopViolations = new Map();  // rule_id -> en son bilinen ihlal nesnesi
+
+function logRuleViolationTransitions(violations) {
+  const current = new Map(violations.filter((v) => v.stop_motor).map((v) => [v.rule_id, v]));
+  for (const [ruleId, v] of current) {
+    if (!activeStopViolations.has(ruleId)) {
+      logToConsole(
+        v.rule_name,
+        `Kontrol Kriteri (${v.source_label})`,
+        `⚠ Aralık dışı (${v.value}, izin verilen [${v.min ?? "-"}, ${v.max ?? "-"}]) — motor durduruldu`,
+        true,
+      );
+    }
+  }
+  for (const [ruleId, v] of activeStopViolations) {
+    if (!current.has(ruleId)) {
+      logToConsole(v.rule_name, `Kontrol Kriteri (${v.source_label})`, "✓ Normale döndü — motor durdurma kalktı", false);
+    }
+  }
+  activeStopViolations = current;
+}
+
 function renderRuleAlarm(violations, skipped) {
   const banner = document.getElementById("rule-alarm-banner");
+  logRuleViolationTransitions(violations);
   playAlarmSound(violations);
   if (!banner) return;  // banner olmayan bir sayfada (yok bugun) sessizce atla
   if (violations.length === 0) {
