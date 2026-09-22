@@ -1,7 +1,16 @@
 # FeedVision RPi Core — gelistirme/CI bagimliliklari (uretimde gerekmez)
 # Kurulum (yerel gelistirme, tum bagimliliklarla):  pip install -r requirements.txt -r requirements-dev.txt
-# CI sadece bu dosyayi kurar (opencv/pyserial/picamera2 gibi donanima bagli
-# paketler CI'da gerekmiyor — test edilen rule_engine.py stdlib disinda
-# bagimlilik kullanmiyor).
+#
+# 23-09-2026 DUZELTME: Bu dosya once "test paketi stdlib disinda bagimlilik
+# kullanmiyor" varsayimiyla yazilmisti (o an dogruydu). Test paketi buyudukce
+# (test_screen_calibration.py -> cv2, test_serial_bridge.py -> pyserial)
+# varsayim gecersiz oldu ve CI, ilk kurulusundan beri HER PUSH'TA
+# ModuleNotFoundError ile basarisiz oluyordu (lokal .venv'de bu paketler
+# zaten kuruluydu, sadece CI'in temiz ortaminda sorun cikiyordu). Artik CI
+# de tam requirements.txt'i kuruyor (asagida), boylece hangi test hangi
+# gercek bagimliligi kullanirsa kullansin CI'da calisir. picamera2 hala
+# eklenmiyor (Pi'ye ozel, pip ile kurulamaz) - onu gerektiren kod test
+# edilmiyor zaten.
+-r requirements.txt
 pytest>=8.0
 ruff>=0.6
