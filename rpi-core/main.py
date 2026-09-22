@@ -623,11 +623,13 @@ def motor_stop():
 
 class DcCommand(BaseModel):
     dir: str  # "forward" / "backward" / "stop"
+    speed: int = 100  # 0-100 arası PWM hız yüzdesi
 
 
 @app.post("/motor/dc")
 def motor_dc(c: DcCommand):
-    return bridge.send_command({"cmd": "dc", "dir": c.dir})
+    speed = max(0, min(100, c.speed))
+    return bridge.send_command({"cmd": "dc", "dir": c.dir, "speed": speed})
 
 
 @app.post("/motor/reset")

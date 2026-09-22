@@ -400,6 +400,11 @@
     <div id="running-warning" class="running-warning">⚠ Step motor şu an hareket halinde — yeni komut gönderilemez, bitmesini bekleyin ya da Durdur'a basın.</div>
 
     <div class="row-group">
+      <label for="dc-speed">Hız: <span id="dc-speed-val">100</span>%</label>
+      <input type="range" id="dc-speed" min="0" max="100" step="1" value="100"
+        oninput="document.getElementById('dc-speed-val').textContent = this.value">
+    </div>
+    <div class="row-group">
       <label>DC motor:</label>
       <button onclick="sendDc('forward', 'İleri')">İleri</button>
       <button onclick="sendDc('backward', 'Geri')">Geri</button>
@@ -1715,9 +1720,10 @@
     }
 
     async function sendDc(dir, label) {
+      const speed = Number(document.getElementById("dc-speed").value);
       const r = await fetch("/motor/dc", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dir }),
+        body: JSON.stringify({ dir, speed }),
       });
       const data = await r.json();
       renderCmdReply(label, data);
