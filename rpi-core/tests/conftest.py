@@ -57,3 +57,13 @@ def isolated_feed_total_state(tmp_path, monkeypatch):
     path = tmp_path / "feed_total_state.json"
     monkeypatch.setattr(feed_totalizer, "STATE_PATH", path)
     return path
+
+
+@pytest.fixture
+def isolated_motion_params_config(tmp_path, monkeypatch):
+    """motion_params.CONFIG_PATH'i geçici bir dosyaya yönlendirir."""
+    import motion_params
+
+    path = tmp_path / "motion_params.json"
+    monkeypatch.setattr(motion_params, "CONFIG_PATH", path)
+    return path

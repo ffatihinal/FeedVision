@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 import alarm_sounds
 import calibration_store
 import journal
+import motion_params
 import roi_store
 import rules_store
 import vision_raw_log
@@ -576,6 +577,37 @@ async def _vision_raw_log_loop():
         except Exception:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
             logging.getLogger("feedvision.vision_raw_log").exception("Goruntu isleme ham veri dongusunde beklenmeyen hata")
         await asyncio.sleep(interval)
+
+
+# ==============================================================================
+#  HAREKET PARAMETRELERİ (23-09-2026) — step/DC motor mm-RPM<->ham komut
+#  dönüşümünde kullanılan donanım ölçüleri (bkz. motion_params.py + motion_calc.py).
+#  Admin panelinden düzenlenir, aşağıdaki /motor/feed-start GERÇEK komut
+#  hesaplamasında kullanır.
+# ==============================================================================
+
+
+class MotionParamsPayload(BaseModel):
+    D_drive_mm: float | None = Field(default=None, gt=0)
+    D_wheel_dc_mm: float | None = Field(default=None, gt=0)
+    D_rod_mm: float | None = Field(default=None, gt=0)
+    RPM_MAX_NOLOAD: float | None = Field(default=None, gt=0)
+
+
+@app.get("/motion-params")
+def get_motion_params():
+    """Şu an geçerli hareket parametrelerini döner (hiç kaydedilmemişse
+    motion_params.DEFAULTS)."""
+    return {"params": motion_params.get_params()}
+
+
+@app.post("/motion-params")
+def set_motion_params(payload: MotionParamsPayload):
+    """Verilen alanları günceller (kısmi — boş bırakılan alan eski değerinde
+    kalır, bkz. motion_params.save_params)."""
+    fields = {k: v for k, v in payload.model_dump().items() if v is not None}
+    saved = motion_params.save_params(fields)
+    return {"success": True, "params": saved}
 
 
 # ==============================================================================
