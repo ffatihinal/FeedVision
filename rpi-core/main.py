@@ -649,6 +649,11 @@ async def ws_status(websocket: WebSocket):
                     "is_connected": bridge.is_connected,
                     "last_error": bridge.last_error,
                     "status": bridge.get_status(),
+                    # Bridge'in kendi tanılama bilgisi (bozuk satır sayacı,
+                    # otomatik yeniden bağlanma durumu) — 22-09-2026 eklendi,
+                    # mevcut alanları değiştirmiyor, sadece ekliyor (eski UI
+                    # bu alanı okumasa da bozulmaz).
+                    "diagnostics": bridge.get_diagnostics(),
                     # Kontrol Kriterleri'nin en son değerlendirmesi — UI polling'e
                     # gerek kalmadan alarm banner'ını canlı güncelleyebilsin
                     # diye zaten var olan bu akışa iğnelendi (ayrı bir
