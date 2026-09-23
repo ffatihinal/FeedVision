@@ -4,14 +4,28 @@
   genişletildi — Fatih'in "kullanım kolaylığı" revizyonu)
 
   Sıralama (yukarıdan aşağı, Fatih'in kararı): 1) ana ekrana dönüş,
-  2) port/bağlantı, 3) konsol, 4) step motor kontrolleri, 5) büyük DURDUR +
-  küçük Alarm Sustur, 6) DC motor kontrolleri, 7) encoder + sıfırlama,
-  8) kameralar. ROI/kalibrasyon, Kontrol Kriterleri tanımlama, ham sistem
-  logları, Hareket Analizi, sıcaklık/CPU/RAM grafikleri — hâlâ Admin-only.
+  2) port/bağlantı, 3) konsol, 3.5) Besleme Başlat (mm/s,mm,mm/s²,RPM —
+  23-09-2026 eklendi, aşağıya bkz.), 4) step motor kontrolleri (ham/µs-adım,
+  ileri seviye), 5) büyük DURDUR + küçük Alarm Sustur, 6) DC motor
+  kontrolleri (ham/duty%, ileri seviye), 7) encoder + sıfırlama, 8) kameralar.
+  ROI/kalibrasyon, Kontrol Kriterleri tanımlama, ham sistem logları, Hareket
+  Analizi, sıcaklık/CPU/RAM grafikleri, Hareket Parametreleri (D_drive vb.)
+  — hâlâ Admin-only.
 
   Not (bilinen sınırlama): Encoder mm dönüşümü için teker çapı (Admin'de
   girilir) tarayıcının localStorage'ında tutuluyor — aynı cihaz/tarayıcıda
-  açılmazsa 40mm varsayılanına düşer (bkz. admin.html'deki aynı not).
+  açılmazsa 40mm varsayılanına düşer (bkz. admin.html'deki aynı not). Bu,
+  aşağıdaki Besleme Başlat panelinin kullandığı D_drive_mm/D_wheel_dc_mm/
+  D_rod_mm/RPM_MAX_NOLOAD'dan (server-side, Admin'de düzenlenir) AYRI —
+  ikisi farklı amaçlara hizmet ediyor (biri sadece görsel grafik, diğeri
+  gerçek komut hesaplaması).
+
+  Besleme Başlat (23-09-2026 eklendi, GÖREV 1+2+3): operatör artık ham
+  delay/steps/duty% GÖRMEDEN, mm/s + mm + mm/s² + RPM girip TEK butonla
+  step+DC'yi senkron başlatabiliyor (bkz. POST /motor/feed-start, backend
+  motion_calc.py'de dönüşüm yapıyor; step bitince DC otomatik duruyor).
+  Aşağıdaki ham Step/DC panelleri KALDIRILMADI (ileri seviye/hata ayıklama
+  için) — bu yeni panel onların YANINA eklendi, yerine geçmedi.
 -->
 <html lang="tr">
 <head>
@@ -88,6 +102,17 @@
     .camera-block img.open { display: block; }
     .camera-block .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
     #scan-save-status { color: #888; font-size: 12.5px; }
+
+    /* Besleme Başlat (23-09-2026) — diğer panellerden görsel olarak biraz
+       ayrışsın diye ince bir vurgu çerçevesi (birincil kontrol olduğu için). */
+    #feed-start-panel { border: 1px solid #2a5; }
+    #feed-start-panel h2 { color: #6c6; }
+    #feed-start-btn { background: #2a5; color: #fff; font-weight: 700; }
+    #feed-start-btn:active { background: #1e4; }
+    #feed-start-btn:disabled { background: #292929; color: #666; }
+    #feed-start-result { font-size: 13px; color: #aaa; margin-top: 8px; white-space: pre-wrap; }
+    #feed-start-result.error { color: #f66; }
+    #feed-start-result.success { color: #9d9; }
   </style>
 </head>
 <body>
@@ -120,7 +145,33 @@
     <div id="console"></div>
   </div>
 
-  <!-- 4) Step motor kontrolü -->
+  <!-- 3.5) Besleme Başlat (23-09-2026 eklendi) — fiziksel birimlerle (mm/s,
+       mm, mm/s², RPM) TEK butonla step+DC senkron başlatma. Aşağıdaki ham
+       Step Motor/DC Motor panelleri (ileri seviye/hata ayıklama) YERİNE
+       değil, YANINA eklendi. -->
+  <div class="panel" id="feed-start-panel">
+    <h2>Besleme Başlat</h2>
+    <div class="row-group">
+      <label>Step Yön:</label>
+      <select id="feed-step-dir"><option value="1">1</option><option value="0">0</option></select>
+      <label>Hız (mm/s):</label>
+      <input id="feed-speed" type="number" value="1" min="0.001" step="0.001">
+      <label>Mesafe (mm):</label>
+      <input id="feed-distance" type="number" value="50" min="0.001" step="0.1">
+      <label>İvme (mm/s²):</label>
+      <input id="feed-accel" type="number" value="0" min="0" step="0.1">
+    </div>
+    <div class="row-group">
+      <label>DC Yön:</label>
+      <select id="feed-dc-dir"><option value="forward">İleri</option><option value="backward">Geri</option></select>
+      <label>DC Hız (RPM):</label>
+      <input id="feed-rpm" type="number" value="10" min="0.001" step="0.1">
+      <button id="feed-start-btn" onclick="sendFeedStart()">Besleme Başlat</button>
+    </div>
+    <div id="feed-start-result"></div>
+  </div>
+
+  <!-- 4) Step motor kontrolü (ham/µs-adım, ileri seviye) -->
   <div class="panel">
     <h2>Step Motor</h2>
     <div class="row-group">
@@ -230,6 +281,8 @@
       document.getElementById("running-warning").classList.toggle("show", !!status.running);
       const stepBtn = document.getElementById("step-at-btn");
       if (stepBtn) stepBtn.disabled = !!status.running;
+      const feedBtn = document.getElementById("feed-start-btn");
+      if (feedBtn) feedBtn.disabled = !!status.running;
     }
 
     let previousConnectionState = null;
@@ -326,6 +379,71 @@
         : `Gönderildi → Kontrol kartı: ${data.raw_reply}`;
       const isError = !data.sent || data.timed_out || (data.reply && data.reply.err);
       logToConsole(buttonName, buttonName, resultText, !!isError);
+    }
+
+    // --- Besleme Başlat (23-09-2026) — mm/s+mm+mm/s²+RPM'i backend'e
+    // olduğu gibi gönderir, dönüşüm (delay_us/steps/accel_steps/duty%)
+    // SUNUCUDA (motion_calc.py) yapılır — kullanıcı ham birim hiç görmez.
+    // Backend hem step+DC hem watcher'ı tek istekte yönetiyor (bkz. POST
+    // /motor/feed-start main.py docstring'i).
+    async function sendFeedStart() {
+      if (lastStatus && lastStatus.running) {
+        renderFeedStartResult("Hareket bitmeden yeni besleme başlatılamaz. Hareketi durdurun veya bitmesini bekleyin.", true);
+        return;
+      }
+      const dir = parseInt(document.getElementById("feed-step-dir").value);
+      const speed_mms = Number(document.getElementById("feed-speed").value);
+      const distance_mm = Number(document.getElementById("feed-distance").value);
+      const accel_mms2 = Number(document.getElementById("feed-accel").value) || 0;
+      const dc_dir = document.getElementById("feed-dc-dir").value;
+      const rpm = Number(document.getElementById("feed-rpm").value);
+      if (!(speed_mms > 0) || !(distance_mm > 0) || !(rpm > 0)) {
+        renderFeedStartResult("Geçersiz değer — hız, mesafe ve RPM 0'dan büyük olmalı, gönderilmedi.", true);
+        return;
+      }
+      let response;
+      try {
+        response = await fetch("/motor/feed-start", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dir, speed_mms, distance_mm, accel_mms2, dc_dir, rpm }),
+        });
+      } catch (e) {
+        renderFeedStartResult(`Ağ hatası: ${e.message}`, true);
+        logToConsole("Besleme Başlat", "POST /motor/feed-start", `Ağ hatası: ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        const detail = data?.detail ?? `sunucu ${response.status}`;
+        renderFeedStartResult(`Reddedildi: ${detail}`, true);
+        logToConsole("Besleme Başlat", "POST /motor/feed-start", `Reddedildi: ${detail}`, true);
+        return;
+      }
+      if (!data.success) {
+        renderFeedStartResult(`Step motoru başlatılamadı (${data.stage}) — DC motoruna hiç dokunulmadı.`, true);
+        logToConsole("Besleme Başlat", "POST /motor/feed-start", "Step başarısız, DC gönderilmedi.", true);
+        return;
+      }
+      const sc = data.step_calc, dc = data.dc_calc;
+      renderFeedStartResult(
+        `Başlatıldı — step: ${sc.steps} adım, ${sc.delay_us}µs gecikme, ${sc.accel_steps} adım rampa | ` +
+        `DC: %${dc.duty} duty (${dc_dir === "forward" ? "ileri" : "geri"}). Step bitince DC otomatik duracak.`,
+        false,
+      );
+      logToConsole("Besleme Başlat", "POST /motor/feed-start",
+        `steps=${sc.steps} delay_us=${sc.delay_us} accel_steps=${sc.accel_steps} duty=${dc.duty}`, false);
+    }
+
+    function renderFeedStartResult(text, isError) {
+      const el = document.getElementById("feed-start-result");
+      el.textContent = text;
+      el.classList.toggle("error", !!isError);
+      el.classList.toggle("success", !isError);
     }
 
     async function sendStep() {

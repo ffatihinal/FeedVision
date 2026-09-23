@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 import alarm_sounds
 import calibration_store
 import journal
+import motion_calc
 import motion_params
 import roi_store
 import rules_store
@@ -79,6 +80,16 @@ _journal_task: "asyncio.Task | None" = None
 # Admin'den ayarlanabilir (GET/POST /vision-raw-log/config) — varsayılan
 # vision_raw_log.DEFAULT_INTERVAL_S.
 _vision_raw_log_task: "asyncio.Task | None" = None
+
+# Senkron start/stop (23-09-2026, madde GÖREV 3) — /motor/feed-start ile
+# başlatılan bir besleme oturumuna ÖZEL, step motorun bitişini izleyip DC
+# motoru otomatik durduran arka plan task'ı. _rule_engine_task ile AYNI
+# iptal deseni: yeni bir /motor/feed-start çağrısı öncekini cancel() eder
+# (bkz. motor_feed_start()). Bilerek edge-triggered (running: 0->1, sonra
+# 1->0 GEÇİŞİ izlenir, düz seviye kontrolü DEĞİL) — admin panelindeki
+# bağımsız DC testini etkilemesin diye SADECE bu endpoint'in kendi
+# oturumuna özel bir task, DC'nin genel durumuna dayanmıyor.
+_sync_watcher_task: "asyncio.Task | None" = None
 
 # ROI drift düzeltme: bir önceki karede gerçekten bulunan bezel köşeleri,
 # kamera başına bellekte tutulur. Neden gerekli: kalibrasyon anındaki
@@ -144,6 +155,8 @@ async def lifespan(app: FastAPI):
     _rule_engine_task.cancel()
     _journal_task.cancel()
     _vision_raw_log_task.cancel()
+    if _sync_watcher_task is not None:
+        _sync_watcher_task.cancel()
     vision.stop()
 
 
@@ -650,6 +663,15 @@ def motor_step(c: StepCommand):
 
 @app.post("/motor/stop")
 def motor_stop():
+    # Kozmetik (23-09-2026, GÖREV 3 madde 6): DUR'un davranışı DEĞİŞMİYOR —
+    # step'i hâlâ doğrudan/koşulsuz durduruyor, hiçbir watcher/session
+    # state'ine BAĞIMLI değil (güvenlik gereği). Sadece varsa aktif bir
+    # feed-start watcher'ını burada da cancel() ediyoruz ki DUR'dan sonra
+    # watcher'ın kendi fail-safe timeout'u boşuna bekleyip gereksiz bir
+    # uyarı log'u düşmesin — cancel() edilmese de DUR'un kendisi zaten
+    # motoru durdurmuş olur, bu satır sadece log gürültüsünü önler.
+    if _sync_watcher_task is not None and not _sync_watcher_task.done():
+        _sync_watcher_task.cancel()
     return bridge.send_command({"cmd": "stop"})
 
 
@@ -667,6 +689,174 @@ def motor_dc(c: DcCommand):
 @app.post("/motor/reset")
 def motor_reset():
     return bridge.send_command({"cmd": "reset"})
+
+
+# ==============================================================================
+#  SENKRON BESLEME BAŞLAT (23-09-2026, GÖREV 3) — step (mm/s,mm,mm/s²) + DC
+#  (RPM) parametrelerini TEK istekte alır, mm->ham dönüşümü yapar (bkz.
+#  motion_calc.py), step'i başlatır, DC'yi başlatır, arka planda step'in
+#  bitişini izleyip DC'yi otomatik durduran bir watcher spawn eder.
+# ==============================================================================
+
+# Faz 1 (ARM): step komutu gönderildikten sonra firmware'in "running:1"e
+# geçtiğini kısa sürede görmemiz beklenir (komut zaten senkron send_command
+# ile "ok" aldıktan sonra çağrılıyor) — 1sn makul bir üst sınır, geçmezse
+# muhtemelen firmware/bridge arasında beklenmedik bir sorun var, watcher
+# sessizce sonsuza dek beklemesin diye burada pes edilir.
+FEED_SYNC_ARM_TIMEOUT_S = 1.0
+FEED_SYNC_POLL_INTERVAL_S = 0.1
+
+# Faz 2 (BEKLE) fail-safe üst sınırı: gerçek bitiş "running:1->0" geçişiyle
+# ANINDA yakalanır, bu süre sadece "bağlantı koptu/kart resetlendi" gibi bir
+# durumda sonsuza dek beklememek için bir GÜVENLİK AĞI. Teorik süreye (mesafe/
+# hız) bolca pay bırakan bir çarpan + sabit ek — rampa/step kaybı gibi
+# sebeplerle gerçek süre teorikten biraz uzun sürebilir, bu ağ çok sık
+# tetiklenmemeli. Sahada gerekirse ince ayar (main.c STEP_RAMP_START_DELAY_US
+# gibi diğer "sahada ayarlanır" sabitlerle aynı ruhta).
+FEED_SYNC_WAIT_SAFETY_FACTOR = 3.0
+FEED_SYNC_WAIT_SAFETY_MARGIN_S = 5.0
+FEED_SYNC_WAIT_MIN_TIMEOUT_S = 10.0
+
+_sync_watcher_logger = logging.getLogger("feedvision.sync_watcher")
+
+
+class FeedStartCommand(BaseModel):
+    dir: int  # step motor yönü — 0 veya 1
+    speed_mms: float = Field(gt=0)
+    distance_mm: float = Field(gt=0)
+    accel_mms2: float = Field(default=0, ge=0)
+    dc_dir: str = "forward"  # "forward" / "backward" — "stop" burada anlamsız, ayrıca reddedilir
+    rpm: float = Field(gt=0)
+
+
+async def _sync_watcher(max_wait_s: float):
+    """Step motorun running:0->1 (ARM) sonra running:1->0 (BİTİŞ) geçişini
+    izler, bitişte DC motoru durdurur. SADECE /motor/feed-start'ın kendi
+    oturumuna özel — bridge.get_status() genel/paylaşılan bir okuma olsa da,
+    bu task'ın kendisi sadece bu fonksiyon çalışırken var oluyor ve YALNIZCA
+    motor_feed_start() tarafından spawn ediliyor; admin panelindeki bağımsız
+    "DC İleri/Geri/Dur" butonları bu task'tan habersiz, onu tetiklemez/
+    etkilemez. Yeni bir /motor/feed-start çağrısı önceki task'ı cancel()
+    eder (bkz. motor_feed_start) — CancelledError burada YUTULMUYOR, DC
+    komutu göndermeden sessizce sonlanıyor (yeni çağrı zaten kendi step+dc
+    komutlarını gönderiyor, üzerine binmesin diye)."""
+    try:
+        armed = False
+        deadline = time.monotonic() + FEED_SYNC_ARM_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if bridge.get_status().get("running") == 1:
+                armed = True
+                break
+            await asyncio.sleep(FEED_SYNC_POLL_INTERVAL_S)
+        if not armed:
+            _sync_watcher_logger.warning(
+                "feed-start: step motor %.1f sn icinde 'running' olmadi, senkron DC durdurma iptal edildi",
+                FEED_SYNC_ARM_TIMEOUT_S,
+            )
+            return
+
+        finished = False
+        deadline = time.monotonic() + max_wait_s
+        while time.monotonic() < deadline:
+            if bridge.get_status().get("running") == 0:
+                finished = True
+                break
+            await asyncio.sleep(FEED_SYNC_POLL_INTERVAL_S)
+
+        if not finished:
+            _sync_watcher_logger.warning(
+                "feed-start: step motor %.1f sn icinde bitmedi (baglanti kopmus olabilir), "
+                "fail-safe DC durdurma gonderiliyor",
+                max_wait_s,
+            )
+
+        bridge.send_command({"cmd": "dc", "dir": "stop"})
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
+        _sync_watcher_logger.exception("feed-start senkron izleyicisinde beklenmeyen hata")
+
+
+@app.post("/motor/feed-start")
+def motor_feed_start(c: FeedStartCommand):
+    """Step (mm/s,mm,mm/s²) + DC (RPM) parametrelerini TEK istekte alıp
+    fiziksel birimden ham komuta çevirir (bkz. motion_calc.py), step'i
+    başlatır; step "ok" DEĞİLSE DC'ye hiç dokunmadan hata döner (Fatih'in
+    açık talebi — DC'nin step'siz/anlamsız dönmeye başlaması istenmiyor).
+
+    Dönüşüm hataları (ör. desteklenen hız/RPM aralığı dışı) HER İKİSİ DE
+    donanıma HİÇBİR komut gönderilmeden önce kontrol edilir — spesifikasyon
+    sırayı "step gönder, ok ise DC'yi çevir" olarak tarif etse de, RPM
+    dönüşümü geçersizse motorun zaten harekete geçmiş olması (sonra da
+    hiçbir zaman DC ile senkronlanmayacak yarım bir hareket) istenmeyen bir
+    yan etki — bu yüzden ikisi de ÖNCE hesaplanıp doğrulanıyor, donanıma
+    hiçbir şey gönderilmeden 400 ile reddedilebiliyor.
+    """
+    global _sync_watcher_task
+
+    if c.dc_dir not in ("forward", "backward"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"dc_dir 'forward' veya 'backward' olmalı (senkron başlatmada '{c.dc_dir}' anlamsız)",
+        )
+
+    params = motion_params.get_params()
+    try:
+        step_calc = motion_calc.compute_step_command(
+            speed_mms=c.speed_mms, distance_mm=c.distance_mm, accel_mms2=c.accel_mms2, d_drive_mm=params["D_drive_mm"]
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Step dönüşüm hatası: {e}")
+
+    try:
+        dc_calc = motion_calc.compute_dc_duty(
+            rpm_rod=c.rpm,
+            d_wheel_dc_mm=params["D_wheel_dc_mm"],
+            d_rod_mm=params["D_rod_mm"],
+            rpm_max_noload=params["RPM_MAX_NOLOAD"],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"DC RPM dönüşüm hatası: {e}")
+
+    step_result = bridge.send_command(
+        {
+            "cmd": "step",
+            "dir": c.dir,
+            "delay": step_calc["delay_us"],
+            "steps": step_calc["steps"],
+            "accel": step_calc["accel_steps"],
+        }
+    )
+    step_reply = step_result.get("reply") or {}
+    step_ok = bool(step_result.get("sent")) and not step_result.get("timed_out") and "err" not in step_reply
+    if not step_ok:
+        return {
+            "success": False,
+            "stage": "step",
+            "step_calc": step_calc,
+            "step_result": step_result,
+        }
+
+    dc_result = bridge.send_command({"cmd": "dc", "dir": c.dc_dir, "speed": dc_calc["duty"]})
+
+    # Yarış durumu (GÖREV 3 madde 5): yeni bir feed-start önceki watcher'ı
+    # cancel() eder — _rule_engine_task.cancel() ile AYNI desen.
+    if _sync_watcher_task is not None and not _sync_watcher_task.done():
+        _sync_watcher_task.cancel()
+    estimated_duration_s = c.distance_mm / c.speed_mms
+    max_wait_s = max(
+        FEED_SYNC_WAIT_MIN_TIMEOUT_S,
+        estimated_duration_s * FEED_SYNC_WAIT_SAFETY_FACTOR + FEED_SYNC_WAIT_SAFETY_MARGIN_S,
+    )
+    _sync_watcher_task = asyncio.create_task(_sync_watcher(max_wait_s))
+
+    return {
+        "success": True,
+        "step_calc": step_calc,
+        "dc_calc": dc_calc,
+        "step_result": step_result,
+        "dc_result": dc_result,
+    }
 
 
 @app.websocket("/ws/status")

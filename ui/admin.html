@@ -189,6 +189,18 @@
     /* --- Sunucu çalışma süresi satırı: sayfanın en altı, ikincil bilgi
        görünümü (#temp-error / .note ile aynı üslup — küçük, gri). */
     #uptime-line { color: #888; font-size: 11px; margin: 16px 0 4px; line-height: 1.3; }
+
+    /* Besleme Başlat (23-09-2026) — diğer panellerden görsel olarak biraz
+       ayrışsın diye ince bir vurgu çerçevesi (birincil/fiziksel-birim
+       kontrolü olduğu için, ham µs/adım panellerinden farklı gösterilsin). */
+    #feed-start-panel { border-color: #2a5; }
+    #feed-start-panel h2 { color: #6c6; }
+    #feed-start-btn { background: #2a5; }
+    #feed-start-btn:active { background: #1e4; }
+    #feed-start-result { font-size: 13px; color: #aaa; margin-top: 8px; white-space: pre-wrap; }
+    #feed-start-result.error { color: #f77; }
+    #feed-start-result.success { color: #9d9; }
+    #motion-params-save-status { font-size: 12.5px; color: #888; }
   </style>
 </head>
 <body>
@@ -377,6 +389,36 @@
       <span id="connection-text">Bağlı değil</span>
     </div>
 
+    <!-- Besleme Başlat (23-09-2026 eklendi, GÖREV 1+2+3) — fiziksel
+         birimlerle (mm/s, mm, mm/s², RPM) TEK butonla step+DC senkron
+         başlatma; ham delay/steps/duty% kullanıcıya hiç gösterilmiyor,
+         dönüşüm sunucuda (motion_calc.py) yapılıyor (bkz. POST
+         /motor/feed-start). Aşağıdaki ham Step/DC panelleri (ileri
+         seviye/hata ayıklama için) KALMAYA devam ediyor, bu panel onların
+         YANINA eklendi. -->
+    <div class="panel" id="feed-start-panel">
+      <h2>Besleme Başlat</h2>
+      <div class="row-group">
+        <label>Step Yön:</label>
+        <select id="feed-step-dir"><option value="1">1</option><option value="0">0</option></select>
+        <label>Hız (mm/s):</label>
+        <input id="feed-speed" type="number" value="1" min="0.001" step="0.001">
+        <label>Mesafe (mm):</label>
+        <input id="feed-distance" type="number" value="50" min="0.001" step="0.1">
+        <label>İvme (mm/s²):</label>
+        <input id="feed-accel" type="number" value="0" min="0" step="0.1">
+      </div>
+      <div class="row-group">
+        <label>DC Yön:</label>
+        <select id="feed-dc-dir"><option value="forward">İleri</option><option value="backward">Geri</option></select>
+        <label>DC Hız (RPM):</label>
+        <input id="feed-rpm" type="number" value="10" min="0.001" step="0.1">
+        <button id="feed-start-btn" onclick="sendFeedStart()">Besleme Başlat</button>
+      </div>
+      <div id="feed-start-result"></div>
+    </div>
+
+    <!-- Ham Step motor kontrolü (ileri seviye/hata ayıklama) -->
     <div class="row-group">
       <label>Step motor — Yön:</label>
       <select id="step-dir"><option value="1">1</option><option value="0">0</option></select>
@@ -439,6 +481,32 @@
       </div>
       <div id="status-raw">Canlı durum bekleniyor…</div>
     </div>
+  </div>
+
+  <!-- Hareket Parametreleri (23-09-2026 eklendi) — D_drive/D_wheel_dc/D_rod/
+       RPM_MAX_NOLOAD artık sadece görsel (aşağıdaki "Hareket Analizi"
+       grafiklerindeki tarayıcı-localStorage teker çapları GİBİ) değil,
+       "Besleme Başlat" panelinin GERÇEK komut hesaplamasında kullanılıyor
+       (bkz. POST /motion-params, motion_params.py) — bu yüzden server-side,
+       Admin panelinden düzenlenir. Aşağıdaki "Motor Teker Çapı" (wheel-motor)
+       ile KARIŞTIRILMASIN: o SADECE bu sayfadaki teorik grafiği besliyor,
+       D_drive_mm ise gerçek motor komutunu. -->
+  <div class="panel">
+    <h2>Hareket Parametreleri (Besleme Başlat için)</h2>
+    <div class="row-group">
+      <label>Tahrik Teker Çapı D_drive (mm):</label>
+      <input id="mp-d-drive" type="number" min="0.1" step="0.01" oninput="saveMotionParam('D_drive_mm', this.value)">
+      <label>DC Sürtünme Teker Çapı D_wheel_dc (mm):</label>
+      <input id="mp-d-wheel-dc" type="number" min="0.1" step="0.01" oninput="saveMotionParam('D_wheel_dc_mm', this.value)">
+      <label>Besleme Çubuğu Çapı D_rod (mm):</label>
+      <input id="mp-d-rod" type="number" min="0.1" step="0.01" oninput="saveMotionParam('D_rod_mm', this.value)">
+      <label>DC Motor Boşta Max RPM:</label>
+      <input id="mp-rpm-max-noload" type="number" min="0.1" step="0.1" oninput="saveMotionParam('RPM_MAX_NOLOAD', this.value)">
+    </div>
+    <div class="row-group" style="margin-top:-8px">
+      <label style="font-size:12.5px;color:#e0a800">⚠ Varsayılanlar (52/52/10mm, 100 RPM) TAHMİN — D_drive/D_wheel_dc sahada teyit edilecek, RPM_MAX_NOLOAD %100 duty'de takometreyle ölçülüp güncellenecek.</label>
+    </div>
+    <div id="motion-params-save-status"></div>
   </div>
 
   <div class="panel">
@@ -1682,6 +1750,115 @@
     }
 
     // --- Motor komutları ---
+    // --- Besleme Başlat (23-09-2026) — mm/s+mm+mm/s²+RPM'i backend'e
+    // olduğu gibi gönderir, dönüşüm (delay_us/steps/accel_steps/duty%)
+    // SUNUCUDA (motion_calc.py) yapılır — kullanıcı ham birim hiç görmez.
+    // Backend hem step+DC hem watcher'ı tek istekte yönetiyor (bkz. POST
+    // /motor/feed-start main.py docstring'i).
+    async function sendFeedStart() {
+      if (lastStatus && lastStatus.running) {
+        renderFeedStartResult("Hareket bitmeden yeni besleme başlatılamaz. Hareketi durdurun veya bitmesini bekleyin.", true);
+        return;
+      }
+      const dir = parseInt(document.getElementById("feed-step-dir").value);
+      const speed_mms = Number(document.getElementById("feed-speed").value);
+      const distance_mm = Number(document.getElementById("feed-distance").value);
+      const accel_mms2 = Number(document.getElementById("feed-accel").value) || 0;
+      const dc_dir = document.getElementById("feed-dc-dir").value;
+      const rpm = Number(document.getElementById("feed-rpm").value);
+      if (!(speed_mms > 0) || !(distance_mm > 0) || !(rpm > 0)) {
+        renderFeedStartResult("Geçersiz değer — hız, mesafe ve RPM 0'dan büyük olmalı, gönderilmedi.", true);
+        return;
+      }
+      let response;
+      try {
+        response = await fetch("/motor/feed-start", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dir, speed_mms, distance_mm, accel_mms2, dc_dir, rpm }),
+        });
+      } catch (e) {
+        renderFeedStartResult(`Ağ hatası: ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        renderFeedStartResult(`Reddedildi: ${data?.detail ?? `sunucu ${response.status}`}`, true);
+        return;
+      }
+      if (!data.success) {
+        renderFeedStartResult(`Step motoru başlatılamadı (${data.stage}) — DC motoruna hiç dokunulmadı.`, true);
+        return;
+      }
+      const sc = data.step_calc, dc = data.dc_calc;
+      renderFeedStartResult(
+        `Başlatıldı — step: ${sc.steps} adım, ${sc.delay_us}µs gecikme, ${sc.accel_steps} adım rampa | ` +
+        `DC: %${dc.duty} duty (${dc_dir === "forward" ? "ileri" : "geri"}). Step bitince DC otomatik duracak.`,
+        false,
+      );
+      // Hareket Analizi grafiklerini de (aşağıdaki panel) gerçek gönderilen
+      // step komutuyla güncelle — ham "Step At" panelinin yaptığı gibi. NOT:
+      // grafik hâlâ "Motor Teker Çapı" (wheel-motor, localStorage) girişini
+      // kullanıyor — bu, yukarıdaki D_drive_mm (server-side, gerçek komut
+      // hesabında kullanılan) ile AYNI fiziksel ölçü ama AYRI bir alan;
+      // ikisini elle senkron tutmak gerekiyor (23-09-2026, bilinen sınırlama).
+      onStepSent({ steps: sc.steps, delay: sc.delay_us, accel: sc.accel_steps });
+    }
+
+    function renderFeedStartResult(text, isError) {
+      const el = document.getElementById("feed-start-result");
+      el.textContent = text;
+      el.classList.toggle("error", !!isError);
+      el.classList.toggle("success", !isError);
+    }
+
+    // --- Hareket Parametreleri (23-09-2026) — D_drive_mm/D_wheel_dc_mm/
+    // D_rod_mm/RPM_MAX_NOLOAD server-side'da (bkz. motion_params.py). Sayfa
+    // açılışında GET /motion-params ile yüklenir, her input değişikliğinde
+    // (debounce'suz — roi/rules panelleriyle aynı basit desen, saha
+    // kullanımında sık tıklanan bir alan değil) POST /motion-params ile
+    // kısmi güncellenir (sadece değişen alan gönderilir).
+    async function loadMotionParams() {
+      try {
+        const r = await fetch("/motion-params");
+        const data = await r.json();
+        document.getElementById("mp-d-drive").value = data.params.D_drive_mm;
+        document.getElementById("mp-d-wheel-dc").value = data.params.D_wheel_dc_mm;
+        document.getElementById("mp-d-rod").value = data.params.D_rod_mm;
+        document.getElementById("mp-rpm-max-noload").value = data.params.RPM_MAX_NOLOAD;
+      } catch (e) {
+        document.getElementById("motion-params-save-status").textContent = `Yüklenemedi: ${e.message}`;
+      }
+    }
+
+    async function saveMotionParam(field, value) {
+      const num = Number(value);
+      const statusEl = document.getElementById("motion-params-save-status");
+      if (!(num > 0)) {
+        statusEl.textContent = "Geçersiz değer (0'dan büyük olmalı) — kaydedilmedi.";
+        return;
+      }
+      statusEl.textContent = "Kaydediliyor…";
+      try {
+        const r = await fetch("/motion-params", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ [field]: num }),
+        });
+        if (!r.ok) {
+          const data = await r.json().catch(() => null);
+          statusEl.textContent = `Kaydedilemedi: ${data?.detail ?? r.status}`;
+          return;
+        }
+        statusEl.textContent = "Kaydedildi.";
+      } catch (e) {
+        statusEl.textContent = `Kaydedilemedi: ${e.message}`;
+      }
+    }
+
     async function sendStep() {
       // Buton zaten hareket halindeyken disabled oluyor (renderStatus), ama
       // yarış durumu/hızlı çift tık/API'ye dolaylı erişim ihtimaline karşı
@@ -1781,6 +1958,8 @@
       document.getElementById("running-warning").classList.toggle("show", !!status.running);
       const stepBtn = document.getElementById("step-at-btn");
       if (stepBtn) stepBtn.disabled = !!status.running;
+      const feedBtn = document.getElementById("feed-start-btn");
+      if (feedBtn) feedBtn.disabled = !!status.running;
     }
 
     // Soket bağlantısının kendisi + Kontrol Kriterleri alarm banner'ı/sesi artık
@@ -1817,9 +1996,16 @@
     //  yakalamak için — tam dünkü NEMA23 teşhisinin sistemleştirilmiş hali.
     // ==========================================================================
 
-    // Firmware sabitleriyle BİREBİR aynı olmalı (main.c) — biri değişirse diğeri de.
-    const STEP_ANGLE_DEG = 1.8;          // mikroadım kapalı: 200 adım/tur
-    const ENC_COUNTS_PER_REV = 600 * 4;  // ENC_PPR * ENC_EDGE_MULTIPLIER
+    // Mikroadım kararı (23-09-2026): DM556 DIP switch SW5=OFF,SW6=OFF,SW7=OFF,
+    // SW8=ON = 1/128 mikroadım (Fatih sahada fiziksel ayarlayacak) — bu artık
+    // TÜM step darbelerini etkiliyor (hem ham "Step At" hem "Besleme Başlat"),
+    // 200 adım/tur×128 = 25600 mikroadım/tur (bkz. rpi-core/motion_calc.py
+    // STEPS_PER_REV — İKİ TARAF DA aynı sabitle güncel tutulmalı). ÖNCEKİ
+    // değer (1.8°, mikroadımsız 200 adım/tur) DIP switch'ler fiziksel olarak
+    // ayarlanınca bu grafiği 128x yanlış gösterirdi — düzeltildi.
+    const STEPS_PER_REV = 25600;
+    const STEP_ANGLE_DEG = 360 / STEPS_PER_REV;
+    const ENC_COUNTS_PER_REV = 600 * 4;  // ENC_PPR * ENC_EDGE_MULTIPLIER (mikroadımdan bağımsız, ayrı bir sensör)
 
     // --- Teker çapları: 3 ayrı değer (motor ≠ encoder1 ≠ encoder2 olabilir),
     // tarayıcıda saklanır ki her oturumda yeniden girilmesin. ---
@@ -2056,6 +2242,7 @@
     refreshPorts();
     startStatusWebSocket(onStatusMessage);
     loadWheelDiameters();
+    loadMotionParams();
     refreshCalibrationStatus();
     loadRules();
     loadVisionRawLogInterval();
