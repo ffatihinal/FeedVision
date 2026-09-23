@@ -177,11 +177,26 @@ class STM32Bridge:
         bayrağını kaldırıyoruz ki _listen bu kapanışı (readline() sırasında
         portun kapanmasından doğabilecek bir istisnayı) "beklenmedik kopma"
         sanıp otomatik yeniden bağlanmaya kalkışmasın."""
+        self._try_send_bye()
         self._intentional_disconnect = True
         self._running = False
         self._session_active = False
         if self._serial:
             self._serial.close()
+
+    def _try_send_bye(self):
+        """Portu kapatmadan ÖNCE STM32'ye {"cmd":"bye"} göndermeyi dener —
+        firmware bunu alınca LED'i 'bağlı değil' durumuna döndürür (bkz.
+        firmware bye handler'ı, commit edb56ae). Bu bir iyi niyet gönderimi:
+        port zaten bozuksa/seri hata verirse sessizce yutulur, disconnect()
+        her koşulda tamamlanmalı (23-09-2026 saha bug'ı — bye hiç
+        gönderilmiyordu, LED hızlı yanıp sönmeye takılı kalıyordu)."""
+        if not self._serial or not self._session_active:
+            return
+        try:
+            self.send_command({"cmd": "bye"})
+        except Exception:
+            _logger.debug("bye komutu gönderilemedi, disconnect yine de devam ediyor", exc_info=True)
 
     def _listen(self):
         """Arka planda sürekli satır okur. STM32 iki tür satır gönderiyor:
