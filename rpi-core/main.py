@@ -91,6 +91,18 @@ _vision_raw_log_task: "asyncio.Task | None" = None
 # oturumuna özel bir task, DC'nin genel durumuna dayanmıyor.
 _sync_watcher_task: "asyncio.Task | None" = None
 
+# 24-09-2026 saha bugı: /motor/feed-start SENKRON bir endpoint (def, async def
+# değil) — FastAPI/Starlette onu bir THREAD POOL işçi thread'inde çalıştırır
+# (anyio.to_thread.run_sync), o thread'in kendi çalışan bir asyncio event
+# loop'u YOKTUR. Eskiden orada doğrudan asyncio.create_task(...) çağrılıyordu,
+# bu da "RuntimeError: no running event loop" ile patlıyordu (step+DC zaten
+# gönderilmiş oluyordu ama _sync_watcher hiç doğmuyordu — step bitince DC hiç
+# durmuyordu). Çözüm: GERÇEK çalışan event loop'un referansını lifespan()
+# içinde (o KESİNLİKLE loop thread'inde çalışır) burada saklıyoruz,
+# motor_feed_start bunu asyncio.run_coroutine_threadsafe ile kullanır (bkz.
+# aşağısı) — farklı bir thread'den loop'a görev iletmenin doğru/güvenli yolu.
+_main_event_loop: "asyncio.AbstractEventLoop | None" = None
+
 # ROI drift düzeltme: bir önceki karede gerçekten bulunan bezel köşeleri,
 # kamera başına bellekte tutulur. Neden gerekli: kalibrasyon anındaki
 # REFERANS köşeler sabit ama bezel HER karede yeniden aranıyor — tek bir
@@ -141,7 +153,12 @@ SERVER_START_TIME = time.time()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _rule_engine_task, _journal_task, _vision_raw_log_task
+    global _rule_engine_task, _journal_task, _vision_raw_log_task, _main_event_loop
+    # /motor/feed-start (senkron endpoint, threadpool'da çalışır) bu ÇALIŞAN
+    # loop referansına ihtiyaç duyar (bkz. _main_event_loop tanımı yukarıda) —
+    # lifespan() kesinlikle loop'un kendi thread'inde çalıştığı için burada
+    # yakalamak güvenli.
+    _main_event_loop = asyncio.get_running_loop()
     # Servis açılırken iki kamerayı da açmayı dener (biri takılı değilse
     # diğerini/motor kontrolünü engellemez), kapanırken serbest bırakır —
     # systemd restart'ta "device busy" ile kilitlenmesin diye.
@@ -866,15 +883,38 @@ def motor_feed_start(c: FeedStartCommand):
         raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
 
     # Yarış durumu (GÖREV 3 madde 5): yeni bir feed-start önceki watcher'ı
-    # cancel() eder — _rule_engine_task.cancel() ile AYNI desen.
+    # cancel() eder — _rule_engine_task.cancel() ile AYNI desen. cancel()/
+    # done() hem asyncio.Task hem concurrent.futures.Future'da aynı isimle
+    # var — aşağıdaki run_coroutine_threadsafe'e geçişten ETKİLENMEZ.
     if _sync_watcher_task is not None and not _sync_watcher_task.done():
         _sync_watcher_task.cancel()
+
+    # Savunma amaçlı (teorik olarak imkansız — lifespan startup her zaman
+    # ilk istekten önce tamamlanır): _main_event_loop henüz set edilmemişse
+    # run_coroutine_threadsafe'e None loop veremeyiz; adım/DC komutu zaten
+    # gönderildi ama gözetimsiz kalmasın diye en azından çıplak 500 yerine
+    # açıklamalı bir 503 dönüyoruz.
+    if _main_event_loop is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Servis henüz hazır değil (event loop başlatılmadı) — besleme başlatıldı ama senkron izleme kurulamadı, birazdan tekrar deneyin",
+        )
+
     estimated_duration_s = c.distance_mm / c.speed_mms
     max_wait_s = max(
         FEED_SYNC_WAIT_MIN_TIMEOUT_S,
         estimated_duration_s * FEED_SYNC_WAIT_SAFETY_FACTOR + FEED_SYNC_WAIT_SAFETY_MARGIN_S,
     )
-    _sync_watcher_task = asyncio.create_task(_sync_watcher(max_wait_s))
+    # asyncio.create_task DEĞİL: bu SENKRON endpoint (def, async def değil)
+    # FastAPI'nin thread pool'unda çalışıyor, o thread'in kendi çalışan bir
+    # event loop'u YOK — create_task orada "RuntimeError: no running event
+    # loop" fırlatırdı (24-09-2026 sahada gerçek bug, bkz. main.py başındaki
+    # _main_event_loop yorumu). run_coroutine_threadsafe farklı bir thread'den
+    # asıl loop'a güvenli şekilde görev iletmenin doğru API'si; bir
+    # concurrent.futures.Future döner (asyncio.Task değil) ama .cancel()/
+    # .done() aynı isimle çalışır, yukarıdaki/aşağıdaki (motor_stop, lifespan
+    # shutdown) kullanımlar değişmeden çalışmaya devam eder.
+    _sync_watcher_task = asyncio.run_coroutine_threadsafe(_sync_watcher(max_wait_s), _main_event_loop)
 
     return {
         "success": True,

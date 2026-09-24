@@ -13,24 +13,47 @@ doğrulanır", "step başarısızsa DC hiç gönderilmez", "yeni çağrı öncek
 watcher'ı iptal eder" gibi main.py'ye özgü DALLANMA mantığı — saf birim
 dönüşüm formülleri zaten test_motion_calc.py'de kapsanıyor, burada tekrar
 edilmiyor.
+
+İSTİSNA (24-09-2026 saha bugı): dosya sonundaki TestFeedStartRealHttpDispatch
+sınıfı BİLEREK yukarıdaki desenden sapıyor ve gerçek fastapi.testclient.
+TestClient kullanıyor — main.motor_feed_start(cmd)'i DOĞRUDAN çağırmak zaten
+çalışan bir event loop'un (asyncio.run) İÇİNDE yapılıyor, bu da gerçek
+üretimdeki "senkron endpoint FastAPI'nin thread pool'unda, event loop'suz bir
+thread'de çalışır" durumunu SİMÜLE ETMİYOR — tam da bu yüzden
+asyncio.create_task'in orada RuntimeError fırlattığı bug 23-09'dan beri hiç
+yakalanamadı. TestClient gerçek ASGI thread pool dispatch'ini kullanır.
 """
 
 import asyncio
+import time
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 import main
 
 
 class FakeBridge:
     """serial_bridge.STM32Bridge'in gerçek donanım/seri port'a hiç
-    dokunmayan, davranışı testte kontrol edilebilen sahte sürümü."""
+    dokunmayan, davranışı testte kontrol edilebilen sahte sürümü.
+
+    is_connected/last_error/get_status_age: gerçek STM32Bridge'in arayüzünden
+    (bkz. serial_bridge.py) — bu dosyanın alt kısmındaki TestFeedStartRealHttpDispatch
+    gerçek main.app'i lifespan dahil ayağa kaldırdığı için main.py'deki
+    arka plan _journal_loop'u da (koşulsuz) bridge.is_connected okuyor;
+    bu alanlar olmadan o döngü her turda AttributeError'a düşüp (yakalanıp
+    loglanıyor, testi BOZMUYOR ama gürültü/yanlış temsil) sessizce yutuluyordu."""
 
     def __init__(self, step_ok: bool = True):
         self.sent_commands: list[dict] = []
         self.step_ok = step_ok
         self._status = {"running": 0}
+        self.is_connected = True
+        self.last_error: str | None = None
+
+    def get_status_age(self) -> float:
+        return 0.1
 
     def send_command(self, command: dict) -> dict:
         self.sent_commands.append(command)
@@ -56,6 +79,18 @@ def _reset_sync_watcher_task():
     main._sync_watcher_task = None
     yield
     main._sync_watcher_task = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_main_event_loop():
+    """_main_event_loop normalde SADECE lifespan() içinde set edilir — bu
+    dosyadaki testler main.motor_feed_start()'ı lifespan'i hiç tetiklemeden
+    DOĞRUDAN çağırıyor (bkz. dosya başı docstring), bu yüzden watcher spawn
+    koduna ulaşan testler kendi çalışan loop'larını burada elle set eder.
+    Testler arası sızmasın diye her testten önce/sonra None'a sıfırlanır."""
+    main._main_event_loop = None
+    yield
+    main._main_event_loop = None
 
 
 @pytest.fixture
@@ -195,6 +230,7 @@ class TestSuccessPath:
         cmd = _valid_command(dir=1, speed_mms=5.0, distance_mm=100.0, accel_mms2=50.0, dc_dir="forward", rpm=10.0)
 
         async def run():
+            main._main_event_loop = asyncio.get_running_loop()  # bkz. _reset_main_event_loop
             return main.motor_feed_start(cmd)
 
         result = asyncio.run(run())
@@ -214,13 +250,19 @@ class TestSuccessPath:
         cmd = _valid_command(speed_mms=5.0, distance_mm=100.0)  # 100/5=20s teorik -> 20*3+5=65s
 
         async def run():
+            main._main_event_loop = asyncio.get_running_loop()  # bkz. _reset_main_event_loop
             main.motor_feed_start(cmd)
             assert main._sync_watcher_task is not None
             assert not main._sync_watcher_task.done()
-            await asyncio.sleep(0)  # task'ın gövdesinin (calls.append) en az bir kez çalışmasına izin ver
+            # run_coroutine_threadsafe eski create_task'tan FARKLI olarak
+            # call_soon_threadsafe ile bir ekstra loop turu üzerinden Task'ı
+            # oluşturuyor — tek bir sleep(0) (eski create_task ile yeterliydi)
+            # artık gövdenin (calls.append) çalışmasını garantilemiyor, bu
+            # yüzden kısa ama sıfır olmayan bir bekleme kullanıyoruz.
+            await asyncio.sleep(0.01)
             main._sync_watcher_task.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await main._sync_watcher_task
+                await asyncio.wrap_future(main._sync_watcher_task)
 
         asyncio.run(run())
         assert blocking_watcher == [65.0]
@@ -232,11 +274,14 @@ class TestSuccessPath:
         cmd = _valid_command(speed_mms=5.0, distance_mm=1.0, accel_mms2=0.0)
 
         async def run():
+            main._main_event_loop = asyncio.get_running_loop()  # bkz. _reset_main_event_loop
             main.motor_feed_start(cmd)
-            await asyncio.sleep(0)
+            # bkz. test_success_spawns_watcher_with_expected_max_wait yorumu —
+            # run_coroutine_threadsafe'in ekstra loop turu için sleep(0) yetmez.
+            await asyncio.sleep(0.01)
             main._sync_watcher_task.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await main._sync_watcher_task
+                await asyncio.wrap_future(main._sync_watcher_task)
 
         asyncio.run(run())
         assert blocking_watcher == [10.0]
@@ -247,15 +292,17 @@ class TestSuccessPath:
         cmd = _valid_command()
 
         async def run():
+            main._main_event_loop = asyncio.get_running_loop()  # bkz. _reset_main_event_loop
             main.motor_feed_start(cmd)
             first_task = main._sync_watcher_task
 
             # DİKKAT: iki motor_feed_start() çağrısı arasında hiç `await` yok,
             # yani event loop'un ilk task'ı bir kez bile ÇALIŞTIRMAYA fırsatı
-            # olmuyor — cancel() isteği task hiç başlamadan işleniyor (gerçek
-            # asyncio davranışı: hiç başlamamış bir task cancel edilince
-            # gövdesi bir kez bile yürütülmez). Bu yüzden blocking_watcher'a
-            # SADECE ikinci (aktif kalan) task'ın değeri düşecek.
+            # olmuyor — cancel() isteği task hiç başlamadan işleniyor (aynı
+            # davranış run_coroutine_threadsafe'in döndürdüğü Future için de
+            # geçerli: henüz zincirlenmeden cancel edilirse gövde hiç
+            # yürütülmez). Bu yüzden blocking_watcher'a SADECE ikinci (aktif
+            # kalan) task'ın değeri düşecek.
             main.motor_feed_start(cmd)
             second_task = main._sync_watcher_task
 
@@ -265,7 +312,7 @@ class TestSuccessPath:
 
             second_task.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await second_task
+                await asyncio.wrap_future(second_task)
 
         asyncio.run(run())
         assert blocking_watcher == [65.0]
@@ -339,6 +386,7 @@ class TestMotorStopCancelsWatcher:
         cmd = _valid_command()
 
         async def run():
+            main._main_event_loop = asyncio.get_running_loop()  # bkz. _reset_main_event_loop
             main.motor_feed_start(cmd)
             task = main._sync_watcher_task
             main.motor_stop()
@@ -348,3 +396,128 @@ class TestMotorStopCancelsWatcher:
         asyncio.run(run())
         # DUR'un kendi davranışı (step'i durdurma komutu) DEĞİŞMEDİ — hâlâ gönderiliyor.
         assert {"cmd": "stop"} in fake_bridge.sent_commands
+
+
+class TestMainEventLoopNotReadyDefensiveBranch:
+    """_main_event_loop teorik olarak (pratikte imkansız — lifespan startup
+    her zaman ilk istekten önce tamamlanır) None kalmış olsaydı, artık çıplak
+    500/RuntimeError yerine açıklamalı 503 dönüyor."""
+
+    def test_returns_503_when_main_event_loop_unset(self, isolated_motion_params_config, monkeypatch):
+        fake_bridge = FakeBridge(step_ok=True)
+        monkeypatch.setattr(main, "bridge", fake_bridge)
+        assert main._main_event_loop is None  # bkz. _reset_main_event_loop autouse fixture
+        cmd = _valid_command()
+
+        with pytest.raises(HTTPException) as exc_info:
+            main.motor_feed_start(cmd)
+
+        assert exc_info.value.status_code == 503
+        # step+dc zaten gönderilmiş olabilir (hardware'e dokunulduktan sonraki
+        # tek guard noktası burası) — asıl garanti çıplak 500 DEĞİL, anlamlı
+        # bir hata dönmesi.
+        assert any(c["cmd"] == "step" for c in fake_bridge.sent_commands)
+
+
+class TestFeedStartRealHttpDispatch:
+    """24-09-2026 saha bugı — GERÇEK regresyon testi: /motor/feed-start SENKRON
+    bir endpoint (main.py'de `def`, `async def` değil), FastAPI/Starlette onu
+    bir THREAD POOL işçi thread'inde çalıştırır (anyio.to_thread.run_sync); o
+    thread'in kendi çalışan bir asyncio event loop'u YOKTUR. Eski kod orada
+    doğrudan asyncio.create_task(...) çağırıyordu ve bu satırda
+    'RuntimeError: no running event loop' ile patlıyordu — step+DC komutu
+    ZATEN gönderilmiş oluyordu (motor fiziksel olarak hareket ediyordu) ama
+    _sync_watcher_task hiç doğmuyordu, yani step bitince DC'yi otomatik
+    durduracak hiçbir şey çalışmıyordu (24-09 sahadaki "step durunca DC
+    durmuyor" + "sunucu 500" şikayetlerinin GERÇEK kök nedeni).
+
+    Bu sınıftaki testler main.motor_feed_start()'ı DOĞRUDAN çağırmaz — gerçek
+    fastapi.testclient.TestClient ile GERÇEK bir HTTP POST atar, böylece
+    yukarıdaki dosyadaki diğer testlerin YAKALAYAMADIĞI gerçek thread-pool
+    dispatch senaryosunu tetikler."""
+
+    @pytest.fixture
+    def dispatch(self, isolated_motion_params_config, isolated_rules_config, isolated_roi_config, monkeypatch, tmp_path):
+        """main.app'i gerçek TestClient ile (lifespan dahil) ayağa kaldırır.
+
+        rules/roi config'lerini boş tmp_path'e yönlendirmek (mevcut
+        conftest fixture'ları) main.py'nin lifespan()'da başlattığı arka
+        plan döngülerini (_rule_engine_loop, _vision_raw_log_loop) etkisiz
+        hale getirir — kayıtlı kriter/ROI olmadığından ne kamera karesi
+        yakalamaya çalışırlar ne de fake_bridge'e (aşağıda) beklenmedik ekstra
+        komut (ör. interlock "stop") gönderirler; testin asıl odağı olan
+        step/dc komut sayısı sayımları bu yüzden bozulmaz.
+
+        journal.write_entry SADECE bu iki fixture'la izole edilemiyor —
+        varsayılan journal_dir parametresi fonksiyon TANIMLANDIĞINDA
+        (JOURNAL_DIR) bağlanıyor, sonradan journal.JOURNAL_DIR'i
+        monkeypatch etmek bu bağlı varsayılanı DEĞİŞTİRMEZ (klasik Python
+        gotcha'sı) — _journal_loop her turda koşulsuz write_entry çağırdığı
+        için (ROI boş olsa bile) gerçek write_entry'yi tmp_path'e yönlendiren
+        bir sarmalayıcıyla değiştiriyoruz, testler ASLA gerçek rpi-core/
+        journal/ klasörüne yazmasın diye (conftest.py'deki izolasyon kuralı)."""
+        import journal as journal_module
+
+        real_write_entry = journal_module.write_entry
+        tmp_journal_dir = tmp_path / "journal"
+        monkeypatch.setattr(
+            journal_module,
+            "write_entry",
+            lambda entry, journal_dir=tmp_journal_dir: real_write_entry(entry, journal_dir),
+        )
+
+        fake_bridge = FakeBridge(step_ok=True)
+        monkeypatch.setattr(main, "bridge", fake_bridge)
+
+        with TestClient(main.app) as client:
+            yield client, fake_bridge
+
+    def test_feed_start_does_not_crash_under_real_thread_pool_dispatch(self, dispatch):
+        """Mutation-doğrulama: asyncio.run_coroutine_threadsafe geçici olarak
+        eski asyncio.create_task'a geri alınıp bu testin 500 ile FAIL verdiği
+        (journalctl'deki gerçek RuntimeError'la birebir) doğrulandı, fix geri
+        konunca PASS'e döndü."""
+        client, fake_bridge = dispatch
+
+        response = client.post(
+            "/motor/feed-start",
+            json={"dir": 1, "speed_mms": 5.0, "distance_mm": 100.0, "accel_mms2": 50.0, "dc_dir": "forward", "rpm": 10.0},
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["success"] is True
+        assert any(c["cmd"] == "step" for c in fake_bridge.sent_commands)
+        assert any(c["cmd"] == "dc" for c in fake_bridge.sent_commands)
+
+    def test_sync_watcher_genuinely_runs_on_main_loop_and_stops_dc(self, dispatch, monkeypatch):
+        """Sadece 'crash etmiyor' değil — watcher'ın gerçekten ana event
+        loop'ta (TestClient'ın portal thread'i) ÇALIŞTIĞINI, işçi thread'inde
+        (isteği işleyen thread) DEĞİL, doğrular. running hiçbir zaman 0'a
+        dönmüyor (bağlantı kopmuş senaryosu) — fail-safe deadline'ı test hızlı
+        bitsin diye kısaltılıyor."""
+        client, fake_bridge = dispatch
+        monkeypatch.setattr(main, "FEED_SYNC_ARM_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(main, "FEED_SYNC_POLL_INTERVAL_S", 0.01)
+        monkeypatch.setattr(main, "FEED_SYNC_WAIT_MIN_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(main, "FEED_SYNC_WAIT_SAFETY_MARGIN_S", 0.1)
+        fake_bridge._status = {"running": 1}  # ARM hemen gözlenir, BEKLE fazında hiç 0 olmaz
+
+        response = client.post(
+            "/motor/feed-start",
+            json={"dir": 1, "speed_mms": 5.0, "distance_mm": 1.0, "accel_mms2": 0.0, "dc_dir": "forward", "rpm": 10.0},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["success"] is True
+
+        # Watcher, isteği işleyen thread pool thread'inden DEĞİL, gerçek ana
+        # event loop'tan (portal thread) çalışır — test thread'i o loop'un
+        # dışında olduğu için burada normal (bloklayan) time.sleep kullanmak
+        # güvenli, portal'ın kendi thread'ini engellemez.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if {"cmd": "dc", "dir": "stop"} in fake_bridge.sent_commands:
+                break
+            time.sleep(0.05)
+
+        assert {"cmd": "dc", "dir": "stop"} in fake_bridge.sent_commands
