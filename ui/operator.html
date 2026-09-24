@@ -155,9 +155,9 @@
       <label>Step Yön:</label>
       <select id="feed-step-dir"><option value="1">1</option><option value="0">0</option></select>
       <label>Hız (mm/s):</label>
-      <input id="feed-speed" type="number" value="1" min="0.001" step="0.001">
+      <input id="feed-speed" type="number" value="1" min="0.1" step="0.001">
       <label>Mesafe (mm):</label>
-      <input id="feed-distance" type="number" value="50" min="0.001" step="0.1">
+      <input id="feed-distance" type="number" value="50" min="0.1" step="0.1">
       <label>İvme (mm/s²):</label>
       <input id="feed-accel" type="number" value="0" min="0" step="0.1">
     </div>
@@ -165,8 +165,12 @@
       <label>DC Yön:</label>
       <select id="feed-dc-dir"><option value="forward">İleri</option><option value="backward">Geri</option></select>
       <label>DC Hız (RPM):</label>
-      <input id="feed-rpm" type="number" value="10" min="0.001" step="0.1">
+      <input id="feed-rpm" type="number" value="10" min="0.1" step="0.1">
       <button id="feed-start-btn" onclick="sendFeedStart()">Besleme Başlat</button>
+      <!-- 24-09-2026 eklendi (Madde 3, saha bulgusu): panelin yakınında
+           kısayol — aşağıdaki büyük DURDUR ile AYNI fonksiyonu (emergencyStop,
+           step+DC birlikte) çağırıyor, yeni bir endpoint/mantık yok. -->
+      <button onclick="emergencyStop()">Dur</button>
     </div>
     <div id="feed-start-result"></div>
   </div>

@@ -144,6 +144,48 @@ class TestStepFailureShortCircuitsDc:
         assert blocking_watcher == []
 
 
+class ExplodingBridge(FakeBridge):
+    """send_command çağrıldığında (belirtilen cmd için) seri port hatasını
+    taklit eden exception fırlatan sahte bridge — Madde 1: bu artık çıplak
+    500 değil, HTTPException(502, ...) olarak yakalanmalı."""
+
+    def __init__(self, fail_on_cmd: str):
+        super().__init__(step_ok=True)
+        self._fail_on_cmd = fail_on_cmd
+
+    def send_command(self, command: dict) -> dict:
+        if command.get("cmd") == self._fail_on_cmd:
+            raise TimeoutError("seri port yanit vermedi")
+        return super().send_command(command)
+
+
+class TestSerialErrorsBecomeCleanHttpException:
+    """Madde 1 (24-09-2026 saha bulgusu): bridge.send_command'in fırlattığı
+    beklenmeyen exception'lar (timeout, bağlantı kopması) artık çıplak 500
+    olarak dışarı sızmıyor, motion_calc'ın ValueError yakalama deseniyle
+    tutarlı şekilde açıklamalı HTTPException(502, ...)'e çevriliyor."""
+
+    def test_step_send_command_exception_becomes_502(self, isolated_motion_params_config, monkeypatch):
+        fake_bridge = ExplodingBridge(fail_on_cmd="step")
+        monkeypatch.setattr(main, "bridge", fake_bridge)
+        cmd = _valid_command()
+        with pytest.raises(HTTPException) as exc_info:
+            main.motor_feed_start(cmd)
+        assert exc_info.value.status_code == 502
+        assert "STM32 ile haberleşme hatası" in exc_info.value.detail
+
+    def test_dc_send_command_exception_becomes_502(self, isolated_motion_params_config, monkeypatch):
+        fake_bridge = ExplodingBridge(fail_on_cmd="dc")
+        monkeypatch.setattr(main, "bridge", fake_bridge)
+        cmd = _valid_command()
+        with pytest.raises(HTTPException) as exc_info:
+            main.motor_feed_start(cmd)
+        assert exc_info.value.status_code == 502
+        assert "STM32 ile haberleşme hatası" in exc_info.value.detail
+        # step komutu zaten gönderilmişti (dc aşamasında patladı)
+        assert any(c["cmd"] == "step" for c in fake_bridge.sent_commands)
+
+
 class TestSuccessPath:
     def test_success_sends_step_then_dc_with_expected_converted_values(self, isolated_motion_params_config, monkeypatch, blocking_watcher):
         fake_bridge = FakeBridge(step_ok=True)
@@ -227,6 +269,67 @@ class TestSuccessPath:
 
         asyncio.run(run())
         assert blocking_watcher == [65.0]
+
+
+class TestSyncWatcherAlwaysStopsDc:
+    """24-09-2026 saha bulgusu: kısa/hızlı bir step hareketi ARM fazının
+    100ms'lik poll aralığının arasından tamamen kaçabiliyor (running:0->1->0
+    ARM penceresi içinde başlayıp bitebiliyor). Eski kod bu durumda 'senkron
+    DC durdurma iptal edildi' deyip DC'ye hiç dokunmadan return ediyordu —
+    DC sonsuza dek dönmeye devam ediyordu (sahada gözlemlendi). Bu testler
+    gerçek `main._sync_watcher`'ı (fake'siz) doğrudan çağırır.
+
+    Regresyon kanıtı: eski gövde (ARM gözlenmezse `return`) geçici olarak
+    geri getirilip bu testin FAIL verdiği doğrulandı, düzeltmeyle PASS'e
+    döndü — yani bu gerçek bir davranış testi, sadece mevcut kodu yankılayan
+    bir test değil."""
+
+    def test_dc_stop_sent_even_when_running_flag_never_observed_as_1(self, monkeypatch):
+        # running ARM fazı boyunca hiç 1 görülmüyor (poll aralığının
+        # arasından tamamen kaçmış bir hareket senaryosu).
+        fake_bridge = FakeBridge()
+        monkeypatch.setattr(main, "bridge", fake_bridge)
+        monkeypatch.setattr(main, "FEED_SYNC_ARM_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(main, "FEED_SYNC_POLL_INTERVAL_S", 0.01)
+
+        asyncio.run(main._sync_watcher(max_wait_s=0.2))
+
+        assert {"cmd": "dc", "dir": "stop"} in fake_bridge.sent_commands
+
+    def test_dc_stop_sent_after_normal_arm_and_finish_sequence(self, monkeypatch):
+        # Normal senaryo: running 0 -> 1 (ARM fazında görülür) -> 0 (BEKLE
+        # fazında görülür). Regresyona karşı: bu yol hâlâ çalışıyor mu?
+        fake_bridge = FakeBridge()
+        fake_bridge._status = {"running": 0}
+        monkeypatch.setattr(main, "bridge", fake_bridge)
+        monkeypatch.setattr(main, "FEED_SYNC_ARM_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(main, "FEED_SYNC_POLL_INTERVAL_S", 0.01)
+
+        async def flip_running():
+            await asyncio.sleep(0.02)
+            fake_bridge._status = {"running": 1}
+            await asyncio.sleep(0.02)
+            fake_bridge._status = {"running": 0}
+
+        async def run():
+            await asyncio.gather(main._sync_watcher(max_wait_s=0.3), flip_running())
+
+        asyncio.run(run())
+
+        assert {"cmd": "dc", "dir": "stop"} in fake_bridge.sent_commands
+
+    def test_dc_stop_sent_via_failsafe_when_arm_missed_and_never_finishes(self, monkeypatch):
+        # ARM hiç görülmez VE running hiçbir zaman 0'a dönmez (bağlantı
+        # kopmuş gibi) — fail-safe max_wait_s dolunca yine de DC durmalı.
+        fake_bridge = FakeBridge()
+        fake_bridge._status = {"running": 1}  # BEKLE fazı boyunca hiç 0 olmuyor
+        monkeypatch.setattr(main, "bridge", fake_bridge)
+        monkeypatch.setattr(main, "FEED_SYNC_ARM_TIMEOUT_S", 0.02)
+        monkeypatch.setattr(main, "FEED_SYNC_POLL_INTERVAL_S", 0.01)
+
+        asyncio.run(main._sync_watcher(max_wait_s=0.05))
+
+        assert {"cmd": "dc", "dir": "stop"} in fake_bridge.sent_commands
 
 
 class TestMotorStopCancelsWatcher:

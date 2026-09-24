@@ -700,9 +700,12 @@ def motor_reset():
 
 # Faz 1 (ARM): step komutu gönderildikten sonra firmware'in "running:1"e
 # geçtiğini kısa sürede görmemiz beklenir (komut zaten senkron send_command
-# ile "ok" aldıktan sonra çağrılıyor) — 1sn makul bir üst sınır, geçmezse
-# muhtemelen firmware/bridge arasında beklenmedik bir sorun var, watcher
-# sessizce sonsuza dek beklemesin diye burada pes edilir.
+# ile "ok" aldıktan sonra çağrılıyor) — 1sn makul bir üst sınır. Kısa/hızlı
+# bir hareket bu 1sn'lik pencere içinde tamamen başlayıp bitebilir, bu
+# durumda running:1 hiç GÖRÜLMEYEBİLİR (100ms'lik poll aralığının arasından
+# kaçar) — 24-09-2026 sahada gözlemlendi. Bu yüzden ARM gözlenemezse artık
+# watcher PES ETMİYOR (eski davranış: DC'ye hiç dokunmadan return — DC
+# sonsuza dek dönmeye devam ediyordu), WAIT fazına her durumda geçiyor.
 FEED_SYNC_ARM_TIMEOUT_S = 1.0
 FEED_SYNC_POLL_INTERVAL_S = 0.1
 
@@ -739,7 +742,15 @@ async def _sync_watcher(max_wait_s: float):
     etkilemez. Yeni bir /motor/feed-start çağrısı önceki task'ı cancel()
     eder (bkz. motor_feed_start) — CancelledError burada YUTULMUYOR, DC
     komutu göndermeden sessizce sonlanıyor (yeni çağrı zaten kendi step+dc
-    komutlarını gönderiyor, üzerine binmesin diye)."""
+    komutlarını gönderiyor, üzerine binmesin diye).
+
+    ÖNEMLİ (24-09-2026 saha düzeltmesi): ARM fazında running:1 hiç
+    gözlenemese bile fonksiyon DC'ye dokunmadan return ETMEZ — WAIT fazına
+    (fail-safe max_wait_s deadline'ıyla) HER DURUMDA geçilir, bridge'in
+    "dc stop" komutu bu fonksiyonun her çalışmasında en geç ARM_TIMEOUT +
+    max_wait_s içinde kesin gönderilir. Eskiden ARM kaçırılırsa (kısa/hızlı
+    bir hareket 100ms'lik poll aralığının arasından tamamen kaçabiliyor)
+    DC sonsuza dek dönmeye devam ediyordu — bu garanti bunu ortadan kaldırır."""
     try:
         armed = False
         deadline = time.monotonic() + FEED_SYNC_ARM_TIMEOUT_S
@@ -750,10 +761,11 @@ async def _sync_watcher(max_wait_s: float):
             await asyncio.sleep(FEED_SYNC_POLL_INTERVAL_S)
         if not armed:
             _sync_watcher_logger.warning(
-                "feed-start: step motor %.1f sn icinde 'running' olmadi, senkron DC durdurma iptal edildi",
+                "feed-start: step motor %.1f sn icinde 'running' olarak gozlenmedi "
+                "(kisa/hizli bir hareket ARM penceresini kacirmis olabilir), "
+                "yine de BEKLE fazina geciliyor",
                 FEED_SYNC_ARM_TIMEOUT_S,
             )
-            return
 
         finished = False
         deadline = time.monotonic() + max_wait_s
@@ -818,15 +830,26 @@ def motor_feed_start(c: FeedStartCommand):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"DC RPM dönüşüm hatası: {e}")
 
-    step_result = bridge.send_command(
-        {
-            "cmd": "step",
-            "dir": c.dir,
-            "delay": step_calc["delay_us"],
-            "steps": step_calc["steps"],
-            "accel": step_calc["accel_steps"],
-        }
-    )
+    # bridge.send_command seri port seviyesinde beklenmedik bir şeyle
+    # (timeout, bağlantı kopması, vb.) karşılaşırsa exception fırlatabilir —
+    # bu, motion_calc'ın ValueError'ları gibi kontrollü değil, çıplak 500
+    # olarak dışarı sızar ve frontend'in "Reddedildi: ${detail}" gösterimi
+    # devreye girmez (24-09-2026 sahada gözlemlendi). Diğer ValueError
+    # yakalama deseniyle tutarlı olacak şekilde 502 + açıklamalı detail'e
+    # çevriliyor.
+    try:
+        step_result = bridge.send_command(
+            {
+                "cmd": "step",
+                "dir": c.dir,
+                "delay": step_calc["delay_us"],
+                "steps": step_calc["steps"],
+                "accel": step_calc["accel_steps"],
+            }
+        )
+    except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
+        raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+
     step_reply = step_result.get("reply") or {}
     step_ok = bool(step_result.get("sent")) and not step_result.get("timed_out") and "err" not in step_reply
     if not step_ok:
@@ -837,7 +860,10 @@ def motor_feed_start(c: FeedStartCommand):
             "step_result": step_result,
         }
 
-    dc_result = bridge.send_command({"cmd": "dc", "dir": c.dc_dir, "speed": dc_calc["duty"]})
+    try:
+        dc_result = bridge.send_command({"cmd": "dc", "dir": c.dc_dir, "speed": dc_calc["duty"]})
+    except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
+        raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
 
     # Yarış durumu (GÖREV 3 madde 5): yeni bir feed-start önceki watcher'ı
     # cancel() eder — _rule_engine_task.cancel() ile AYNI desen.
