@@ -48,7 +48,7 @@ import vision_settings_store
 from feed_totalizer import totalizer as feed_totalizer
 from image_preprocess import apply_clahe
 from rule_engine import evaluate_rules
-from screen_calibration import compute_warp_matrix, detect_screen_corners, warp_roi_rect
+from screen_calibration import compute_warp_matrix, detect_screen_corners, warp_roi_quad, warp_roi_rect
 from screen_reader import read_roi
 from serial_bridge import bridge
 from vision import CAMERA_NUMS, STREAM_SIZE, vision
@@ -249,6 +249,12 @@ def _adjust_rois_for_drift(cam_id: str, frame: np.ndarray, rois: list[dict]) -> 
     karede bulunamadı ve son bilinen köşe (ya da hiç yoksa referansın kendisi)
     kullanıldı; çağıran taraf bunu kullanıcıya/Kontrol Kriterleri'ne "ROI referansı
     belirsiz" olarak iletmeli (sessizce yanlış okumak yerine açıkça bildirmek).
+
+    Kalibrasyon VARSA, her roi_def'e ayrıca "quad" (4x2 liste, gerçek/olası
+    eğik dörtgen köşeleri — bkz. warp_roi_quad) eklenir; x/y/w/h alanları
+    geriye uyumluluk için bounding box olarak kalmaya devam eder (2026-09-29,
+    Görev A: bounding box'a indirgeme yerine gerçek dörtgen geometrisi de
+    taşınıyor, okuma/overlay tarafı bunu tercih edecek).
     """
     reference = calibration_store.get_reference(cam_id)
     if reference is None:
@@ -271,8 +277,10 @@ def _adjust_rois_for_drift(cam_id: str, frame: np.ndarray, rois: list[dict]) -> 
     matrix = compute_warp_matrix(reference_corners, current_corners)
     adjusted = []
     for roi_def in rois:
-        x, y, w, h = warp_roi_rect((roi_def["x"], roi_def["y"], roi_def["w"], roi_def["h"]), matrix)
-        adjusted.append({**roi_def, "x": x, "y": y, "w": w, "h": h})
+        roi_tuple = (roi_def["x"], roi_def["y"], roi_def["w"], roi_def["h"])
+        x, y, w, h = warp_roi_rect(roi_tuple, matrix)
+        quad = warp_roi_quad(roi_tuple, matrix)
+        adjusted.append({**roi_def, "x": x, "y": y, "w": w, "h": h, "quad": quad.tolist()})
     return adjusted, uncertain
 
 
@@ -313,6 +321,23 @@ def vision_get_calibration(cam_id: str):
     return {"calibration": calibration_store.get_reference(cam_id)}
 
 
+@app.get("/vision/{cam_id}/current-corners")
+def vision_current_corners(cam_id: str):
+    """Şimdiki kareden (canlı) ekran bezel köşelerini tespit edip döner —
+    kalıcı bir referans DEĞİL, Admin panelindeki canlı overlay'in "şimdiki
+    tespit" (yeşil) noktalarını çizebilmesi için (Görev B, 2026-09-29).
+    Bulunamazsa hata değil, corners: null (bezel bu karede görünmüyor olabilir,
+    bu normal — overlay o an sadece referans noktasını gösterir).
+    """
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    frame = _capture_frame(cam_id)
+    if frame is None:
+        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı / kare çözümlenemedi")
+    corners = detect_screen_corners(frame)
+    return {"corners": corners.tolist() if corners is not None else None}
+
+
 def _capture_frame(cam_id: str) -> np.ndarray | None:
     """Kameradan tek kare alip decode eder. Kamera kapaliysa/decode
     basarisizsa None doner (cagiran taraf HTTP hatasi ya da sessiz atlama
@@ -348,11 +373,14 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
     for roi_def in adjusted_rois:
         roi_tuple = (roi_def["x"], roi_def["y"], roi_def["w"], roi_def["h"])
         kind = roi_def.get("kind", "numeric")  # eski kayitli ROI'lerde alan yok -> "numeric" (geriye uyumlu)
-        result = read_roi(frame, roi_tuple, kind=kind)
+        quad = roi_def.get("quad")  # kalibrasyon yoksa yok -> read_roi eski duz-dikdortgen davranisina duser
+        quad_arr = np.array(quad, dtype=np.float32) if quad is not None else None
+        result = read_roi(frame, roi_tuple, kind=kind, quad=quad_arr)
         results.append(
             {
                 "name": roi_def["name"],
                 "roi": list(result.roi),
+                "roi_quad": quad,  # None (kalibrasyonsuz) ya da 4x2 liste — admin overlay ciziminde kullanilir
                 "kind": result.kind,
                 "text": result.text,
                 "ocr_error": result.ocr_error,

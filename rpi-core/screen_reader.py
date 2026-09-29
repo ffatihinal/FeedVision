@@ -89,6 +89,50 @@ def crop_roi(frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI) ->
     return frame[y0:y1, x0:x1]
 
 
+def crop_roi_quad(
+    frame: np.ndarray,
+    quad_corners: np.ndarray,
+    output_size: tuple[int, int] | None = None,
+) -> np.ndarray:
+    """Eksene hizali olmayan (egik/dondurulmus) bir dortgeni duz, dikdortgen
+    bir goruntuye "utuleyerek" kirpar — crop_roi'nin (duz dikdortgen) aksine
+    perspektif duzeltme uygular (cv2.getPerspectiveTransform + warpPerspective).
+
+    quad_corners: (4,2) [sol-ust, sag-ust, sag-alt, sol-alt] sirali koseler
+    (bkz. screen_calibration.warp_roi_quad / order_points ile ayni sira).
+
+    output_size verilmezse dortgenin kenar uzunluklarinin ortalamasindan
+    makul bir cikti boyutu hesaplanir (ust/alt kenar ortalamasi = genislik,
+    sol/sag kenar ortalamasi = yukseklik) — boylece kalibrasyon anindaki ROI
+    boyutuna yakin bir olcek korunur.
+
+    Yan fayda: egik metin OCR'i zorlar, duzlestirilmis goruntu Tesseract
+    icin daha temiz bir girdi olur — ama asil amac geometrik dogruluk
+    (bounding box'in gercek dortgeni temsil etmemesi sorununu cozmek).
+    """
+    quad = np.asarray(quad_corners, dtype=np.float32).reshape(4, 2)
+    tl, tr, br, bl = quad
+
+    if output_size is None:
+        width_top = float(np.linalg.norm(tr - tl))
+        width_bottom = float(np.linalg.norm(br - bl))
+        height_left = float(np.linalg.norm(bl - tl))
+        height_right = float(np.linalg.norm(br - tr))
+        out_w = max(1, round((width_top + width_bottom) / 2))
+        out_h = max(1, round((height_left + height_right) / 2))
+    else:
+        out_w, out_h = output_size
+        out_w = max(1, int(out_w))
+        out_h = max(1, int(out_h))
+
+    dst = np.array(
+        [[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]],
+        dtype=np.float32,
+    )
+    matrix = cv2.getPerspectiveTransform(quad, dst)
+    return cv2.warpPerspective(frame, matrix, (out_w, out_h))
+
+
 def average_color_hsv(image: np.ndarray) -> tuple[float, float, float]:
     """Bir goruntunun ortalama rengini HSV (H:0-179, S:0-255, V:0-255) olarak doner.
 
@@ -165,15 +209,23 @@ def read_boolean_state(
 
 
 def read_roi(
-    frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI, kind: str = "numeric"
+    frame: np.ndarray,
+    roi: tuple[int, int, int, int] = DEFAULT_ROI,
+    kind: str = "numeric",
+    quad: np.ndarray | None = None,
 ) -> ScreenReadResult:
     """ROI'yi kirpar; "numeric" ise OCR+renk, "boolean" ise SADECE renk/parlaklik
     esigiyle 0/1 karari hesaplar — bu modulun tek giris noktasi.
 
     kind="boolean" durumunda OCR hic calistirilmaz (Tesseract kucuk dolu/bos
     kareler icin anlamsiz/gereksiz CPU yuku) — bunun yerine bool_state doldurulur.
+
+    quad verilirse (kalibrasyon sonrasi gercek/olasi egik dortgen koseleri,
+    bkz. screen_calibration.warp_roi_quad) crop_roi_quad ile perspektif-
+    duzeltilmis kirpma yapilir; quad None ise (kalibrasyon yok/geriye uyumluluk)
+    eskisi gibi crop_roi (duz dikdortgen, roi bbox) kullanilir.
     """
-    cropped = crop_roi(frame, roi)
+    cropped = crop_roi_quad(frame, quad) if quad is not None else crop_roi(frame, roi)
     hsv_color = average_color_hsv(cropped)
     rgb_color = average_color_rgb(cropped)
     if kind == "boolean":

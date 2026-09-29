@@ -13,6 +13,7 @@ from screen_calibration import (
     compute_warp_matrix,
     detect_screen_corners,
     order_points,
+    warp_roi_quad,
     warp_roi_rect,
 )
 
@@ -94,3 +95,62 @@ class TestComputeWarpAndRoi:
         assert y == pytest.approx(15, abs=1)
         assert w == pytest.approx(20, abs=1)
         assert h == pytest.approx(20, abs=1)
+
+
+class TestWarpRoiQuad:
+    """warp_roi_quad — Görev A: bounding box'a indirgemeden gerçek dörtgen
+    köşelerini döner. warp_roi_rect ile aynı matris/roi girdisiyle
+    karşılaştırılarak geriye uyumluluk (regresyon) da dolaylı doğrulanıyor."""
+
+    def test_identity_transform_returns_original_corners(self):
+        corners = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], dtype=np.float32)
+        matrix = compute_warp_matrix(corners, corners)
+        roi = (10, 10, 20, 20)
+        quad = warp_roi_quad(roi, matrix)
+        expected = np.array([[10, 10], [30, 10], [30, 30], [10, 30]], dtype=np.float32)
+        np.testing.assert_allclose(quad, expected, atol=1)
+
+    def test_translation_shifts_all_four_corners_and_stays_rectangular(self):
+        ref = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], dtype=np.float32)
+        cur = ref + np.array([10, 5], dtype=np.float32)
+        matrix = compute_warp_matrix(ref, cur)
+        roi = (10, 10, 20, 20)
+        quad = warp_roi_quad(roi, matrix)
+        expected = np.array([[20, 15], [40, 15], [40, 35], [20, 35]], dtype=np.float32)
+        np.testing.assert_allclose(quad, expected, atol=1)
+        # Öteleme dikliği bozmamalı: karşılıklı kenar uzunlukları eşit kalmalı.
+        widths = [np.linalg.norm(quad[1] - quad[0]), np.linalg.norm(quad[2] - quad[3])]
+        heights = [np.linalg.norm(quad[3] - quad[0]), np.linalg.norm(quad[2] - quad[1])]
+        assert widths[0] == pytest.approx(widths[1], abs=1)
+        assert heights[0] == pytest.approx(heights[1], abs=1)
+
+    def test_perspective_skew_produces_non_rectangular_quad_near_expected_corners(self):
+        # Referans düz kare; şimdiki köşeler hafif trapez (sağ kenar içeri
+        # kaymış) — kamera açısı/perspektif kayması senaryosu.
+        ref = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], dtype=np.float32)
+        cur = np.array([[0, 0], [100, 20], [90, 100], [0, 100]], dtype=np.float32)
+        matrix = compute_warp_matrix(ref, cur)
+        roi = (0, 0, 100, 100)  # tüm referans alanını kaplayan ROI
+        quad = warp_roi_quad(roi, matrix)
+        # Tüm referans kare dönüştürüldüğü için sonuç, "cur" köşelerinin
+        # kendisine (toleranslı) eşit olmalı.
+        np.testing.assert_allclose(quad, cur, atol=2)
+        # Dikdörtgenlik bozulmuş olmalı: üst ve alt kenar genişlikleri artık farklı.
+        top_width = np.linalg.norm(quad[1] - quad[0])
+        bottom_width = np.linalg.norm(quad[2] - quad[3])
+        assert abs(top_width - bottom_width) > 5
+
+    def test_matches_warp_roi_rect_bounding_box(self):
+        # warp_roi_rect'in döndürdüğü bounding box, warp_roi_quad'ın
+        # köşelerinin min/max'ına eşit olmalı (aynı geometriyi farklı
+        # biçimde ifade ediyorlar, tutarsızlık backward-compat'i bozar).
+        ref = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], dtype=np.float32)
+        cur = np.array([[0, 0], [100, 20], [90, 100], [0, 100]], dtype=np.float32)
+        matrix = compute_warp_matrix(ref, cur)
+        roi = (10, 10, 40, 40)
+        quad = warp_roi_quad(roi, matrix)
+        x, y, w, h = warp_roi_rect(roi, matrix)
+        assert x == pytest.approx(float(np.min(quad[:, 0])), abs=1)
+        assert y == pytest.approx(float(np.min(quad[:, 1])), abs=1)
+        assert x + w == pytest.approx(float(np.max(quad[:, 0])), abs=1)
+        assert y + h == pytest.approx(float(np.max(quad[:, 1])), abs=1)

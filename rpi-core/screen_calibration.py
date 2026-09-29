@@ -221,3 +221,25 @@ def warp_roi_rect(roi: tuple[int, int, int, int], matrix: np.ndarray) -> tuple[i
     x1 = float(np.max(warped[:, 0]))
     y1 = float(np.max(warped[:, 1]))
     return (round(x0), round(y0), round(x1 - x0), round(y1 - y0))
+
+
+def warp_roi_quad(roi: tuple[int, int, int, int], matrix: np.ndarray) -> np.ndarray:
+    """Bir (x, y, w, h) dikdörtgenin 4 köşesini verilen matrisle dönüştürüp,
+    bounding box'a İNDİRGEMEDEN gerçek (potansiyel olarak eğik/döndürülmüş)
+    dörtgeni (4, 2) float32 köşe dizisi olarak döner — [sol-üst, sağ-üst,
+    sağ-alt, sol-alt] sırasında (girdi dikdörtgeniyle aynı köşe sırası,
+    perspectiveTransform köşe sırasını korur).
+
+    Neden warp_roi_rect'ten ayrı: warp_roi_rect geriye uyumluluk için
+    bounding box döndürmeye devam ediyor (main.py'de halihazırda onu
+    kullanan kod var) — bu fonksiyon gerçek geometriyi isteyen yeni
+    çağıranlar (crop_roi_quad, admin overlay) için eklendi (2026-09-29,
+    Fatih'in isteği: "ROI'lar herhangi bir dörtgen haline gelebilir, bu
+    geometri oyununu başarıyla tamamlamalıyız").
+    """
+    x, y, w, h = roi
+    corners = np.array(
+        [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
+        dtype=np.float32,
+    ).reshape(-1, 1, 2)
+    return cv2.perspectiveTransform(corners, matrix).reshape(4, 2)
