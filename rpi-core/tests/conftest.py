@@ -67,3 +67,13 @@ def isolated_motion_params_config(tmp_path, monkeypatch):
     path = tmp_path / "motion_params.json"
     monkeypatch.setattr(motion_params, "CONFIG_PATH", path)
     return path
+
+
+@pytest.fixture
+def isolated_vision_settings_config(tmp_path, monkeypatch):
+    """vision_settings_store.CONFIG_PATH'i geçici bir dosyaya yönlendirir."""
+    import vision_settings_store
+
+    path = tmp_path / "vision_settings.json"
+    monkeypatch.setattr(vision_settings_store, "CONFIG_PATH", path)
+    return path

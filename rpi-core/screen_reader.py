@@ -39,6 +39,14 @@ except ImportError:
 # sonrasi) config'e tasinacak sekilde guncellenecek.
 DEFAULT_ROI: tuple[int, int, int, int] = (340, 160, 600, 400)
 
+# Grup 2 (READY/WORKING/SCAN OK/ERROR) kareleri icin: ROI'nin ortalama HSV
+# V (parlaklik) kanali bu esigin ustundeyse "dolu/1", altindaysa "bos/0"
+# kabul edilir. Icin bos kare koyu/dusuk parlaklik, ici mavi dolu kare
+# belirgin sekilde daha parlak/doygun olur. GECICI SABIT — gercek HMI
+# fotograflari elde olunca (saha ziyareti sonrasi) kalibre edilecek; simdilik
+# 0-255 araliginin ortasinin biraz ustu makul bir baslangic noktasi.
+BOOLEAN_BRIGHTNESS_THRESHOLD: float = 130.0
+
 
 @dataclass
 class ScreenReadResult:
@@ -49,6 +57,11 @@ class ScreenReadResult:
     kurulu degil / Tesseract binary'si eksik / cagri exception firlatti)
     arasindaki farki tasir. None ise OCR sorunsuz calisti demektir (text
     bos da olabilir, dolu da).
+
+    kind/bool_state: ROI "boolean" tipindeyse (Grup 2 — READY/WORKING/
+    SCAN OK/ERROR kareleri) OCR hic calistirilmaz, bunun yerine bool_state
+    0/1 olarak doldurulur; "numeric" ROI'lerde (varsayilan) bool_state None
+    kalir, text/ocr_error eskisi gibi doldurulur.
     """
 
     roi: tuple[int, int, int, int]
@@ -56,6 +69,8 @@ class ScreenReadResult:
     avg_color_rgb: tuple[float, float, float]
     text: str
     ocr_error: str | None = None
+    kind: str = "numeric"
+    bool_state: int | None = None
 
 
 def crop_roi(frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI) -> np.ndarray:
@@ -128,11 +143,50 @@ def read_text_ocr(image: np.ndarray) -> tuple[str, str | None]:
     return text.strip(), None
 
 
-def read_roi(frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI) -> ScreenReadResult:
-    """ROI'yi kirpar, ortalama HSV+RGB rengini ve OCR metnini hesaplar — bu modulun tek giris noktasi."""
+def read_boolean_state(
+    image: np.ndarray, threshold: float = BOOLEAN_BRIGHTNESS_THRESHOLD
+) -> tuple[int, float]:
+    """Grup 2 (READY/WORKING/SCAN OK/ERROR) kareleri icin OCR YERINE karar verir.
+
+    Kirpilan ROI'nin ortalama HSV V (parlaklik) kanalini hesaplar; esigin
+    ustundeyse 1 (dolu/mavi), altindaysa 0 (bos) doner. Boyutu 0 olan
+    (kare disina tasmis) goruntude 0/0.0 doner — "bos" ile ayni sonuc,
+    zaten okunacak piksel yok.
+
+    Doner: (state 0|1, avg_brightness) — avg_brightness debug/kalibrasyon
+    icin ham deger olarak da UI'a tasinir.
+    """
+    if image.size == 0:
+        return 0, 0.0
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    avg_brightness = float(cv2.mean(hsv)[2])
+    state = 1 if avg_brightness >= threshold else 0
+    return state, avg_brightness
+
+
+def read_roi(
+    frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI, kind: str = "numeric"
+) -> ScreenReadResult:
+    """ROI'yi kirpar; "numeric" ise OCR+renk, "boolean" ise SADECE renk/parlaklik
+    esigiyle 0/1 karari hesaplar — bu modulun tek giris noktasi.
+
+    kind="boolean" durumunda OCR hic calistirilmaz (Tesseract kucuk dolu/bos
+    kareler icin anlamsiz/gereksiz CPU yuku) — bunun yerine bool_state doldurulur.
+    """
     cropped = crop_roi(frame, roi)
     hsv_color = average_color_hsv(cropped)
     rgb_color = average_color_rgb(cropped)
+    if kind == "boolean":
+        state, _avg_brightness = read_boolean_state(cropped)
+        return ScreenReadResult(
+            roi=roi,
+            avg_color_hsv=hsv_color,
+            avg_color_rgb=rgb_color,
+            text="",
+            ocr_error=None,
+            kind="boolean",
+            bool_state=state,
+        )
     text, ocr_error = read_text_ocr(cropped)
     return ScreenReadResult(
         roi=roi,
@@ -140,4 +194,6 @@ def read_roi(frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI) ->
         avg_color_rgb=rgb_color,
         text=text,
         ocr_error=ocr_error,
+        kind="numeric",
+        bool_state=None,
     )

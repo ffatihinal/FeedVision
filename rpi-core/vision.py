@@ -19,6 +19,7 @@ import time
 import cv2
 
 from camera_ids import CAMERA_NUMS
+from vision_settings_store import get_settings
 
 try:
     from picamera2 import Picamera2
@@ -65,6 +66,16 @@ class VisionManager:
                 picam2.start()
                 self._cameras[cam_id] = picam2
                 self.errors[cam_id] = None
+                # Daha once kaydedilmis manuel pozlama ayari varsa (bkz.
+                # vision_settings_store.py) servis restart'inda kaybolmasin
+                # diye kamera acilir acilmaz tekrar uygulanir.
+                saved_exposure = get_settings(cam_id)["exposure"]
+                self.set_exposure(
+                    cam_id,
+                    auto=saved_exposure["auto"],
+                    exposure_time=saved_exposure["exposure_time"],
+                    gain=saved_exposure["gain"],
+                )
             except Exception as exc:  # noqa: BLE001 — donanim/izin hatasi tipi onceden bilinmiyor
                 self.errors[cam_id] = str(exc)
 
@@ -80,6 +91,36 @@ class VisionManager:
 
     def get(self, cam_id: str):
         return self._cameras.get(cam_id)
+
+    def set_exposure(
+        self, cam_id: str, auto: bool, exposure_time: int | None = None, gain: float | None = None
+    ) -> tuple[bool, str | None]:
+        """Manuel pozlama/kazanc (exposure time / analogue gain) uygular ya
+        da auto=True ise otomatik pozlamaya doner (picamera2 set_controls API'si).
+
+        Kamera acik degilse (henuz baslatilmadi / acilamadi) sessizce basarisiz
+        doner — ayar yine de main.py'deki endpoint tarafindan kalici olarak
+        saklanir (bkz. vision_settings_store.py), kamera bir sonraki acilista
+        start()'ta otomatik uygulanir.
+
+        Doner: (basarili mi, hata mesaji ya da None).
+        """
+        picam2 = self.get(cam_id)
+        if picam2 is None:
+            return False, "Kamera açık değil (ayar kaydedildi, kamera açılınca uygulanacak)"
+        try:
+            if auto:
+                picam2.set_controls({"AeEnable": True})
+            else:
+                controls: dict = {"AeEnable": False}
+                if exposure_time is not None:
+                    controls["ExposureTime"] = int(exposure_time)
+                if gain is not None:
+                    controls["AnalogueGain"] = float(gain)
+                picam2.set_controls(controls)
+            return True, None
+        except Exception as exc:  # noqa: BLE001 — picamera2/donanim hatasi tipi onceden bilinmiyor
+            return False, str(exc)
 
     def capture_jpeg(self, cam_id: str) -> bytes | None:
         """Tek kare yakalayip JPEG'e kodlar. Kamera acik degilse None doner."""

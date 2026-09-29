@@ -34,6 +34,7 @@ import psutil
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from typing import Literal
 
 import alarm_sounds
 import calibration_store
@@ -43,7 +44,9 @@ import motion_params
 import roi_store
 import rules_store
 import vision_raw_log
+import vision_settings_store
 from feed_totalizer import totalizer as feed_totalizer
+from image_preprocess import apply_clahe
 from rule_engine import evaluate_rules
 from screen_calibration import compute_warp_matrix, detect_screen_corners, warp_roi_rect
 from screen_reader import read_roi
@@ -327,23 +330,33 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
     Kontrol Kriterleri dongusu tarafindan kullanilan ORTAK yol — iki yerde ayni
     mantigin tekrarlanip zamanla birbirinden sapmasini onler.
 
-    Doner: (okuma sonuc listesi [{"name","roi","text","ocr_error",
-    "avg_color_hsv","avg_color_rgb"}, ...], roi_reference_uncertain)
+    Doner: (okuma sonuc listesi [{"name","roi","kind","text","ocr_error",
+    "bool_state","avg_color_hsv","avg_color_rgb"}, ...], roi_reference_uncertain)
+
+    On-isleme (CLAHE): SADECE ui_screen icin, Admin'den acilmissa (bkz.
+    vision_settings_store.py) ROI kirpmadan ONCE karenin tamamina uygulanir.
+    Chamber Camera'ya kasitli olarak dokunulmuyor (18-09-2026 kapsam karari —
+    bu tur sadece UI Screen Camera'nin ROI okuma pipeline'ini degistiriyor).
     """
     rois = roi_store.get_rois(cam_id)
     if not rois:
         return [], False
+    if cam_id == "ui_screen" and vision_settings_store.get_settings(cam_id)["preprocess"]["clahe_enabled"]:
+        frame = apply_clahe(frame)
     adjusted_rois, uncertain = _adjust_rois_for_drift(cam_id, frame, rois)
     results = []
     for roi_def in adjusted_rois:
         roi_tuple = (roi_def["x"], roi_def["y"], roi_def["w"], roi_def["h"])
-        result = read_roi(frame, roi_tuple)
+        kind = roi_def.get("kind", "numeric")  # eski kayitli ROI'lerde alan yok -> "numeric" (geriye uyumlu)
+        result = read_roi(frame, roi_tuple, kind=kind)
         results.append(
             {
                 "name": roi_def["name"],
                 "roi": list(result.roi),
+                "kind": result.kind,
                 "text": result.text,
                 "ocr_error": result.ocr_error,
+                "bool_state": result.bool_state,
                 "avg_color_hsv": list(result.avg_color_hsv),
                 "avg_color_rgb": list(result.avg_color_rgb),
             }
@@ -389,6 +402,11 @@ class RoiDef(BaseModel):
     y: int = Field(ge=0)
     w: int = Field(gt=0)
     h: int = Field(gt=0)
+    # "numeric" (varsayilan, OCR ile okunur — Grup 1/3) ya da "boolean"
+    # (Grup 2 durum kareleri — OCR YERINE ortalama parlaklik esigiyle 0/1
+    # okunur, bkz. screen_reader.read_boolean_state). Eski kayitli ROI'lerde
+    # bu alan hic yoktu -> Pydantic varsayilani "numeric" ile geriye uyumlu.
+    kind: Literal["numeric", "boolean"] = "numeric"
 
 
 class RoiListPayload(BaseModel):
@@ -427,6 +445,56 @@ def set_rois(cam_id: str, payload: RoiListPayload):
     rois_as_dicts = [r.model_dump() for r in payload.rois]
     roi_store.save_rois(cam_id, rois_as_dicts)
     return {"success": True, "rois": roi_store.get_rois(cam_id)}
+
+
+# ==============================================================================
+#  KAMERA POZLAMA (EXPOSURE) + ON-ISLEME (CLAHE) AYARLARI — sadece UI Screen
+#  Camera'nin ROI okuma dogrulugunu iyilestirmek icin (Chamber Camera'ya
+#  dokunulmuyor, Admin UI sadece UI Screen Camera icin kontrol gosteriyor).
+#  Kalici depo: vision_settings_store.py (roi_store.py ile ayni JSON deseni).
+# ==============================================================================
+
+
+class ExposureSettings(BaseModel):
+    auto: bool = True
+    exposure_time: int | None = Field(default=None, ge=1)  # mikrosaniye (picamera2 ExposureTime birimi)
+    gain: float | None = Field(default=None, gt=0)  # AnalogueGain (picamera2)
+
+
+class PreprocessSettings(BaseModel):
+    clahe_enabled: bool
+
+
+@app.post("/vision/{cam_id}/exposure")
+def vision_set_exposure(cam_id: str, payload: ExposureSettings):
+    """Manuel pozlama/kazanc ayarlar ya da auto=true ile otomatik pozlamaya
+    doner. Ayar HER ZAMAN kalici olarak saklanir (kamera acik olmasa bile) —
+    kamera bir sonraki acilista bunu otomatik uygular (bkz. vision.py start()).
+    Kamera su an acik degilse applied_live=false doner ama bu hata sayilmaz."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    entry = vision_settings_store.save_exposure(cam_id, payload.auto, payload.exposure_time, payload.gain)
+    applied_live, error = vision.set_exposure(cam_id, payload.auto, payload.exposure_time, payload.gain)
+    return {"success": True, "exposure": entry, "applied_live": applied_live, "error": error}
+
+
+@app.post("/vision/{cam_id}/preprocess")
+def vision_set_preprocess(cam_id: str, payload: PreprocessSettings):
+    """CLAHE (kontrast artırma) on-isleme adimini acar/kapatir — bir sonraki
+    ROI okumasindan itibaren gecerli olur, kamerayi yeniden baslatmak gerekmez."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    entry = vision_settings_store.save_preprocess(cam_id, payload.clahe_enabled)
+    return {"success": True, "preprocess": entry}
+
+
+@app.get("/vision/{cam_id}/settings")
+def vision_get_settings(cam_id: str):
+    """Admin panelinin sayfa acilisinda slider/checkbox'lari mevcut kayitli
+    degerle doldurabilmesi icin — pozlama + on-isleme ayarlarini birlikte doner."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    return vision_settings_store.get_settings(cam_id)
 
 
 # ==============================================================================
