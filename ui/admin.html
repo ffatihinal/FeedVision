@@ -282,6 +282,11 @@
       <button onclick="calibrateScreen()">Ekranı Kalibre Et</button>
       <span id="calibration-status" style="color:#888; font-size:13px;">Kalibrasyon durumu yükleniyor…</span>
     </div>
+    <!-- Görev B (29-09-2026): canlı overlay'de referans/şimdiki köşe rengi lejantı. -->
+    <div style="color:#888; font-size:12px; margin-top:4px;">
+      Overlay: <span style="color:#f4d03f;">●</span> referans köşe (kalibrasyon anı) &nbsp;
+      <span style="color:#2ecc71;">●</span> şimdiki tespit edilen köşe (canlı)
+    </div>
     <hr style="border-color:#292929; margin:16px 0;">
     <!-- Gorev D (23-09-2026): manuel pozlama + CLAHE kontrast artirma -
          SADECE UI Screen Camera icin, Chamber Camera'ya dokunmuyor. -->
@@ -837,6 +842,28 @@
       }
       const when = new Date(data.calibration.calibrated_at * 1000);
       statusEl.textContent = `Son kalibrasyon: ${when.toLocaleString("tr-TR")}`;
+      referenceCorners = data.calibration.corners || null;
+      drawRoiCanvas();
+    }
+
+    // Görev B — canlı overlay için "şimdiki" (yeşil) köşe tespiti. Sürekli
+    // okuma döngüsüyle aynı ritimde olmasına gerek yok (referans noktası
+    // gösterimi, kritik okuma değil) — bu yüzden ayrı, daha seyrek bir
+    // setInterval (CORNERS_POLL_MS) kullanılıyor.
+    const CORNERS_POLL_MS = 1000;
+
+    async function refreshCurrentCorners() {
+      if (!roiStreamActive) return;  // yayın kapalıyken gereksiz kamera çağrısı yapma
+      try {
+        const response = await fetch(`/vision/${ROI_CAM_ID}/current-corners`);
+        if (!response.ok) return;
+        const data = await response.json();
+        currentCorners = data.corners || null;
+        drawRoiCanvas();
+      } catch {
+        // Sessizce geç — bu sadece görsel referans overlay'i, ana okuma
+        // akışını (continuousReadLoop) etkilememeli.
+      }
     }
 
     async function calibrateScreen() {
@@ -1204,6 +1231,14 @@
           logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
         } else {
           renderReadResults(data, readAt);
+          // Görev B: her okumadan gelen (varsa) drift-düzeltilmiş ROI
+          // dörtgenlerini overlay'in kullanacağı sözlüğe yansıt.
+          const quads = {};
+          (data.results || []).forEach((r) => {
+            if (r.roi_quad) quads[r.name] = r.roi_quad;
+          });
+          latestRoiQuads = quads;
+          drawRoiCanvas();
         }
       } catch (e) {
         logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
@@ -1249,6 +1284,13 @@
     let roiDrawing = null;      // aktif çizim: {startX, startY, curX, curY}
     let roiStreamActive = false;
 
+    // Görev B (29-09-2026): canlı overlay için referans/şimdiki köşe verisi +
+    // en son okumadan gelen (varsa) drift-düzeltilmiş ROI dörtgenleri.
+    // Sadece görselleştirme amaçlı — roiList (tanım/düzenleme) ayrı kalıyor.
+    let referenceCorners = null;   // [[x,y]x4] ya da null (hiç kalibre edilmemiş)
+    let currentCorners = null;     // [[x,y]x4] ya da null (bu karede bezel bulunamadı)
+    let latestRoiQuads = {};       // { roiName: [[x,y]x4] } — continuousReadLoop'tan gelir
+
     function roiCanvasEl() {
       return document.getElementById("roi-canvas");
     }
@@ -1272,6 +1314,37 @@
     // Canvas artik SADECE seffaf bir overlay — altindaki <img> (canli akis)
     // kendi kendine surekli guncelleniyor, bu fonksiyon sadece ROI
     // dikdortgenlerini/isimlerini cizer (Gorev B, 23-09-2026).
+    // 4 noktayı ([[x,y]x4]) kapalı bir çokgen olarak çizer — Görev B: ROI'ler
+    // artık (kalibrasyon sonrası) eksene hizalı olmayabilir, gerçek dörtgen
+    // geometrisini göstermek için basit bir lineTo zinciri yeterli.
+    function strokePolygon(ctx, points) {
+      if (!points || points.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(points[0][0], points[0][1]);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i][0], points[i][1]);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    // Referans/şimdiki köşe kümesini küçük dolgu daireler + çokgen çizgisiyle
+    // gösterir (Görev B) — "neresi referans alındı" sorusuna görsel cevap.
+    function drawCornerSet(ctx, corners, color) {
+      if (!corners || corners.length !== 4) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      strokePolygon(ctx, corners);
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      corners.forEach(([x, y]) => {
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
     function drawRoiCanvas() {
       const canvas = roiCanvasEl();
       const ctx = canvas.getContext("2d");
@@ -1282,7 +1355,16 @@
         // Durum (boolean) ROI'ler sarı, sayısal ROI'ler yeşil çerçeveyle ayırt edilir.
         const color = roi.kind === "boolean" ? "#ffcc00" : "#00e0a0";
         ctx.strokeStyle = color;
-        ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+        ctx.lineWidth = 2;
+        // Kalibrasyon sonrası bu ROI için gerçek (olası eğik) dörtgen
+        // biliniyorsa (son okumadan gelen quad) onu çiz, yoksa (kalibrasyonsuz/
+        // henüz okuma yapılmamış) tanım anındaki düz dikdörtgeni çiz.
+        const quad = latestRoiQuads[roi.name];
+        if (quad) {
+          strokePolygon(ctx, quad);
+        } else {
+          ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+        }
         ctx.fillStyle = color;
         ctx.fillText(roi.name, roi.x + 4, roi.y + 18);
       });
@@ -1294,6 +1376,9 @@
         ctx.strokeStyle = "#fff";
         ctx.strokeRect(x, y, w, h);
       }
+      // Görev B — referans (sarı) ve şimdiki (yeşil) bezel köşeleri.
+      drawCornerSet(ctx, referenceCorners, "#f4d03f");
+      drawCornerSet(ctx, currentCorners, "#2ecc71");
     }
 
     function renderRoiList() {
@@ -2455,6 +2540,9 @@
     startRoiStream();
     loadVisionSettings();
     startContinuousRead();
+    // Görev B — referans/şimdiki köşe overlay'i; sürekli okuma döngüsünden
+    // bağımsız, daha seyrek (CORNERS_POLL_MS) çalışır.
+    setInterval(refreshCurrentCorners, CORNERS_POLL_MS);
   </script>
 </body>
 </html>
