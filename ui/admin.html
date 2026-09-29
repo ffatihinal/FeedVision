@@ -44,6 +44,7 @@
       font-size: 16px; padding: 8px; border-radius: 6px; border: 1px solid #444;
       background: #222; color: #eee; width: 100px;
     }
+    .row-group input:disabled { opacity: .4; cursor: not-allowed; }
     #port-select { width: 260px; }
     .row-group button { font-size: 15px; padding: 10px 16px; }
     #status-display {
@@ -85,10 +86,14 @@
     /* --- Hareket analizi: teker çapları + grafikler --- */
     .motion-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
     @media (max-width: 900px) { .motion-grid { grid-template-columns: 1fr; } }
-    .motion-col h3 { font-size: 14px; color: #9c9; margin: 0 0 8px; }
     .chart-box { background: #000; border: 1px solid #333; border-radius: 6px; padding: 8px; margin-bottom: 10px; }
     .chart-box .chart-title { font-size: 11.5px; color: #888; margin-bottom: 4px; }
     .chart-box canvas { width: 100%; height: 120px; display: block; }
+    /* 29-09-2026 (Madde 9): 4 seriyi (teorik + gerçek ortalama + 2 encoder)
+       tek grafikte ayırt etmek için küçük renk-kodlu lejant. */
+    .chart-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #aaa; margin: 4px 0 10px; }
+    .chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 
     /* --- Konsol paneli --- */
     #console-title { margin-top: 32px; font-size: 16px; color: #9c9; }
@@ -208,6 +213,12 @@
     #feed-start-result { font-size: 13px; color: #aaa; margin-top: 8px; white-space: pre-wrap; }
     #feed-start-result.error { color: #f77; }
     #feed-start-result.success { color: #9d9; }
+    /* 29-09-2026 (Madde 6): acil-durdurma hissi — daha büyük/kırmızı, mantığı DEĞİŞMEDİ. */
+    #feed-start-stop-btn {
+      padding: 16px 26px; font-size: 18px; font-weight: 800;
+      background: #c0392b; color: #fff;
+    }
+    #feed-start-stop-btn:active { background: #922b21; }
     #motion-params-save-status { font-size: 12.5px; color: #888; }
   </style>
 </head>
@@ -441,17 +452,21 @@
       <h2>Besleme Başlat</h2>
       <div class="row-group">
         <label>Step Yön:</label>
-        <select id="feed-step-dir"><option value="1">1</option><option value="0">0</option></select>
+        <select id="feed-step-dir"><option value="1">Geri</option><option value="0">İleri</option></select>
         <label>Hız (mm/s):</label>
         <input id="feed-speed" type="number" value="1" min="0.1" step="0.001">
         <label>Mesafe (mm):</label>
         <input id="feed-distance" type="number" value="50" min="0.1" step="0.1">
         <label>İvme (mm/s²):</label>
-        <input id="feed-accel" type="number" value="0" min="0" step="0.1">
+        <input id="feed-accel" type="number" value="0" min="0" step="0.1" disabled>
+        <label style="display:flex;align-items:center;gap:4px;">
+          <input type="checkbox" id="feed-accel-enable" onchange="toggleFeedAccelEnabled()">
+          İvme kullan
+        </label>
       </div>
       <div class="row-group">
         <label>DC Yön:</label>
-        <select id="feed-dc-dir"><option value="forward">İleri</option><option value="backward">Geri</option></select>
+        <select id="feed-dc-dir"><option value="forward">Saat Yönü</option><option value="backward">Saat Yönünün Tersi</option></select>
         <label>DC Hız (RPM):</label>
         <input id="feed-rpm" type="number" value="10" min="0.1" step="0.1">
         <button id="feed-start-btn" onclick="sendFeedStart()">Besleme Başlat</button>
@@ -459,7 +474,7 @@
              kısayol — var olan step Durdur (/motor/stop) + DC Dur
              (/motor/dc dir=stop) fonksiyonlarını AYNEN tekrar kullanıyor,
              yeni bir endpoint/mantık yok. -->
-        <button onclick="stopStep(); sendDc('stop', 'Dur');">Dur</button>
+        <button id="feed-start-stop-btn" onclick="stopStep(); sendDc('stop', 'Dur');">Dur</button>
       </div>
       <div id="feed-start-result"></div>
     </div>
@@ -467,7 +482,7 @@
     <!-- Ham Step motor kontrolü (ileri seviye/hata ayıklama) -->
     <div class="row-group">
       <label>Step motor — Yön:</label>
-      <select id="step-dir"><option value="1">1</option><option value="0">0</option></select>
+      <select id="step-dir"><option value="1">Geri</option><option value="0">İleri</option></select>
       <label>Gecikme (µs) — hedef hız:</label>
       <input id="step-delay" type="number" value="500" min="1">
       <label>Adım:</label>
@@ -494,8 +509,8 @@
     </div>
     <div class="row-group">
       <label>DC motor:</label>
-      <button onclick="sendDc('forward', 'İleri')">İleri</button>
-      <button onclick="sendDc('backward', 'Geri')">Geri</button>
+      <button onclick="sendDc('forward', 'Saat Yönü')">Saat Yönü</button>
+      <button onclick="sendDc('backward', 'Saat Yönünün Tersi')">Saat Yönünün Tersi</button>
       <button onclick="sendDc('stop', 'Dur')">Dur</button>
       <button onclick="resetEncoders()">Encoder Sıfırla</button>
     </div>
@@ -526,6 +541,9 @@
         <div class="field">Encoder 2:</div><div class="value" id="s-e2">—</div>
       </div>
       <div id="status-raw">Canlı durum bekleniyor…</div>
+      <!-- 29-09-2026 eklendi: sadece en son başarılı Besleme Başlat çağrısından
+           sonra dolar (bkz. sendFeedStart -> renderFeedSpeedInfo, shared.js). -->
+      <div id="feed-speed-info" style="font-size:12.5px;color:#888;margin-top:6px"></div>
     </div>
   </div>
 
@@ -576,18 +594,21 @@
       <label style="font-size:12.5px;color:#e0a800">⚠ Varsayılan 40mm bir TAHMİN — gerçek çap cetvelle ölçülüp buraya girilene kadar mm değerleri yaklaşıktır.</label>
     </div>
 
+    <!-- 29-09-2026 (Madde 9): ayrı "Gönderilen Komut"/"Encoder Verisi" bölümleri
+         yerine TEK Konum + TEK Hız grafiği, 4 seri overlay (teorik + gerçek
+         ortalama + 2 encoder) — ivme grafikleri kaldırıldı. -->
+    <div class="chart-legend">
+      <span><i style="background:#e0a800"></i>Step motor teorik (gönderilen komut)</span>
+      <span><i style="background:#5d5"></i>Step motor gerçek (encoder ortalaması)</span>
+      <span><i style="background:#6cf"></i>Encoder 1 gerçek</span>
+      <span><i style="background:#fb4"></i>Encoder 2 gerçek</span>
+    </div>
     <div class="motion-grid">
       <div class="motion-col">
-        <h3>Gönderilen Komut (teorik — son "Step At"tan hesaplanır)</h3>
-        <div class="chart-box"><div class="chart-title">Konum (mm)</div><canvas id="chart-sent-pos"></canvas></div>
-        <div class="chart-box"><div class="chart-title">Hız (mm/s)</div><canvas id="chart-sent-vel"></canvas></div>
-        <div class="chart-box"><div class="chart-title">İvme (mm/s²)</div><canvas id="chart-sent-acc"></canvas></div>
+        <div class="chart-box"><div class="chart-title">Konum (mm)</div><canvas id="chart-pos"></canvas></div>
       </div>
       <div class="motion-col">
-        <h3>Encoder Verisi (gerçek — mavi: Encoder 1, turuncu: Encoder 2)</h3>
-        <div class="chart-box"><div class="chart-title">Konum (mm)</div><canvas id="chart-real-pos"></canvas></div>
-        <div class="chart-box"><div class="chart-title">Hız (mm/s)</div><canvas id="chart-real-vel"></canvas></div>
-        <div class="chart-box"><div class="chart-title">İvme (mm/s²)</div><canvas id="chart-real-acc"></canvas></div>
+        <div class="chart-box"><div class="chart-title">Hız (mm/s)</div><canvas id="chart-vel"></canvas></div>
       </div>
     </div>
   </div>
@@ -2046,7 +2067,11 @@
       const dir = parseInt(document.getElementById("feed-step-dir").value);
       const speed_mms = Number(document.getElementById("feed-speed").value);
       const distance_mm = Number(document.getElementById("feed-distance").value);
-      const accel_mms2 = Number(document.getElementById("feed-accel").value) || 0;
+      // İvme tik'i işaretli değilse input disabled olsa da değerini OKUMUYORUZ,
+      // her zaman 0 gönderiyoruz (backend accel_mms2<=0 => rampasız yorumluyor).
+      const accel_mms2 = document.getElementById("feed-accel-enable").checked
+        ? Number(document.getElementById("feed-accel").value) || 0
+        : 0;
       const dc_dir = document.getElementById("feed-dc-dir").value;
       const rpm = Number(document.getElementById("feed-rpm").value);
       if (!(speed_mms > 0) || !(distance_mm > 0) || !(rpm > 0)) {
@@ -2080,9 +2105,10 @@
       const sc = data.step_calc, dc = data.dc_calc;
       renderFeedStartResult(
         `Başlatıldı — step: ${sc.steps} adım, ${sc.delay_us}µs gecikme, ${sc.accel_steps} adım rampa | ` +
-        `DC: %${dc.duty} duty (${dc_dir === "forward" ? "ileri" : "geri"}). Step bitince DC otomatik duracak.`,
+        `DC: %${dc.duty} duty (${dc_dir === "forward" ? "saat yönü" : "saat yönünün tersi"}). Step bitince DC otomatik duracak.`,
         false,
       );
+      renderFeedSpeedInfo("feed-speed-info", speed_mms, sc);
       // Hareket Analizi grafiklerini de (aşağıdaki panel) gerçek gönderilen
       // step komutuyla güncelle — ham "Step At" panelinin yaptığı gibi. NOT:
       // grafik hâlâ "Motor Teker Çapı" (wheel-motor, localStorage) girişini
@@ -2206,7 +2232,7 @@
     // Alan sözlüğü: docs/protocol.md — {t,e1,e2,um1,um2,remaining,running,dc}.
     let previousConnectionState = null;
     let lastStatus = {};
-    const DC_LABELS = { 0: "Duruyor", 1: "İleri", 2: "Geri" };
+    const DC_LABELS = { 0: "Duruyor", 1: "Saat Yönü", 2: "Saat Yönünün Tersi" };
 
     function renderStatus(status) {
       const raw = document.getElementById("status-raw");
@@ -2386,29 +2412,60 @@
       return { tS, posMm, vel, acc };
     }
 
-    function redrawActualCharts() {
-      if (!encHistory.length) return;
+    // 29-09-2026 (Madde 9): 4 sabit renk, HTML'deki .chart-legend ile BİREBİR
+    // eşleşir — burada değişirse orası da güncellenmeli.
+    const COLOR_SENT_THEORETICAL = "#e0a800";  // step motor teorik (gönderilen komut)
+    const COLOR_REAL_AVERAGE = "#5d5";         // step motor gerçek — iki encoder'ın ortalaması
+    const COLOR_ENC1 = "#6cf";
+    const COLOR_ENC2 = "#fb4";
+
+    // Son gönderilen "Step At" komutunun teorik eğrisi — WS'ten bağımsız,
+    // sadece onStepSent()'te bir kere hesaplanır, her redraw'da AYNEN
+    // yeniden çizilir (gerçek eğriyle aynı canvas'ta overlay edilebilsin diye).
+    let lastSentCurve = null;
+
+    // Konum + Hız grafiklerini TEK seferde, 4 seriyle (teorik + gerçek
+    // ortalama + encoder1 + encoder2) çizer — eskiden ayrı "Gönderilen Komut"/
+    // "Encoder Verisi" bölümleriydi, artık overlay (bkz. HTML'deki chart-legend).
+    function drawCombinedCharts() {
       const mm1 = Math.PI * wheelMm("wheel-enc1") / ENC_COUNTS_PER_REV;
       const mm2 = Math.PI * wheelMm("wheel-enc2") / ENC_COUNTS_PER_REV;
       const s1 = windowedDerivedSeries(encHistory, "e1", recordBaselineE1, mm1);
       const s2 = windowedDerivedSeries(encHistory, "e2", recordBaselineE2, mm2);
-      drawChart("chart-real-pos", [{ t: s1.tS, y: s1.posMm, color: "#6cf" }, { t: s2.tS, y: s2.posMm, color: "#fb4" }]);
-      drawChart("chart-real-vel", [{ t: s1.tS, y: s1.vel, color: "#6cf" }, { t: s2.tS, y: s2.vel, color: "#fb4" }]);
-      drawChart("chart-real-acc", [{ t: s1.tS, y: s1.acc, color: "#6cf" }, { t: s2.tS, y: s2.acc, color: "#fb4" }]);
+      // Step motor gerçek (ortalama): s1/s2 AYNI encHistory'den türediği için
+      // tS dizileri birebir aynı uzunlukta/aynı anlarda — noktasal ortalama
+      // almak güvenli (bkz. madde 5'teki "iki encoder ortalaması" ile aynı ruh,
+      // burada CANLI konum/hız için, günlük net toplam için DEĞİL).
+      const avgPos = s1.posMm.map((v, i) => (v + s2.posMm[i]) / 2);
+      const avgVel = s1.vel.map((v, i) => (v + s2.vel[i]) / 2);
+
+      const posSeries = [], velSeries = [];
+      if (lastSentCurve) {
+        posSeries.push({ t: lastSentCurve.tS, y: lastSentCurve.posMm, color: COLOR_SENT_THEORETICAL });
+        velSeries.push({ t: lastSentCurve.tS, y: lastSentCurve.velMmS, color: COLOR_SENT_THEORETICAL });
+      }
+      posSeries.push({ t: s1.tS, y: avgPos, color: COLOR_REAL_AVERAGE });
+      velSeries.push({ t: s1.tS, y: avgVel, color: COLOR_REAL_AVERAGE });
+      posSeries.push({ t: s1.tS, y: s1.posMm, color: COLOR_ENC1 });
+      velSeries.push({ t: s1.tS, y: s1.vel, color: COLOR_ENC1 });
+      posSeries.push({ t: s2.tS, y: s2.posMm, color: COLOR_ENC2 });
+      velSeries.push({ t: s2.tS, y: s2.vel, color: COLOR_ENC2 });
+
+      drawChart("chart-pos", posSeries);
+      drawChart("chart-vel", velSeries);
     }
 
-    // Başarılı bir "Step At" gönderilince: teorik eğriyi hesaplayıp çiz, gerçek
-    // eğriyi de AYNI ana göre (t=0) sıfırla — iki grafik doğrudan karşılaştırılsın.
+    // Başarılı bir "Step At" gönderilince: teorik eğriyi hesaplayıp sakla,
+    // gerçek eğriyi de AYNI ana göre (t=0) sıfırla — iki eğri aynı canvas'ta
+    // doğrudan karşılaştırılsın.
     function onStepSent(cmd) {
-      const sent = simulateSentCurve(cmd);
-      drawChart("chart-sent-pos", [{ t: sent.tS, y: sent.posMm, color: "#6cf" }]);
-      drawChart("chart-sent-vel", [{ t: sent.tS, y: sent.velMmS, color: "#6cf" }]);
-      drawChart("chart-sent-acc", [{ t: sent.tS, y: sent.accMmS2, color: "#6cf" }]);
+      lastSentCurve = simulateSentCurve(cmd);
 
       recordStartMs = performance.now();
       recordBaselineE1 = lastStatus.e1 ?? 0;
       recordBaselineE2 = lastStatus.e2 ?? 0;
       encHistory = [];
+      drawCombinedCharts();
     }
 
     // --- Bağımsız (kütüphanesiz) çizgi grafik çizici — internet olmadan da
@@ -2465,7 +2522,7 @@
 
     // Gerçek eğriyi saniyede 5 kez tazele (WS 10Hz'de akıyor ama her tikte
     // yeniden çizmek gereksiz — Pi'de de rahat çalışsın diye seyreltildi).
-    setInterval(redrawActualCharts, 200);
+    setInterval(drawCombinedCharts, 200);
 
     // --- SUNUCU ÇALIŞMA SÜRESİ — /system/uptime'ı sayfa açılışında bir kere
     // çeker, sonrası tarayıcı tarafında saniyede bir sayaçla ilerletilir

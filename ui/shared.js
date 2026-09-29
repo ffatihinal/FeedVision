@@ -216,3 +216,32 @@ function renderRuleAlarm(violations, skipped) {
       : "Şu an okunamayan kurallar: " + skipped.map((s) => `${s.rule_name} (${s.reason})`).join(", ");
   }
 }
+
+// ==========================================================================
+//  BESLEME BAŞLAT — son girilen hızın µs gecikme + hız kapasitesi %'sine
+//  karşılığı (29-09-2026 eklendi). Hesap backend'de (motion_calc.py
+//  speed_pct_of_max) yapılıyor, burada SADECE metne dökülüyor — Operatör ve
+//  Admin ekranlarında aynı formatı kullanıyor, ayrı kopya yazmayalım diye
+//  ortak. Sadece en son BAŞARILI /motor/feed-start çağrısından sonra
+//  çağrılır (elementId'nin başlangıç metni boş kalır).
+// ==========================================================================
+
+function renderFeedSpeedInfo(elementId, speedMms, stepCalc) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  el.textContent = `Son girilen mm/s → ${speedMms} mm/s → ${stepCalc.delay_us} µs gecikmeli hareket → motorun hız kapasitesinin %${stepCalc.speed_pct_of_max.toFixed(1)}'i`;
+}
+
+// ==========================================================================
+//  İVME TİK'İ — "İvme (mm/s²)" input'u varsayılan DISABLED (29-09-2026
+//  eklendi, Fatih'in kararı: çoğu operatör rampasız/direkt hız kullanıyor,
+//  ivme istisnai bir durum — kazayla dolu bir değer gönderilmesin diye
+//  tik işaretlenmeden input pasif kalır). Operator ve Admin'de aynı
+//  #feed-accel/#feed-accel-enable id'leri kullanılıyor, ortak.
+// ==========================================================================
+
+function toggleFeedAccelEnabled() {
+  const enabled = document.getElementById("feed-accel-enable").checked;
+  const input = document.getElementById("feed-accel");
+  if (input) input.disabled = !enabled;
+}

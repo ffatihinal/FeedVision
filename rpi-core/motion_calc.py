@@ -61,6 +61,13 @@ def compute_step_command(speed_mms: float, distance_mm: float, accel_mms2: float
     açıkça tarif edilmemiş bir sınır durum ama mevcut ham `/motor/step`
     endpoint'indeki "accel=0 => rampasız" kuralıyla tutarlı bir varsayılan
     (operatör kasıtlı olarak rampasız hareket isteyebilir).
+
+    Dönen `speed_pct_of_max` (29-09-2026 eklendi): girilen `speed_mms`'in, bu
+    teker çapıyla `STEP_MIN_DELAY_US`'te ulaşılabilecek maksimum hıza (delay_us
+    tepe hızda sabitlendiği için `max_speed_mms = 1e6 * mm_per_step / STEP_MIN_DELAY_US`)
+    oranı, % olarak — operatörün UI'da "girdiğin hız motorun tepe hızının
+    kaçta kaçı" bilgisini görebilmesi için (JS'de DUPLICATE hesaplanmasın diye
+    burada hesaplanıp response'a ekleniyor).
     """
     if speed_mms <= 0:
         raise ValueError("Hız (mm/s) 0'dan büyük olmalı")
@@ -101,7 +108,16 @@ def compute_step_command(speed_mms: float, distance_mm: float, accel_mms2: float
             accel_steps = round((speed_mms**2 - v_start**2) / (2 * accel_mms2 * mps))
             accel_steps = max(0, min(accel_steps, steps // 2))
 
-    return {"steps": steps, "delay_us": delay_us, "accel_steps": accel_steps, "mm_per_step": mps}
+    max_speed_mms = 1_000_000 * mps / STEP_MIN_DELAY_US
+    speed_pct_of_max = speed_mms / max_speed_mms * 100
+
+    return {
+        "steps": steps,
+        "delay_us": delay_us,
+        "accel_steps": accel_steps,
+        "mm_per_step": mps,
+        "speed_pct_of_max": speed_pct_of_max,
+    }
 
 
 def compute_dc_duty(rpm_rod: float, d_wheel_dc_mm: float, d_rod_mm: float, rpm_max_noload: float) -> dict:

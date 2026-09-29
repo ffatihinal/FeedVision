@@ -236,7 +236,13 @@ class TestSuccessPath:
         result = asyncio.run(run())
 
         assert result["success"] is True
-        assert result["step_calc"] == {"steps": 15671, "delay_us": 1276, "accel_steps": 23, "mm_per_step": pytest.approx(0.006381360077604268)}
+        assert result["step_calc"] == {
+            "steps": 15671,
+            "delay_us": 1276,
+            "accel_steps": 23,
+            "mm_per_step": pytest.approx(0.006381360077604268),
+            "speed_pct_of_max": pytest.approx(1.5670640550586619),
+        }
         assert result["dc_calc"]["duty"] == 2
 
         assert len(fake_bridge.sent_commands) == 2

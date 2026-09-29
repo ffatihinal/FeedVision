@@ -96,6 +96,21 @@ class TestComputeStepCommand:
         with pytest.raises(ValueError, match="çok küçük"):
             motion_calc.compute_step_command(speed_mms=1.0, distance_mm=0.0001, accel_mms2=0.0, d_drive_mm=52.0)
 
+    def test_speed_pct_of_max_known_pair(self):
+        # D=52, speed=5mm/s -> max_speed~319.068 mm/s (delay_us=STEP_MIN_DELAY_US'te) -> %1.567
+        result = motion_calc.compute_step_command(speed_mms=5.0, distance_mm=100.0, accel_mms2=0.0, d_drive_mm=52.0)
+        assert result["speed_pct_of_max"] == pytest.approx(1.5670640550586619)
+
+    def test_speed_pct_of_max_at_top_speed_is_100(self):
+        result = motion_calc.compute_step_command(speed_mms=319.0680038802134, distance_mm=1000.0, accel_mms2=0.0, d_drive_mm=52.0)
+        assert result["speed_pct_of_max"] == pytest.approx(100.0)
+
+    def test_speed_pct_of_max_independent_of_wheel_diameter_for_same_ratio(self):
+        # mm_per_step orantısal büyüdüğünden speed_pct_of_max sadece speed_mms/max_speed
+        # oranına bağlı — teker çapı 10x büyüse de aynı orantılı hızda aynı yüzdeyi vermeli.
+        result = motion_calc.compute_step_command(speed_mms=50.0, distance_mm=1000.0, accel_mms2=0.0, d_drive_mm=520.0)
+        assert result["speed_pct_of_max"] == pytest.approx(1.5670640550586619)
+
     def test_larger_wheel_diameter_shifts_speed_range(self):
         # Daha büyük teker -> aynı delay_us aralığı için daha yüksek mm/s
         # aralığı (mm_per_step büyüdüğü için) — 0.05 mm/s D=52'de reddediliyordu,

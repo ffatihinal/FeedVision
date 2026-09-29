@@ -106,6 +106,16 @@ _sync_watcher_task: "asyncio.Task | None" = None
 # aşağısı) — farklı bir thread'den loop'a görev iletmenin doğru/güvenli yolu.
 _main_event_loop: "asyncio.AbstractEventLoop | None" = None
 
+# En son gönderilen step komutunun yönü (29-09-2026, Madde 5) — STM32'nin
+# periyodik durumunda step motor yönü YOK (bkz. docs/protocol.md, sadece DC
+# motor için `dc` var), bu yüzden feed_totalizer.update()'in "ileri mi geri
+# mi besleniyor" ayrımı yapabilmesi için Pi tarafında AYRICA tutuluyor.
+# /motor/step VE /motor/feed-start ikisi de günceller (motor_stop/reset
+# yönü DEĞİŞTİRMEZ — motor son bildiği yönde durmuş sayılır, bir sonraki
+# hareket zaten yeni bir dir ile gelir). None = henüz hiç step komutu
+# gönderilmedi (servis yeni başladı).
+_last_step_dir: "int | None" = None
+
 # ROI drift düzeltme: bir önceki karede gerçekten bulunan bezel köşeleri,
 # kamera başına bellekte tutulur. Neden gerekli: kalibrasyon anındaki
 # REFERANS köşeler sabit ama bezel HER karede yeniden aranıyor — tek bir
@@ -618,7 +628,7 @@ async def _rule_engine_loop():
     while True:
         try:
             stm32_status = bridge.get_status()
-            feed_totalizer.update(stm32_status)
+            feed_totalizer.update(stm32_status, step_dir=_last_step_dir)
 
             rules = rules_store.get_rules()
             if rules:
@@ -769,6 +779,12 @@ class StepCommand(BaseModel):
 
 @app.post("/motor/step")
 def motor_step(c: StepCommand):
+    global _last_step_dir
+    # feed_totalizer'ın yön-farkındalıklı sayabilmesi için (bkz. _last_step_dir
+    # yorumu) — komut STM32'ye gönderilemese bile (bağlı değil vb.) burada
+    # tutulan "niyet edilen yön" zararsız (encoder zaten hareket etmediği için
+    # totalizer'da hiçbir delta oluşmaz, yanlış bir şey sayılmaz).
+    _last_step_dir = c.dir
     # send_command artık {"sent","raw_command","command","raw_reply","reply","timed_out"}
     # döndürüyor — UI hem gönderdiğimiz ham komutu hem STM32'nin ok/err yanıtını gösterebilsin diye.
     return bridge.send_command({"cmd": "step", "dir": c.dir, "delay": c.delay, "steps": c.steps, "accel": c.accel})
@@ -917,7 +933,7 @@ def motor_feed_start(c: FeedStartCommand):
     yan etki — bu yüzden ikisi de ÖNCE hesaplanıp doğrulanıyor, donanıma
     hiçbir şey gönderilmeden 400 ile reddedilebiliyor.
     """
-    global _sync_watcher_task
+    global _sync_watcher_task, _last_step_dir
 
     if c.dc_dir not in ("forward", "backward"):
         raise HTTPException(
@@ -950,6 +966,10 @@ def motor_feed_start(c: FeedStartCommand):
     # devreye girmez (24-09-2026 sahada gözlemlendi). Diğer ValueError
     # yakalama deseniyle tutarlı olacak şekilde 502 + açıklamalı detail'e
     # çevriliyor.
+    # feed_totalizer'ın yön-farkındalıklı sayabilmesi için (bkz. _last_step_dir
+    # yorumu, /motor/step ile AYNI desen) — dönüşümler zaten geçerli, komut
+    # gönderilmeden hemen önce set ediliyor.
+    _last_step_dir = c.dir
     try:
         step_result = bridge.send_command(
             {
@@ -1144,7 +1164,9 @@ def journal_today(lines: int = 200):
 @app.get("/feed-total/today")
 def feed_total_today():
     """Bugünün toplam besleme miktarı özeti (mm) — headline rakam
-    total_mm_average, ayrıca e1/e2 ayrı ayrı + uyuşmazlık uyarısı."""
+    total_mm_average (29-09-2026'dan beri NET: ileri-geri fark, iki encoder
+    ortalaması), ayrıca e1/e2 ayrı ayrı NET + ham ileri/geri ayrımı
+    (total_forward_mm_*/total_backward_mm_*) + uyuşmazlık uyarısı."""
     return feed_totalizer.get_summary()
 
 

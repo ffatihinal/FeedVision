@@ -62,6 +62,7 @@
       padding: 8px; font-size: 14px; border-radius: 6px; border: 1px solid #444;
       background: #111; color: #eee; width: 90px;
     }
+    .row-group input:disabled { opacity: .4; cursor: not-allowed; }
     button {
       padding: 10px 16px; font-size: 14px; border-radius: 8px; border: none;
       background: #333; color: #eee; cursor: pointer;
@@ -113,6 +114,12 @@
     #feed-start-result { font-size: 13px; color: #aaa; margin-top: 8px; white-space: pre-wrap; }
     #feed-start-result.error { color: #f66; }
     #feed-start-result.success { color: #9d9; }
+    /* 29-09-2026 (Madde 6): acil-durdurma hissi — daha büyük/kırmızı, mantığı DEĞİŞMEDİ. */
+    #feed-start-stop-btn {
+      padding: 16px 26px; font-size: 18px; font-weight: 800;
+      background: #c0392b; color: #fff;
+    }
+    #feed-start-stop-btn:active { background: #922b21; }
   </style>
 </head>
 <body>
@@ -153,24 +160,28 @@
     <h2>Besleme Başlat</h2>
     <div class="row-group">
       <label>Step Yön:</label>
-      <select id="feed-step-dir"><option value="1">1</option><option value="0">0</option></select>
+      <select id="feed-step-dir"><option value="1">Geri</option><option value="0">İleri</option></select>
       <label>Hız (mm/s):</label>
       <input id="feed-speed" type="number" value="1" min="0.1" step="0.001">
       <label>Mesafe (mm):</label>
       <input id="feed-distance" type="number" value="50" min="0.1" step="0.1">
       <label>İvme (mm/s²):</label>
-      <input id="feed-accel" type="number" value="0" min="0" step="0.1">
+      <input id="feed-accel" type="number" value="0" min="0" step="0.1" disabled>
+      <label style="display:flex;align-items:center;gap:4px;">
+        <input type="checkbox" id="feed-accel-enable" onchange="toggleFeedAccelEnabled()">
+        İvme kullan
+      </label>
     </div>
     <div class="row-group">
       <label>DC Yön:</label>
-      <select id="feed-dc-dir"><option value="forward">İleri</option><option value="backward">Geri</option></select>
+      <select id="feed-dc-dir"><option value="forward">Saat Yönü</option><option value="backward">Saat Yönünün Tersi</option></select>
       <label>DC Hız (RPM):</label>
       <input id="feed-rpm" type="number" value="10" min="0.1" step="0.1">
       <button id="feed-start-btn" onclick="sendFeedStart()">Besleme Başlat</button>
       <!-- 24-09-2026 eklendi (Madde 3, saha bulgusu): panelin yakınında
            kısayol — aşağıdaki büyük DURDUR ile AYNI fonksiyonu (emergencyStop,
            step+DC birlikte) çağırıyor, yeni bir endpoint/mantık yok. -->
-      <button onclick="emergencyStop()">Dur</button>
+      <button id="feed-start-stop-btn" onclick="emergencyStop()">Dur</button>
     </div>
     <div id="feed-start-result"></div>
   </div>
@@ -180,7 +191,7 @@
     <h2>Step Motor</h2>
     <div class="row-group">
       <label>Yön:</label>
-      <select id="step-dir"><option value="1">1</option><option value="0">0</option></select>
+      <select id="step-dir"><option value="1">Geri</option><option value="0">İleri</option></select>
       <label>Gecikme (µs):</label>
       <input id="step-delay" type="number" value="500" min="1">
       <label>Adım:</label>
@@ -214,8 +225,8 @@
         oninput="document.getElementById('dc-speed-val').textContent = this.value">
     </div>
     <div class="row-group">
-      <button onclick="sendDc('forward', 'İleri')">İleri</button>
-      <button onclick="sendDc('backward', 'Geri')">Geri</button>
+      <button onclick="sendDc('forward', 'Saat Yönü')">Saat Yönü</button>
+      <button onclick="sendDc('backward', 'Saat Yönünün Tersi')">Saat Yönünün Tersi</button>
       <button onclick="sendDc('stop', 'Dur')">Dur</button>
     </div>
   </div>
@@ -236,6 +247,9 @@
     <div class="row-group">
       <button onclick="resetEncoders()">Encoder'ları Sıfırla</button>
     </div>
+    <!-- 29-09-2026 eklendi: sadece en son başarılı Besleme Başlat çağrısından
+         sonra dolar (bkz. sendFeedStart -> renderFeedSpeedInfo, shared.js). -->
+    <div id="feed-speed-info" style="font-size:12.5px;color:#888;margin-top:6px"></div>
   </div>
 
   <!-- 8) Kameralar -->
@@ -398,7 +412,11 @@
       const dir = parseInt(document.getElementById("feed-step-dir").value);
       const speed_mms = Number(document.getElementById("feed-speed").value);
       const distance_mm = Number(document.getElementById("feed-distance").value);
-      const accel_mms2 = Number(document.getElementById("feed-accel").value) || 0;
+      // İvme tik'i işaretli değilse input disabled olsa da değerini OKUMUYORUZ,
+      // her zaman 0 gönderiyoruz (backend accel_mms2<=0 => rampasız yorumluyor).
+      const accel_mms2 = document.getElementById("feed-accel-enable").checked
+        ? Number(document.getElementById("feed-accel").value) || 0
+        : 0;
       const dc_dir = document.getElementById("feed-dc-dir").value;
       const rpm = Number(document.getElementById("feed-rpm").value);
       if (!(speed_mms > 0) || !(distance_mm > 0) || !(rpm > 0)) {
@@ -436,9 +454,10 @@
       const sc = data.step_calc, dc = data.dc_calc;
       renderFeedStartResult(
         `Başlatıldı — step: ${sc.steps} adım, ${sc.delay_us}µs gecikme, ${sc.accel_steps} adım rampa | ` +
-        `DC: %${dc.duty} duty (${dc_dir === "forward" ? "ileri" : "geri"}). Step bitince DC otomatik duracak.`,
+        `DC: %${dc.duty} duty (${dc_dir === "forward" ? "saat yönü" : "saat yönünün tersi"}). Step bitince DC otomatik duracak.`,
         false,
       );
+      renderFeedSpeedInfo("feed-speed-info", speed_mms, sc);
       logToConsole("Besleme Başlat", "POST /motor/feed-start",
         `steps=${sc.steps} delay_us=${sc.delay_us} accel_steps=${sc.accel_steps} duty=${dc.duty}`, false);
     }
