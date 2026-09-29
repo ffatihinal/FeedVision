@@ -98,7 +98,7 @@
 <body>
 
   <button id="home-btn" onclick="location.href='/'">← Ana Ekran</button>
-  <button id="back-btn" onclick="exitFullscreen()">&larr; Grid'e Dön</button>
+  <button id="back-btn" onclick="exitFullscreenView()">&larr; Grid'e Dön</button>
 
   <div class="wall-grid" id="wall-grid">
 
@@ -190,7 +190,11 @@
       if (cellId === "cell-ui") loadUiFrame();
     }
 
-    function exitFullscreen() {
+    // Adi bilerek "exitFullscreen" DEGIL — Document.prototype.exitFullscreen ile
+    // ayni isim, inline onclick="" niteligi document/window scope zincirinde
+    // yerlesik olani once buluyordu, kendi fonksiyonumuz hic calismiyordu
+    // (29-09 saha bulgusu: "Grid'e Don" butonu tikleniyor ama hicbir sey olmuyordu).
+    function exitFullscreenView() {
       document.body.classList.remove("fullscreen-mode");
       document.querySelectorAll(".cell").forEach((c) => c.classList.remove("active"));
       unloadUiFrame();
@@ -198,7 +202,7 @@
 
     // TV uzaktan kumandalarında "geri" tuşu genelde Escape olarak gelir.
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && document.body.classList.contains("fullscreen-mode")) exitFullscreen();
+      if (e.key === "Escape" && document.body.classList.contains("fullscreen-mode")) exitFullscreenView();
     });
   </script>
 </body>
