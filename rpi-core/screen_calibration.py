@@ -243,3 +243,91 @@ def warp_roi_quad(roi: tuple[int, int, int, int], matrix: np.ndarray) -> np.ndar
         dtype=np.float32,
     ).reshape(-1, 1, 2)
     return cv2.perspectiveTransform(corners, matrix).reshape(4, 2)
+
+
+# ==========================================================================
+# ALTERNATİF referans kaynağı — sabit UI şablonu (template) eşleştirme
+# (2026-09-29, Fatih'in fikri: bezel köşe tespiti parlama/glare altında
+# güvenilmez olabiliyor — ekranın KENDİ sabit arayüz elemanları, ör. üstteki
+# "AMAZEMET" logosunun "AM" harfleri ya da dişli ikonu, çalışma sırasında
+# hiç değişmiyor ve daha kontrastlı/öngörülebilir bir hedef olabilir).
+#
+# Bezel yöntemine (detect_screen_corners) DOKUNULMADI — bu tamamen ayrı,
+# opsiyonel bir yol. main.py/Admin tarafında hangisinin kullanılacağı
+# (birincil/fallback) ayrıca seçilebilir hale getirilecek (bkz. backlog).
+# ==========================================================================
+
+# TM_CCOEFF_NORMED skoru bu eşiğin altındaysa "eşleşme yok" sayılır — şablon
+# hiç bulunamadı ya da yanlış yerde bir şeye rastlandı (glare/obstrüksiyon).
+# 0.6 pratik bir başlangıç değeri; gerçek şablon görüntüleriyle (saha
+# fotoğrafları) kalibre edilecek.
+TEMPLATE_MATCH_MIN_CONFIDENCE = 0.6
+
+
+def find_template_anchor(
+    frame: np.ndarray,
+    template: np.ndarray,
+    min_confidence: float = TEMPLATE_MATCH_MIN_CONFIDENCE,
+) -> tuple[float, float] | None:
+    """Küçük, sabit bir UI şablonunun (ör. logonun kırpılmış hali) şimdiki
+    karedeki en olası konumunu (üst-sol köşe piksel koordinatı) bulur.
+
+    cv2.matchTemplate (TM_CCOEFF_NORMED) kullanılır — normalize edilmiş
+    çapraz korelasyon, ışık/parlaklık değişiminden (glare dahil, kısmen)
+    mutlak fark tabanlı yöntemlere göre daha az etkilenir.
+
+    Döner: (x, y) şablonun sol-üst köşesi ya da eşleşme güveni
+    min_confidence altındaysa None ("bulunamadı" — çağıran taraf hatalı
+    bir konumu sessizce kullanmak yerine bunu açıkça ele almalı, tıpkı
+    detect_screen_corners'ın None dönüşü gibi).
+    """
+    if frame is None or frame.size == 0 or template is None or template.size == 0:
+        return None
+    if template.shape[0] > frame.shape[0] or template.shape[1] > frame.shape[1]:
+        return None
+    result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+    if max_val < min_confidence:
+        return None
+    return (float(max_loc[0]), float(max_loc[1]))
+
+
+def compute_warp_matrix_from_anchors(
+    reference_points: np.ndarray, current_points: np.ndarray
+) -> np.ndarray | None:
+    """1 veya daha fazla eşleşen (referans_konum -> şimdiki_konum) nokta
+    çiftinden, compute_warp_matrix ile AYNI 3x3 formatta (cv2.perspectiveTransform
+    ile uyumlu) bir dönüşüm matrisi üretir — böylece warp_roi_quad/crop_roi_quad
+    altyapısı DEĞİŞTİRİLMEDEN, sadece matrisin kaynağı değişmiş olur.
+
+    Neden tam homografi değil: sabit ikonlar/metin blokları ekranın 4 gerçek
+    köşesini vermez, sadece birkaç ayrı nokta verir — homografi (perspektif)
+    en az 4 nokta ister ve azlıkta aşırı belirsiz/kararsız sonuç üretir. Bunun
+    yerine BENZERLİK dönüşümü (öteleme + dönme + tekdüze ölçek) tahmin edilir
+    — kamera zaten sabit monte edilmiş, beklenen kayma küçük titreşim/hafif
+    döngü; tam perspektif çarpıklık senaryosu bezel yöntemiyle ele alınıyor.
+
+    1 nokta verilirse SADECE öteleme varsayılır (dönme/ölçek yok) — pratikte
+    "tek sabit ikon görünüyor" durumunda en azından kaba bir kayma telafisi
+    sağlar, hiç düzeltme yapmamaktan iyidir.
+
+    2+ nokta verilirse cv2.estimateAffinePartial2D (RANSAC benzeri, aykırı
+    noktalara karşı dayanıklı) ile döndürme+ölçek+öteleme tahmin edilir.
+
+    Döner: 3x3 float32 matris, ya da yetersiz/tutarsız veri varsa (nokta
+    sayısı 0 ya da eşleşmiyor, ya da affine tahmini başarısız) None.
+    """
+    ref = np.asarray(reference_points, dtype=np.float32).reshape(-1, 2)
+    cur = np.asarray(current_points, dtype=np.float32).reshape(-1, 2)
+    if len(ref) == 0 or len(ref) != len(cur):
+        return None
+
+    if len(ref) == 1:
+        dx, dy = (cur[0] - ref[0]).tolist()
+        affine = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+    else:
+        affine, _inliers = cv2.estimateAffinePartial2D(ref, cur)
+        if affine is None:
+            return None
+
+    return np.vstack([affine, [0.0, 0.0, 1.0]]).astype(np.float32)

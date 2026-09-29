@@ -11,7 +11,9 @@ import pytest
 
 from screen_calibration import (
     compute_warp_matrix,
+    compute_warp_matrix_from_anchors,
     detect_screen_corners,
+    find_template_anchor,
     order_points,
     warp_roi_quad,
     warp_roi_rect,
@@ -154,3 +156,87 @@ class TestWarpRoiQuad:
         assert y == pytest.approx(float(np.min(quad[:, 1])), abs=1)
         assert x + w == pytest.approx(float(np.max(quad[:, 0])), abs=1)
         assert y + h == pytest.approx(float(np.max(quad[:, 1])), abs=1)
+
+
+class TestFindTemplateAnchor:
+    """find_template_anchor — bezel köşe tespitine ALTERNATİF referans
+    kaynağı (glare altında sabit bir UI ikonu/metin bloğunu bulmak için).
+
+    NOT: TM_CCOEFF_NORMED, DÜZ (tek renk, sıfır varyanslı) bir şablonla
+    tanımsız/sıfır sonuç üretir — gerçek kullanımda da şablon zaten gerçek
+    bir ikon/logo kırpması (dokulu) olacağı için testler de dokulu (iç içe
+    iki renkli) bir marker kullanıyor, düz kare değil.
+    """
+
+    def _frame_with_marker(self, size=200, marker_pos=(80, 60), marker_size=20):
+        """Dokulu (iç içe siyah çerçeve + beyaz merkez) bir marker çizer —
+        gerçek bir logo/ikonun basit bir temsilidir, düz tek renk DEĞİL."""
+        frame = np.full((size, size, 3), 128, dtype=np.uint8)
+        x, y = marker_pos
+        frame[y : y + marker_size, x : x + marker_size] = (0, 0, 0)
+        inner = marker_size // 4
+        frame[
+            y + inner : y + marker_size - inner, x + inner : x + marker_size - inner
+        ] = (255, 255, 255)
+        return frame
+
+    def test_finds_marker_at_known_position(self):
+        frame = self._frame_with_marker(marker_pos=(80, 60))
+        template = frame[60:80, 80:100].copy()
+        result = find_template_anchor(frame, template)
+        assert result is not None
+        x, y = result
+        assert x == pytest.approx(80, abs=1)
+        assert y == pytest.approx(60, abs=1)
+
+    def test_no_match_returns_none_below_confidence(self):
+        # Şablon frame'de hiç olmayan, tamamen farklı dokulu bir görüntü.
+        frame = self._frame_with_marker(marker_pos=(80, 60))
+        rng = np.random.default_rng(42)
+        template = rng.integers(0, 255, size=(20, 20, 3), dtype=np.uint8)
+        result = find_template_anchor(frame, template, min_confidence=0.9)
+        assert result is None
+
+    def test_template_larger_than_frame_returns_none(self):
+        frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        template = np.zeros((20, 20, 3), dtype=np.uint8)
+        assert find_template_anchor(frame, template) is None
+
+    def test_none_inputs_return_none(self):
+        assert find_template_anchor(None, np.zeros((5, 5, 3), dtype=np.uint8)) is None
+        assert find_template_anchor(np.zeros((5, 5, 3), dtype=np.uint8), None) is None
+
+
+class TestComputeWarpMatrixFromAnchors:
+    """compute_warp_matrix_from_anchors — anchor noktalarından (1 ya da daha
+    fazla) compute_warp_matrix ile UYUMLU 3x3 matris üretir."""
+
+    def test_single_anchor_translation_only(self):
+        ref = [[50.0, 50.0]]
+        cur = [[60.0, 45.0]]
+        matrix = compute_warp_matrix_from_anchors(ref, cur)
+        assert matrix is not None
+        assert matrix.shape == (3, 3)
+        roi = (10, 10, 20, 20)
+        quad = warp_roi_quad(roi, matrix)
+        expected = np.array([[20, 5], [40, 5], [40, 25], [20, 25]], dtype=np.float32)
+        np.testing.assert_allclose(quad, expected, atol=1)
+
+    def test_two_anchors_estimate_rigid_transform(self):
+        # İki referans nokta, şimdiki karede aynı (10, 5) ötelemeyle bulunmuş.
+        ref = [[0.0, 0.0], [100.0, 0.0]]
+        cur = [[10.0, 5.0], [110.0, 5.0]]
+        matrix = compute_warp_matrix_from_anchors(ref, cur)
+        assert matrix is not None
+        roi = (10, 10, 20, 20)
+        x, y, w, h = warp_roi_rect(roi, matrix)
+        assert x == pytest.approx(20, abs=1)
+        assert y == pytest.approx(15, abs=1)
+        assert w == pytest.approx(20, abs=1)
+        assert h == pytest.approx(20, abs=1)
+
+    def test_mismatched_point_counts_returns_none(self):
+        assert compute_warp_matrix_from_anchors([[0, 0]], [[0, 0], [1, 1]]) is None
+
+    def test_empty_points_returns_none(self):
+        assert compute_warp_matrix_from_anchors([], []) is None
