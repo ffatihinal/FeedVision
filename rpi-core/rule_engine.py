@@ -34,28 +34,39 @@ from typing import Any
 @dataclass
 class RuleViolation:
     """Bir kriterin ihlal edildiği anki bilgisi — UI banner'ı ve motor
-    durdurma kararı bu nesneden besleniyor."""
+    durdurma kararı bu nesneden besleniyor.
+
+    İki farklı ihlal türünü kapsar (29-09-2026 fail-safe düzeltmesi):
+    - "aralık dışı": value gerçek bir sayı, min/max karşılaştırmasıyla bulundu.
+    - "okunamadı": stop_motor=True bir kriterin değeri hiç okunamadı (ROI
+      kamerayla kapatıldı, STM32 durum satırı hiç gelmedi vb.) — value None,
+      error alanı neden okunamadığını taşır. Fail-safe prensip: "değeri
+      doğrulayamıyorum" durumu "değer aralık dışı" kadar ciddi bir güvenlik
+      durumu, bu yüzden bu da bir ihlal (bkz. modül docstring'i)."""
 
     rule_id: str
     rule_name: str
-    value: float
+    value: float | None
     min: float | None
     max: float | None
     stop_motor: bool
     source_label: str  # ör. "ui_screen / basinc" ya da "stm / bağlantı" — kullanıcıya gösterilecek kısa açıklama
     alarm_sound: str | None = None  # ui/alarm_sounds/ icindeki dosya adi, yoksa None (UI ton fallback'ine düşer)
+    error: str | None = None  # sadece "okunamadı" turu ihlallerde dolu — value=None ile birlikte gelir
 
 
 @dataclass
 class RuleEvalSkipped:
-    """Bir kriter DEĞERLENDİRİLEMEDİ (ihlal değil) — ör. OCR metni sayıya
-    çevrilemedi, ya da STM32'den henüz hiç durum satırı gelmedi.
+    """Bir kriter DEĞERLENDİRİLEMEDİ ve bu kriterin stop_motor=False olduğu
+    için ihlal SAYILMADI — ör. alarm-only bir OCR kriterinin metni sayıya
+    çevrilemedi.
 
-    Neden ihlal SAYILMIYOR: okunamayan bir değeri "aralık dışı" sanıp motoru
-    durdurmak, gerçek bir arızadan daha kötü bir yanlış pozitif olurdu (bkz.
-    proje notu: "sessizce hatalı veri üretmek, hiç okumamaktan daha kötü").
-    Bunun yerine ayrı bir "okunamadı" listesi olarak taşınır, operatör
-    görebilir ama motor durmaz.
+    Bu sadece bilgi amaçlıdır, motor kararını etkilemez. stop_motor=True
+    olan kriterler için aynı "okunamadı" durumu artık burada değil,
+    RuleViolation olarak violations listesinde görünür (29-09-2026 fail-safe
+    düzeltmesi — bkz. RuleViolation docstring'i): stop_motor=True bir
+    kriterde okunamama, motoru durdurmayı gerektirecek kadar ciddi kabul
+    edilir, "bilgilendirme" değildir.
     """
 
     rule_id: str
@@ -144,8 +155,10 @@ def evaluate_rules(
     docstring'indeki kapsam kararı).
 
     Döner: (ihlaller, atlananlar). İhlaller motor durdurma + alarm için
-    kullanılır; atlananlar sadece bilgi amaçlı (operatöre "şu kriter şu an
-    okunamıyor" göstermek için) — motor kararını ETKİLEMEZ.
+    kullanılır. Atlananlar SADECE stop_motor=False kriterleri içerir (bilgi
+    amaçlı, motor kararını etkilemez) — stop_motor=True bir kriter
+    okunamazsa artık atlanmıyor, fail-safe olarak violations'a giriyor (bkz.
+    RuleViolation docstring'i, 29-09-2026 düzeltmesi).
     """
     del stm32_status  # bkz. docstring — su an kullanilmiyor, imza uyumu icin duruyor
     stm32_meta = stm32_meta or {}
@@ -171,8 +184,28 @@ def evaluate_rules(
             value, error = None, f"Bilinmeyen kriter kaynağı: {source!r}"
             min_v = max_v = None
 
+        stop_motor = bool(rule.get("stop_motor", False))
+
         if value is None:
-            skipped.append(RuleEvalSkipped(rule_id=rule_id, rule_name=rule_name, reason=error or "bilinmeyen hata"))
+            if stop_motor:
+                # Fail-safe: değeri doğrulayamıyoruz ve bu kriter motoru
+                # durdurmakla görevli — "okunamadı" durumu "aralık dışı"
+                # kadar ciddi kabul edilir, sessizce atlanmaz.
+                violations.append(
+                    RuleViolation(
+                        rule_id=rule_id,
+                        rule_name=rule_name,
+                        value=None,
+                        min=min_v,
+                        max=max_v,
+                        stop_motor=True,
+                        source_label=_source_label(rule),
+                        alarm_sound=rule.get("alarm_sound"),
+                        error=error or "bilinmeyen hata",
+                    )
+                )
+            else:
+                skipped.append(RuleEvalSkipped(rule_id=rule_id, rule_name=rule_name, reason=error or "bilinmeyen hata"))
             continue
 
         out_of_range = (min_v is not None and value < min_v) or (max_v is not None and value > max_v)
@@ -184,7 +217,7 @@ def evaluate_rules(
                     value=value,
                     min=min_v,
                     max=max_v,
-                    stop_motor=bool(rule.get("stop_motor", False)),
+                    stop_motor=stop_motor,
                     source_label=_source_label(rule),
                     alarm_sound=rule.get("alarm_sound"),
                 )

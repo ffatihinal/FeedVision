@@ -175,12 +175,10 @@ function logRuleViolationTransitions(violations) {
   const current = new Map(violations.filter((v) => v.stop_motor).map((v) => [v.rule_id, v]));
   for (const [ruleId, v] of current) {
     if (!activeStopViolations.has(ruleId)) {
-      logToConsole(
-        v.rule_name,
-        `Kontrol Kriteri (${v.source_label})`,
-        `⚠ Aralık dışı (${v.value}, izin verilen [${v.min ?? "-"}, ${v.max ?? "-"}]) — motor durduruldu`,
-        true,
-      );
+      const detail = v.error
+        ? `⚠ Değer okunamadı (${v.error}) — motor durduruldu`
+        : `⚠ Aralık dışı (${v.value}, izin verilen [${v.min ?? "-"}, ${v.max ?? "-"}]) — motor durduruldu`;
+      logToConsole(v.rule_name, `Kontrol Kriteri (${v.source_label})`, detail, true);
     }
   }
   for (const [ruleId, v] of activeStopViolations) {
@@ -203,6 +201,9 @@ function renderRuleAlarm(violations, skipped) {
     // hangi değerin aralık dışına çıktığı + motor durduruldu mu.
     const lines = violations.map((v) => {
       const stopNote = v.stop_motor ? " — MOTOR DURDURULDU" : "";
+      if (v.error) {
+        return `${v.rule_name} (${v.source_label}): DEĞER OKUNAMADI — ${v.error}${stopNote}`;
+      }
       return `${v.rule_name} (${v.source_label}): ${v.value} — izin verilen [${v.min ?? "-"}, ${v.max ?? "-"}]${stopNote}`;
     });
     banner.textContent = "⚠ " + lines.join("  |  ");

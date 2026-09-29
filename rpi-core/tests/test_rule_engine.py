@@ -241,3 +241,137 @@ class TestEvaluateRules:
         assert violations == []
         assert len(skipped) == 1
         assert "Bilinmeyen kriter kaynağı" in skipped[0].reason
+
+
+# ---------------------------------------------------------------------------
+# Fail-safe: stop_motor=True kriter okunamazsa ihlal sayılmalı (29-09-2026,
+# sahada teyit edilen güvenlik bug'ı — kamera önü elle kapatıldığında motor
+# durmuyordu)
+# ---------------------------------------------------------------------------
+
+class TestFailSafeUnreadableStopMotorRule:
+    def test_roi_unreadable_with_stop_motor_true_is_a_violation(self):
+        # Senaryo 1: ROI okunamıyor (kamera önü kapalı) + stop_motor=True
+        # -> artık skipped değil, violations'da — motor durmalı.
+        rules = [
+            {
+                "id": "r1",
+                "name": "Basınç",
+                "source": "roi",
+                "cam_id": "ui_screen",
+                "roi_name": "basinc",
+                "min": 2,
+                "max": 6,
+                "stop_motor": True,
+            }
+        ]
+        violations, skipped = evaluate_rules(rules, {}, {})
+        assert skipped == []
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.rule_id == "r1"
+        assert v.value is None
+        assert v.stop_motor is True
+        assert v.error is not None and "okunmadı" in v.error
+
+    def test_roi_unreadable_with_stop_motor_false_is_skipped_not_violated(self):
+        # Senaryo 2: aynı okunamama durumu ama stop_motor=False -> davranış
+        # AYNI kalmalı, hâlâ sadece skipped (bilgilendirme amaçlı).
+        rules = [
+            {
+                "id": "r1",
+                "name": "Basınç (alarm-only)",
+                "source": "roi",
+                "cam_id": "ui_screen",
+                "roi_name": "basinc",
+                "min": 2,
+                "max": 6,
+                "stop_motor": False,
+            }
+        ]
+        violations, skipped = evaluate_rules(rules, {}, {})
+        assert violations == []
+        assert len(skipped) == 1
+        assert skipped[0].rule_id == "r1"
+
+    def test_roi_readable_in_range_with_stop_motor_true_no_violation(self):
+        # Senaryo 3: normal okunuyor, aralık içinde -> regresyon olmamalı,
+        # ne violation ne skip.
+        rules = [
+            {
+                "id": "r1",
+                "name": "Basınç",
+                "source": "roi",
+                "cam_id": "ui_screen",
+                "roi_name": "basinc",
+                "min": 2,
+                "max": 6,
+                "stop_motor": True,
+            }
+        ]
+        readings = {("ui_screen", "basinc"): {"text": "4.0"}}
+        violations, skipped = evaluate_rules(rules, readings, {})
+        assert violations == []
+        assert skipped == []
+
+    def test_roi_readable_out_of_range_with_stop_motor_true_violation_has_no_error(self):
+        # Senaryo 4: "aralık dışı" ihlali "okunamadı" mesajıyla karışmamalı —
+        # value dolu, error None kalmalı (regresyon olmasın).
+        rules = [
+            {
+                "id": "r1",
+                "name": "Basınç",
+                "source": "roi",
+                "cam_id": "ui_screen",
+                "roi_name": "basinc",
+                "min": 2,
+                "max": 6,
+                "stop_motor": True,
+            }
+        ]
+        readings = {("ui_screen", "basinc"): {"text": "7.5"}}
+        violations, skipped = evaluate_rules(rules, readings, {})
+        assert skipped == []
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.value == 7.5
+        assert v.error is None
+        assert v.stop_motor is True
+
+    def test_stm_no_status_yet_with_stop_motor_true_is_a_violation(self):
+        # Senaryo 5: STM32'den hiç durum gelmemiş (_evaluate_stm_rule de aynı
+        # value is None yoluna giriyor) + stop_motor=True -> ihlal, motor durmalı.
+        rules = [
+            {
+                "id": "r2",
+                "name": "STM Bağlantı",
+                "source": "stm",
+                "timeout_s": 5,
+                "stop_motor": True,
+            }
+        ]
+        stm32_meta = {"is_connected": True, "status_age_s": None}
+        violations, skipped = evaluate_rules(rules, {}, {}, stm32_meta)
+        assert skipped == []
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.value is None
+        assert v.stop_motor is True
+        assert v.error is not None and "durum satırı gelmedi" in v.error
+
+    def test_stm_no_status_yet_with_stop_motor_false_is_skipped(self):
+        # Aynı STM senaryosu ama stop_motor=False -> davranış AYNI kalmalı.
+        rules = [
+            {
+                "id": "r2",
+                "name": "STM Bağlantı (alarm-only)",
+                "source": "stm",
+                "timeout_s": 5,
+                "stop_motor": False,
+            }
+        ]
+        stm32_meta = {"is_connected": True, "status_age_s": None}
+        violations, skipped = evaluate_rules(rules, {}, {}, stm32_meta)
+        assert violations == []
+        assert len(skipped) == 1
+        assert skipped[0].rule_id == "r2"
