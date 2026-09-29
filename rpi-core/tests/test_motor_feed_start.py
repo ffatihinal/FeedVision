@@ -296,13 +296,23 @@ class TestSuccessPath:
             main.motor_feed_start(cmd)
             first_task = main._sync_watcher_task
 
-            # DİKKAT: iki motor_feed_start() çağrısı arasında hiç `await` yok,
-            # yani event loop'un ilk task'ı bir kez bile ÇALIŞTIRMAYA fırsatı
-            # olmuyor — cancel() isteği task hiç başlamadan işleniyor (aynı
-            # davranış run_coroutine_threadsafe'in döndürdüğü Future için de
-            # geçerli: henüz zincirlenmeden cancel edilirse gövde hiç
-            # yürütülmez). Bu yüzden blocking_watcher'a SADECE ikinci (aktif
-            # kalan) task'ın değeri düşecek.
+            # DİKKAT (29-09-2026 düzeltildi — CI flake araştırması): iki
+            # motor_feed_start() çağrısı arasında hiç `await` yok, ama bu
+            # "ilk task'ın gövdesi kesinlikle hiç çalışmaz" GARANTİSİ vermez.
+            # run_coroutine_threadsafe iki katmanlı: gerçek asyncio.Task,
+            # call_soon_threadsafe ile kuyruğa alınan bir callback içinde
+            # (ensure_future ile) oluşturuluyor; cancel() bu callback'ten
+            # ÖNCE çağrılsa bile callback çalıştığında Task önce yaratılıp
+            # SONRA cancel ediliyor — Task'ın __step'i zaten call_soon
+            # kuyruğuna girmiş oluyor. CPython 3.11 ile 3.14 arasında bu
+            # __step'in "hiç başlamadan cancel edilmiş" sayılıp sayılmayacağı
+            # (dolayısıyla gövdenin sıfır ya da bir kez çalışması) farklı
+            # davranıyor (doğrulandı: `uv run --python 3.11` → [65.0, 65.0],
+            # yerel 3.14 → [65.0]) — resmi asyncio garantisi bu değil, sadece
+            # CPython'un iç zamanlamasına bağlı bir uygulama detayı. Asıl
+            # GARANTİ EDİLEN şey (ve bu testin asıl amacı): eski watcher'ın
+            # KESİN cancel edilmesi ve en fazla BİR kez çalışıp bloke olması
+            # (sonsuz döngüye girmemesi) — assert'ler buna göre.
             main.motor_feed_start(cmd)
             second_task = main._sync_watcher_task
 
@@ -315,7 +325,11 @@ class TestSuccessPath:
                 await asyncio.wrap_future(second_task)
 
         asyncio.run(run())
-        assert blocking_watcher == [65.0]
+        # İlk task'ın gövdesi Python sürümüne göre 0 ya da 1 kez çalışmış
+        # olabilir (yukarıdaki not), ikinci task'ın gövdesi HER ZAMAN tam
+        # bir kez çalışır — yani liste [65.0] ya da [65.0, 65.0] olmalı,
+        # başka hiçbir değer/uzunluk kabul edilemez.
+        assert blocking_watcher in ([65.0], [65.0, 65.0])
 
 
 class TestSyncWatcherAlwaysStopsDc:
