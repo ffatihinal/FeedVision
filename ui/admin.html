@@ -8,8 +8,12 @@
     h1 { font-size: 28px; }
     .cameras { display: flex; gap: 24px; flex-wrap: wrap; }
     .camera-block { flex: 1; min-width: 320px; }
-    .roi-canvas-wrap { max-width: 640px; }
-    #roi-canvas { max-width: 100%; height: auto; border: 1px solid #444; border-radius: 4px; touch-action: none; cursor: crosshair; background: #222; }
+    /* Gorev B (23-09-2026): roi-canvas-wrap artik <img> (canli MJPEG akisi) +
+       <canvas> (seffaf ROI overlay) ust uste bindirilmis konteyner - ikisi de
+       ayni CSS boyutlandirmayi paylasir ki piksel koordinatlari cakissin. */
+    .roi-canvas-wrap { position: relative; max-width: 640px; aspect-ratio: 1280 / 720; border: 1px solid #444; border-radius: 4px; background: #222; overflow: hidden; }
+    #roi-stream-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; }
+    #roi-canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; background: transparent; }
     #roi-list { list-style: none; padding: 0; margin: 0; }
     #roi-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid #292929; font-size: 14px; }
     #roi-list li button { font-size: 13px; padding: 4px 10px; margin: 0; background: #a33; }
@@ -254,17 +258,18 @@
   <div class="panel" id="ui-screen-roi-panel">
     <h2>UI Screen Camera — ROI Yönetimi</h2>
     <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
-      Görüntü üzerinde tıkla-sürükle ile dikdörtgen çiz, isim ver. "Kaydet" ile kalıcı yapılır.
+      Görüntü canlı akıyor — üzerinde tıkla-sürükle ile dikdörtgen çiz, isim ver ve tip seç. "Kaydet" ile kalıcı yapılır.
     </div>
     <div style="display:flex; gap:24px; flex-wrap:wrap;">
       <div class="roi-canvas-wrap">
+        <img id="roi-stream-img" alt="UI Screen Camera canlı akış">
         <canvas id="roi-canvas" width="1280" height="720"></canvas>
-        <div style="margin-top:8px;">
-          <button onclick="refreshRoiSnapshot()">Yenile</button>
-          <button onclick="saveRois()">Kaydet</button>
-        </div>
       </div>
       <div style="min-width:220px; flex:1;">
+        <div style="margin-bottom:10px;">
+          <button onclick="toggleRoiStream()" id="roi-stream-toggle-btn">Canlı Yayını Başlat</button>
+          <button onclick="saveRois()">Kaydet</button>
+        </div>
         <h3 style="margin-top:0; font-size:15px;">Tanımlı ROI'ler</h3>
         <ul id="roi-list"><li style="border:none; color:#888;">Henüz ROI yok.</li></ul>
       </div>
@@ -278,7 +283,34 @@
       <span id="calibration-status" style="color:#888; font-size:13px;">Kalibrasyon durumu yükleniyor…</span>
     </div>
     <hr style="border-color:#292929; margin:16px 0;">
-    <button onclick="readTestUiScreen()">UI Screen Camera Ekranını Oku (Test)</button>
+    <!-- Gorev D (23-09-2026): manuel pozlama + CLAHE kontrast artirma -
+         SADECE UI Screen Camera icin, Chamber Camera'ya dokunmuyor. -->
+    <h3 style="font-size:15px; margin-bottom:6px;">Kamera Ayarları (Pozlama / Kontrast)</h3>
+    <div class="row-group" style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+      <label style="font-size:13px;">
+        <input type="checkbox" id="exposure-auto-toggle" checked onchange="onExposureAutoToggle()">
+        Otomatik pozlama
+      </label>
+      <label style="font-size:13px;">
+        Exposure Time (µs):
+        <input type="number" id="exposure-time-input" min="1" step="100" style="width:90px;" disabled>
+      </label>
+      <label style="font-size:13px;">
+        Gain:
+        <input type="number" id="exposure-gain-input" min="0.1" step="0.1" style="width:70px;" disabled>
+      </label>
+      <button onclick="applyExposure()">Pozlamayı Uygula</button>
+      <label style="font-size:13px;">
+        <input type="checkbox" id="clahe-toggle" onchange="applyPreprocess()">
+        Kontrast artırma (CLAHE)
+      </label>
+    </div>
+    <div id="vision-settings-status" style="color:#888; font-size:13px; margin-top:6px;">Ayarlar yükleniyor…</div>
+    <hr style="border-color:#292929; margin:16px 0;">
+    <div class="row-group">
+      <button onclick="toggleContinuousRead()" id="roi-continuous-read-btn">Sürekli Okumayı Durdur</button>
+      <span style="color:#888; font-size:12.5px;">(sayfa açıldığında otomatik başlar — Pi'yi zorlamamak için en az 300ms aralıkla okur)</span>
+    </div>
     <div id="ui-screen-read-test-result">Henüz okunmadı.</div>
   </div>
 
@@ -1057,33 +1089,34 @@
     // ortak) - "Sesli alarmı sustur" checkbox'i asagida hala var, sadece
     // shared.js'deki 'alarmMuted' global degiskenini set ediyor.
 
-    async function readTestUiScreen() {
+    // ==========================================================================
+    //  Görev C — sürekli/otomatik ROI okuma. Buton yok: sayfa açılınca
+    //  otomatik başlar, bir okuma bitince hemen bir sonraki başlar (sabit
+    //  setInterval değil — "geri kalan süre + hemen tekrar" mantığı).
+    //  RISK NOTU: OCR CPU-yoğun; sınırsız hızda çalıştırmak Pi'yi zorlayabilir,
+    //  bu yüzden pratik bir alt sınır (ROI_READ_MIN_INTERVAL_MS) var — bir
+    //  okuma bu süreden hızlı bitse bile bir sonraki bu kadar geç başlar.
+    // ==========================================================================
+    const ROI_READ_MIN_INTERVAL_MS = 300;
+    let continuousReadActive = true;
+    let continuousReadTimer = null;
+
+    function renderReadResults(data, readAt) {
       const resultBox = document.getElementById("ui-screen-read-test-result");
-      const buttonName = "UI Screen Camera Ekranını Oku (Test)";
-      const task = "GET /vision/ui_screen/read-test";
-      resultBox.textContent = "Okunuyor…";
-      let response;
-      try {
-        response = await fetch("/vision/ui_screen/read-test");
-      } catch (e) {
-        resultBox.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
-        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
-        return;
-      }
-      let data;
-      try {
-        data = await response.json();
-      } catch {
-        data = null;
-      }
-      if (!response.ok) {
-        const detail = data?.detail ?? (data ? JSON.stringify(data) : "boş yanıt");
-        resultBox.textContent = `Sunucu ${response.status}: ${detail}`;
-        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
-        return;
-      }
       const results = data.results || [];
       resultBox.textContent = "";
+
+      const timeLine = document.createElement("div");
+      timeLine.style.color = "#555";
+      timeLine.style.fontSize = "0.9em";
+      const hh = String(readAt.getHours()).padStart(2, "0");
+      const mm = String(readAt.getMinutes()).padStart(2, "0");
+      const ss = String(readAt.getSeconds()).padStart(2, "0");
+      const ms = String(readAt.getMilliseconds()).padStart(3, "0");
+      const durationText = typeof data.duration_ms === "number" ? `${data.duration_ms.toFixed(0)}ms` : "?";
+      timeLine.textContent = `Okuma zamanı: ${hh}:${mm}:${ss}.${ms}  |  İşlem süresi: ${durationText}`;
+      resultBox.appendChild(timeLine);
+
       if (data.roi_reference_uncertain) {
         // Bezel (ekran çerçevesi) bu karede bulunamadı — kaydırma telafisi
         // son bilinen köşeyle yapıldı ama gerçekten kaymış olabilir de
@@ -1095,76 +1128,126 @@
         warnLine.textContent = "⚠ ROI referansı belirsiz (ekran çerçevesi bu karede bulunamadı — ışık/açı kontrol edin).";
         resultBox.appendChild(warnLine);
       }
-      if (typeof data.duration_ms === "number") {
-        // Kare alma -> tum ROI'lerin OCR+renk okumasi bitene kadar gecen
-        // sure (network/serialize haric) — "saniyede kac kez yapabiliriz"
-        // sorusuna cevap vermek icin.
-        const durationLine = document.createElement("div");
-        durationLine.style.color = "#555";
-        durationLine.style.fontSize = "0.9em";
-        durationLine.textContent = `İşlem süresi: ${data.duration_ms.toFixed(0)}ms`;
-        resultBox.appendChild(durationLine);
-      }
       if (results.length === 0) {
         const emptyLine = document.createElement("div");
         emptyLine.textContent = "Kayıtlı ROI yok — yukarıda çizip \"Kaydet\"e basın.";
         resultBox.appendChild(emptyLine);
-      } else {
-        // ROI adı operatörün prompt() ile girdiği serbest metin — sunucudan
-        // olduğu gibi geri dönüyor. innerHTML/template-literal ile basmak
-        // stored XSS'e açık olurdu; bu yüzden DOM API + textContent
-        // kullanılıyor (hiçbir alan HTML olarak yorumlanmıyor).
-        results.forEach((r) => {
-          const [red, green, blue] = r.avg_color_rgb;
-          const line = document.createElement("div");
-          const nameEl = document.createElement("b");
-          nameEl.textContent = r.name;
-          line.appendChild(nameEl);
-          if (r.ocr_error) {
-            // OCR hic calisamadi (pytesseract/Tesseract eksik vb.) — bunu
-            // "metin bulunamadi" ile karistirmamak icin ayri, kirmizi gosterilir.
-            const errEl = document.createElement("span");
-            errEl.style.color = "#c0392b";
-            errEl.textContent = ` : OCR hatası: ${r.ocr_error}`;
-            line.appendChild(errEl);
-          } else {
-            const text = r.text || "(metin bulunamadı)";
-            line.appendChild(document.createTextNode(`: "${text}"`));
-          }
-          line.appendChild(
-            document.createTextNode(
-              `  |  RGB: (${red.toFixed(0)}, ${green.toFixed(0)}, ${blue.toFixed(0)})`
-            )
-          );
-          // Küçük renk örneği kutusu — hexe çevirip background-color olarak
-          // basıyoruz, RGB rakamlarını gözle karşılaştırmaktan daha sezgisel.
-          const toHex = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
-          const hex = `#${toHex(red)}${toHex(green)}${toHex(blue)}`;
-          const swatch = document.createElement("span");
-          swatch.style.display = "inline-block";
-          swatch.style.width = "14px";
-          swatch.style.height = "14px";
-          swatch.style.marginLeft = "6px";
-          swatch.style.verticalAlign = "middle";
-          swatch.style.border = "1px solid #888";
-          swatch.style.backgroundColor = hex;
-          swatch.title = hex;
-          line.appendChild(swatch);
-          resultBox.appendChild(line);
-        });
+        return;
       }
-      logToConsole(buttonName, task, `Sunucu 200 OK — ${results.length} ROI okundu.`, false);
+      // ROI adı operatörün prompt() ile girdiği serbest metin — sunucudan
+      // olduğu gibi geri dönüyor. innerHTML/template-literal ile basmak
+      // stored XSS'e açık olurdu; bu yüzden DOM API + textContent
+      // kullanılıyor (hiçbir alan HTML olarak yorumlanmıyor).
+      results.forEach((r) => {
+        const [red, green, blue] = r.avg_color_rgb;
+        const line = document.createElement("div");
+        const nameEl = document.createElement("b");
+        nameEl.textContent = r.name;
+        line.appendChild(nameEl);
+        if (r.kind === "boolean") {
+          // Grup 2 — durum karesi: OCR yok, sadece 0/1 (dolu/boş) gösterilir.
+          const stateEl = document.createElement("span");
+          stateEl.style.fontWeight = "bold";
+          stateEl.style.color = r.bool_state === 1 ? "#00e0a0" : "#888";
+          stateEl.textContent = ` : ${r.bool_state === 1 ? "DOLU (1)" : "BOŞ (0)"}`;
+          line.appendChild(stateEl);
+        } else if (r.ocr_error) {
+          // OCR hic calisamadi (pytesseract/Tesseract eksik vb.) — bunu
+          // "metin bulunamadi" ile karistirmamak icin ayri, kirmizi gosterilir.
+          const errEl = document.createElement("span");
+          errEl.style.color = "#c0392b";
+          errEl.textContent = ` : OCR hatası: ${r.ocr_error}`;
+          line.appendChild(errEl);
+        } else {
+          const text = r.text || "(metin bulunamadı)";
+          line.appendChild(document.createTextNode(`: "${text}"`));
+        }
+        line.appendChild(
+          document.createTextNode(
+            `  |  RGB: (${red.toFixed(0)}, ${green.toFixed(0)}, ${blue.toFixed(0)})`
+          )
+        );
+        // Küçük renk örneği kutusu — hexe çevirip background-color olarak
+        // basıyoruz, RGB rakamlarını gözle karşılaştırmaktan daha sezgisel.
+        const toHex = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+        const hex = `#${toHex(red)}${toHex(green)}${toHex(blue)}`;
+        const swatch = document.createElement("span");
+        swatch.style.display = "inline-block";
+        swatch.style.width = "14px";
+        swatch.style.height = "14px";
+        swatch.style.marginLeft = "6px";
+        swatch.style.verticalAlign = "middle";
+        swatch.style.border = "1px solid #888";
+        swatch.style.backgroundColor = hex;
+        swatch.title = hex;
+        line.appendChild(swatch);
+        resultBox.appendChild(line);
+      });
+    }
+
+    async function continuousReadLoop() {
+      if (!continuousReadActive) return;
+      const loopStartedAt = performance.now();
+      const buttonName = "UI Screen Camera Sürekli Okuma";
+      const task = "GET /vision/ui_screen/read-test";
+      try {
+        const response = await fetch("/vision/ui_screen/read-test");
+        const readAt = new Date();
+        let data = null;
+        try {
+          data = await response.json();
+        } catch {
+          data = null;
+        }
+        if (!response.ok) {
+          const detail = data?.detail ?? (data ? JSON.stringify(data) : "boş yanıt");
+          logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        } else {
+          renderReadResults(data, readAt);
+        }
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+      }
+      if (!continuousReadActive) return;
+      const elapsed = performance.now() - loopStartedAt;
+      const wait = Math.max(0, ROI_READ_MIN_INTERVAL_MS - elapsed);
+      continuousReadTimer = setTimeout(continuousReadLoop, wait);
+    }
+
+    function startContinuousRead() {
+      continuousReadActive = true;
+      document.getElementById("roi-continuous-read-btn").textContent = "Sürekli Okumayı Durdur";
+      continuousReadLoop();
+    }
+
+    function stopContinuousRead() {
+      continuousReadActive = false;
+      if (continuousReadTimer) {
+        clearTimeout(continuousReadTimer);
+        continuousReadTimer = null;
+      }
+      document.getElementById("roi-continuous-read-btn").textContent = "Sürekli Okumayı Başlat";
+    }
+
+    function toggleContinuousRead() {
+      if (continuousReadActive) {
+        stopContinuousRead();
+      } else {
+        startContinuousRead();
+      }
     }
 
     // ==========================================================================
-    //  UI SCREEN CAMERA ROI YÖNETİMİ — snapshot'ı canvas'a çizer, fare/parmakla dikdörtgen
-    //  (ROI) çizdirir, isimlendirir, GET/POST /vision/ui_screen/rois ile
-    //  yükler/kaydeder. Dikdörtgenler her zaman eksene paralel — döndürme yok.
+    //  UI SCREEN CAMERA ROI YÖNETİMİ — canlı MJPEG akışının (<img>) üzerine
+    //  konumlandırılmış şeffaf bir <canvas> overlay'e fare/parmakla dikdörtgen
+    //  (ROI) çizdirir, isimlendirir, tip (Sayısal/Durum) sorar, GET/POST
+    //  /vision/ui_screen/rois ile yükler/kaydeder. Dikdörtgenler her zaman
+    //  eksene paralel — döndürme yok.
     // ==========================================================================
     const ROI_CAM_ID = "ui_screen";
-    let roiList = [];           // {name, x, y, w, h} — orijinal kare (1280x720) koordinatlarında
-    const roiSnapshotImg = new Image();
+    let roiList = [];           // {name, x, y, w, h, kind} — orijinal kare (1280x720) koordinatlarında
     let roiDrawing = null;      // aktif çizim: {startX, startY, curX, curY}
+    let roiStreamActive = false;
 
     function roiCanvasEl() {
       return document.getElementById("roi-canvas");
@@ -1186,25 +1269,21 @@
       };
     }
 
+    // Canvas artik SADECE seffaf bir overlay — altindaki <img> (canli akis)
+    // kendi kendine surekli guncelleniyor, bu fonksiyon sadece ROI
+    // dikdortgenlerini/isimlerini cizer (Gorev B, 23-09-2026).
     function drawRoiCanvas() {
       const canvas = roiCanvasEl();
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (roiSnapshotImg.complete && roiSnapshotImg.naturalWidth) {
-        ctx.drawImage(roiSnapshotImg, 0, 0, canvas.width, canvas.height);
-      } else {
-        ctx.fillStyle = "#222";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = "#888";
-        ctx.font = "20px sans-serif";
-        ctx.fillText("Görüntü için \"Yenile\"ye basın", 20, 40);
-      }
       ctx.lineWidth = 2;
       ctx.font = "16px sans-serif";
       roiList.forEach((roi) => {
-        ctx.strokeStyle = "#00e0a0";
+        // Durum (boolean) ROI'ler sarı, sayısal ROI'ler yeşil çerçeveyle ayırt edilir.
+        const color = roi.kind === "boolean" ? "#ffcc00" : "#00e0a0";
+        ctx.strokeStyle = color;
         ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
-        ctx.fillStyle = "#00e0a0";
+        ctx.fillStyle = color;
         ctx.fillText(roi.name, roi.x + 4, roi.y + 18);
       });
       if (roiDrawing) {
@@ -1212,7 +1291,7 @@
         const y = Math.min(roiDrawing.startY, roiDrawing.curY);
         const w = Math.abs(roiDrawing.curX - roiDrawing.startX);
         const h = Math.abs(roiDrawing.curY - roiDrawing.startY);
-        ctx.strokeStyle = "#ffcc00";
+        ctx.strokeStyle = "#fff";
         ctx.strokeRect(x, y, w, h);
       }
     }
@@ -1227,7 +1306,8 @@
       roiList.forEach((roi, idx) => {
         const li = document.createElement("li");
         const label = document.createElement("span");
-        label.textContent = `${roi.name}: [${roi.x}, ${roi.y}, ${roi.w}, ${roi.h}]`;
+        const kindLabel = roi.kind === "boolean" ? "Durum" : "Sayısal";
+        label.textContent = `${roi.name} [${kindLabel}]: [${roi.x}, ${roi.y}, ${roi.w}, ${roi.h}]`;
         const delBtn = document.createElement("button");
         delBtn.textContent = "Sil";
         delBtn.onclick = () => {
@@ -1274,7 +1354,13 @@
         drawRoiCanvas();
         return;
       }
-      roiList.push({ name: name.trim(), x, y, w, h });
+      // Görev A: ROI tipi — "Sayısal" (OCR, Grup 1/3) ya da "Durum" (Grup 2 —
+      // READY/WORKING/SCAN OK/ERROR kareleri, OCR yerine parlaklık eşiği).
+      const isBoolean = confirm(
+        "Bu ROI bir DURUM karesi mi (READY/WORKING/SCAN OK/ERROR gibi dolu/boş kare)?\n\n" +
+        "Tamam = Durum (0/1)\nİptal = Sayısal (OCR ile okunur)"
+      );
+      roiList.push({ name: name.trim(), x, y, w, h, kind: isBoolean ? "boolean" : "numeric" });
       renderRoiList();
       drawRoiCanvas();
     }
@@ -1289,45 +1375,30 @@
       canvas.addEventListener("touchend", roiPointerUp, { passive: false });
     }
 
-    // UI Screen Camera'nın anlık karesini çekip canvas arka planına koyar (kamera açısı/
-    // pozisyonu değiştiyse tekrar çizmek için de kullanılır).
-    async function refreshRoiSnapshot() {
-      const buttonName = "UI Screen Camera ROI - Yenile";
-      const task = `GET /vision/${ROI_CAM_ID}/snapshot`;
-      let response;
-      try {
-        response = await fetch(`/vision/${ROI_CAM_ID}/snapshot?_=${Date.now()}`);
-      } catch (e) {
-        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
-        return;
-      }
-      if (!response.ok) {
-        let detail;
-        try {
-          const data = await response.json();
-          detail = data.detail ?? JSON.stringify(data);
-        } catch {
-          detail = await response.text();
-        }
-        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
-        return;
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      try {
-        await new Promise((resolve, reject) => {
-          roiSnapshotImg.onload = resolve;
-          roiSnapshotImg.onerror = reject;
-          roiSnapshotImg.src = url;
-        });
-      } catch {
-        logToConsole(buttonName, task, "Görüntü çözümlenemedi (bozuk JPEG).", true);
-        return;
-      } finally {
-        URL.revokeObjectURL(url);
-      }
+    // Görev B — canlı yayını başlatır/durdurur. <img>'e src verildiği sürece
+    // tarayıcı MJPEG akışını kendiliğinden güncelleştirir (ekstra JS
+    // gerekmez); overlay canvas ROI kutularını bunun ÜZERİNE çizer.
+    function startRoiStream() {
+      const img = document.getElementById("roi-stream-img");
+      img.src = `/vision/${ROI_CAM_ID}/stream?_=${Date.now()}`;
+      roiStreamActive = true;
+      document.getElementById("roi-stream-toggle-btn").textContent = "Canlı Yayını Durdur";
       drawRoiCanvas();
-      logToConsole(buttonName, task, `Kare güncellendi (${roiSnapshotImg.naturalWidth}x${roiSnapshotImg.naturalHeight}).`, false);
+    }
+
+    function stopRoiStream() {
+      const img = document.getElementById("roi-stream-img");
+      img.removeAttribute("src");
+      roiStreamActive = false;
+      document.getElementById("roi-stream-toggle-btn").textContent = "Canlı Yayını Başlat";
+    }
+
+    function toggleRoiStream() {
+      if (roiStreamActive) {
+        stopRoiStream();
+      } else {
+        startRoiStream();
+      }
     }
 
     // Sayfa açılışında kayıtlı ROI'leri sunucudan çeker (kaldığı yerden devam).
@@ -1388,6 +1459,124 @@
         return;
       }
       logToConsole(buttonName, task, `Sunucu 200 OK — ${roiList.length} ROI kaydedildi.`, false);
+    }
+
+    // ==========================================================================
+    //  Görev D — UI Screen Camera pozlama (exposure) + CLAHE kontrast ayarları.
+    //  Chamber Camera'ya kasıtlı olarak dokunulmuyor (sadece ROI_CAM_ID).
+    // ==========================================================================
+    function onExposureAutoToggle() {
+      const auto = document.getElementById("exposure-auto-toggle").checked;
+      document.getElementById("exposure-time-input").disabled = auto;
+      document.getElementById("exposure-gain-input").disabled = auto;
+    }
+
+    // Sayfa açılışında kayıtlı pozlama/CLAHE ayarlarını çeker, kontrolleri doldurur.
+    async function loadVisionSettings() {
+      const statusEl = document.getElementById("vision-settings-status");
+      const buttonName = "UI Screen Camera Ayarları - Yükle";
+      const task = `GET /vision/${ROI_CAM_ID}/settings`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/settings`);
+      } catch (e) {
+        statusEl.textContent = `Ayarlar alınamadı (ağ hatası): ${e.message}`;
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      if (!response.ok) {
+        statusEl.textContent = `Ayarlar alınamadı: Sunucu ${response.status}`;
+        logToConsole(buttonName, task, `Sunucu ${response.status}`, true);
+        return;
+      }
+      const data = await response.json();
+      document.getElementById("exposure-auto-toggle").checked = data.exposure.auto;
+      document.getElementById("exposure-time-input").value = data.exposure.exposure_time ?? "";
+      document.getElementById("exposure-gain-input").value = data.exposure.gain ?? "";
+      document.getElementById("clahe-toggle").checked = data.preprocess.clahe_enabled;
+      onExposureAutoToggle();
+      statusEl.textContent = "Ayarlar yüklendi.";
+      logToConsole(buttonName, task, "Kayıtlı pozlama/CLAHE ayarları yüklendi.", false);
+    }
+
+    async function applyExposure() {
+      const statusEl = document.getElementById("vision-settings-status");
+      const buttonName = "UI Screen Camera Pozlamayı Uygula";
+      const task = `POST /vision/${ROI_CAM_ID}/exposure`;
+      const auto = document.getElementById("exposure-auto-toggle").checked;
+      const exposureTimeRaw = document.getElementById("exposure-time-input").value;
+      const gainRaw = document.getElementById("exposure-gain-input").value;
+      const payload = {
+        auto,
+        exposure_time: auto || exposureTimeRaw === "" ? null : Number(exposureTimeRaw),
+        gain: auto || gainRaw === "" ? null : Number(gainRaw),
+      };
+      statusEl.textContent = "Uygulanıyor…";
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/exposure`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        statusEl.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        const detail = data?.detail ?? "bilinmeyen hata";
+        statusEl.textContent = `Kaydedilemedi: ${detail}`;
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      if (data.applied_live) {
+        statusEl.textContent = "Pozlama kaydedildi ve kameraya uygulandı.";
+      } else {
+        // Kamera şu an açık değilse ayar yine de diske kaydedildi — bir
+        // sonraki kamera açılışında otomatik uygulanır (bkz. vision.py start()).
+        statusEl.textContent = `Pozlama kaydedildi (kamera açık değil, sonraki açılışta uygulanacak: ${data.error ?? ""}).`;
+      }
+      logToConsole(buttonName, task, `Sunucu 200 OK — pozlama kaydedildi (applied_live=${data.applied_live}).`, false);
+    }
+
+    async function applyPreprocess() {
+      const statusEl = document.getElementById("vision-settings-status");
+      const buttonName = "UI Screen Camera CLAHE Toggle";
+      const task = `POST /vision/${ROI_CAM_ID}/preprocess`;
+      const claheEnabled = document.getElementById("clahe-toggle").checked;
+      statusEl.textContent = "Uygulanıyor…";
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/preprocess`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clahe_enabled: claheEnabled }),
+        });
+      } catch (e) {
+        statusEl.textContent = `Sunucuya ulaşılamadı: ${e.message}`;
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      if (!response.ok) {
+        let detail;
+        try {
+          detail = (await response.json()).detail;
+        } catch {
+          detail = "bilinmeyen hata";
+        }
+        statusEl.textContent = `Kaydedilemedi: ${detail}`;
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        return;
+      }
+      statusEl.textContent = `CLAHE ${claheEnabled ? "açıldı" : "kapatıldı"}.`;
+      logToConsole(buttonName, task, `Sunucu 200 OK — clahe_enabled=${claheEnabled}.`, false);
     }
 
     // ==========================================================================
@@ -2258,10 +2447,14 @@
     fetchResources();
     setInterval(fetchResources, RESOURCE_POLL_MS);
 
-    // UI Screen Camera ROI paneli: çizim olaylarını bağla, kayıtlı ROI'leri yükle, ilk kareyi çek.
+    // UI Screen Camera ROI paneli: çizim olaylarını bağla, kayıtlı ROI'leri yükle,
+    // canlı yayını başlat, kamera ayarlarını yükle, sürekli okuma döngüsünü
+    // otomatik başlat (Görev C — "Kameradan Oku" butonuna basmaya gerek yok).
     setupRoiCanvasEvents();
     loadRois();
-    refreshRoiSnapshot();
+    startRoiStream();
+    loadVisionSettings();
+    startContinuousRead();
   </script>
 </body>
 </html>
