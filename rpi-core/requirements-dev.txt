@@ -14,3 +14,9 @@
 -r requirements.txt
 pytest>=8.0
 ruff>=0.6
+# starlette.testclient (fastapi.testclient.TestClient) artik httpx2'yi
+# gerektiriyor (starlette>=1.7, 24-09'dan beri CI'da fark edilmeden
+# ModuleNotFoundError ile kirikti — yerel .venv'de baska bir paket
+# tarafindan yan-bagimlilik olarak zaten kuruluydu, sadece CI'in temiz
+# ortaminda eksikti, bkz. 29-09 saha bulgusu).
+httpx2
