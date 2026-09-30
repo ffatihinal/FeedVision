@@ -191,6 +191,44 @@
       padding: 10px 14px; margin-top: 4px; color: #9c9; font-style: italic;
     }
 
+    /* --- ROI ekleme mini-formu (30-09-2026, saha bulgusu): native prompt()/
+         confirm() zincirinin yerine, Konsol Rehberi/Kamera Ayarları ile AYNI
+         native <dialog> pattern'i. Native confirm() dokunmatik ekranda kolayca
+         atlanıyordu + "Tamam/İptal" anlamı metne gömülüydü, buton üzerinde
+         açıkça yazmıyordu — bu formda her seçenek kendi etiketiyle görünür. --- */
+    dialog#roi-form-dialog {
+      width: min(480px, 92vw); max-height: 82vh; padding: 0;
+      background: #1a1a1a; color: #eee; border: 1px solid #333; border-radius: 10px;
+    }
+    dialog#roi-form-dialog::backdrop { background: rgba(0,0,0,.6); }
+    #roi-form-body {
+      padding: 14px 18px; overflow-y: auto; max-height: calc(82vh - 60px);
+      font-size: 14px; line-height: 1.6; color: #ccc;
+    }
+    #roi-form-body label.roi-form-field { display: block; margin-bottom: 14px; }
+    #roi-form-body label.roi-form-field > span.roi-form-label-text {
+      display: block; margin-bottom: 6px; color: #aaa; font-size: 13px;
+    }
+    #roi-form-name-input {
+      width: 100%; box-sizing: border-box; font-size: 16px; padding: 10px;
+      border-radius: 6px; border: 1px solid #444; background: #222; color: #eee;
+    }
+    .roi-form-radio-option {
+      display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
+      border: 1px solid #333; border-radius: 6px; margin-bottom: 8px; cursor: pointer;
+    }
+    .roi-form-radio-option:has(input:checked) { border-color: #2a6; background: #16241c; }
+    .roi-form-radio-option input { margin-top: 3px; }
+    .roi-form-radio-option .roi-form-option-title { font-weight: bold; color: #eee; }
+    .roi-form-radio-option .roi-form-option-sub { display: block; font-size: 12px; color: #888; margin-top: 2px; }
+    #roi-form-reader-group { margin-top: 4px; padding-top: 10px; border-top: 1px solid #292929; }
+    #roi-form-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid #333; }
+    #roi-form-actions button { margin: 0; }
+    #roi-form-cancel-btn { background: #555; }
+    #roi-form-cancel-btn:active { background: #444; }
+    #roi-form-error { color: #f77; font-size: 13px; margin-top: 4px; display: none; }
+    #roi-form-error.show { display: block; }
+
     /* --- Sistem widget'ları (SoC sıcaklığı, CPU, RAM): 15-09-2026'da alt
        alta dizilimden (dar/uzun sidebar) YAN YANA 3 sütuna geçirildi — alt
        alta gereksiz dikey yer kaplıyordu (Fatih notu). */
@@ -298,6 +336,12 @@
     <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
       Görüntü canlı akıyor — üzerinde tıkla-sürükle ile dikdörtgen çiz, isim ver ve tip seç. "Kaydet" ile kalıcı yapılır.
     </div>
+    <!-- Görev (30-09-2026): arka planda hangi OCR motorunun aktif olduğu
+         her zaman görünsün diye küçük, sabit bilgi satırı — GET
+         /vision/{cam}/settings çağrısındaki ocr_engine alanından doldurulur
+         (bkz. loadVisionSettings). tesserocr kuruluysa hızlı yol, değilse
+         pytesseract'a (yavaş, subprocess bazlı) düşülmüş demektir. -->
+    <div id="ocr-engine-info" style="color:#888; font-size:12.5px; margin-bottom:12px;">OCR motoru: yükleniyor…</div>
     <div style="display:flex; gap:24px; flex-wrap:wrap;">
       <div class="roi-canvas-wrap">
         <img id="roi-stream-img" alt="UI Screen Camera canlı akış">
@@ -792,6 +836,65 @@
         Exposure Time'ı düşürmeyi dene — ekranın kendi parlaklık ayarını değiştirmeden çözüm
         genelde budur.
       </p>
+    </div>
+  </dialog>
+
+  <!-- ROI ekleme mini-formu (30-09-2026) — isim + tip + (sadece Sayısal ise)
+       okuma yöntemi TEK modalda sorulur; native prompt()/confirm() zincirinin
+       yerine geçti (bkz. yukarıdaki CSS notu). Form içeriği JS'te (openRoiFormDialog)
+       her açılışta sıfırlanır; "Kaydet" roiFormResolve'u çözer, "Vazgeç" iptal eder. -->
+  <dialog id="roi-form-dialog">
+    <div class="guide-header">
+      <h2>Yeni ROI</h2>
+      <button class="close-btn" onclick="cancelRoiFormDialog()">Vazgeç</button>
+    </div>
+    <div id="roi-form-body">
+      <label class="roi-form-field">
+        <span class="roi-form-label-text">İsim / etiket (örn. sicaklik_degeri)</span>
+        <input type="text" id="roi-form-name-input" autocomplete="off">
+      </label>
+
+      <label class="roi-form-field">
+        <span class="roi-form-label-text">Tip</span>
+        <label class="roi-form-radio-option">
+          <input type="radio" name="roi-form-kind" value="numeric" checked onchange="onRoiFormKindChange()">
+          <span>
+            <span class="roi-form-option-title">Sayısal</span>
+            <span class="roi-form-option-sub">OCR ile okunur (ör. sıcaklık, basınç değeri)</span>
+          </span>
+        </label>
+        <label class="roi-form-radio-option">
+          <input type="radio" name="roi-form-kind" value="boolean" onchange="onRoiFormKindChange()">
+          <span>
+            <span class="roi-form-option-title">Durum</span>
+            <span class="roi-form-option-sub">dolu/boş kare — READY/WORKING gibi</span>
+          </span>
+        </label>
+      </label>
+
+      <div id="roi-form-reader-group">
+        <span class="roi-form-label-text" style="display:block; margin-bottom:6px; color:#aaa; font-size:13px;">Okuma yöntemi</span>
+        <label class="roi-form-radio-option">
+          <input type="radio" name="roi-form-reader" value="tesseract" checked>
+          <span>
+            <span class="roi-form-option-title">Tesseract</span>
+            <span class="roi-form-option-sub">varsayılan, önerilir</span>
+          </span>
+        </label>
+        <label class="roi-form-radio-option">
+          <input type="radio" name="roi-form-reader" value="template">
+          <span>
+            <span class="roi-form-option-title">Özel Şablon</span>
+            <span class="roi-form-option-sub">deneysel</span>
+          </span>
+        </label>
+      </div>
+
+      <div id="roi-form-error"></div>
+    </div>
+    <div id="roi-form-actions">
+      <button id="roi-form-cancel-btn" onclick="cancelRoiFormDialog()">Vazgeç</button>
+      <button id="roi-form-save-btn" onclick="submitRoiFormDialog()">Kaydet</button>
     </div>
   </dialog>
 
@@ -1572,6 +1675,11 @@
     const ROI_READ_MIN_INTERVAL_MS = 300;
     let continuousReadActive = true;
     let continuousReadTimer = null;
+    // Görev (30-09-2026): hangi OCR motorunun kullanıldığını (bkz.
+    // ScreenReadResult.engine_used) SADECE değiştiğinde bir kez logla — her
+    // okumada tekrar tekrar yazmasın diye önceki durumla kıyaslanır (aynı
+    // desen: onStatusMessage'daki previousConnectionState).
+    let previousOcrEngine = null;
 
     function renderReadResults(data, readAt) {
       const resultBox = document.getElementById("ui-screen-read-test-result");
@@ -1694,6 +1802,18 @@
           });
           latestRoiQuads = quads;
           drawRoiCanvas();
+          // Görev (30-09-2026): sonuçlardan (varsa) fiilen kullanılan OCR
+          // motorunu çıkar, SADECE değiştiyse (ör. tesserocr çöküp
+          // pytesseract'a düştüyse) bir kez logla — spam olmasın.
+          const engineResult = (data.results || []).find((r) => r.engine_used);
+          const currentEngine = engineResult ? engineResult.engine_used : null;
+          if (currentEngine && currentEngine !== previousOcrEngine) {
+            const previous = previousOcrEngine;
+            previousOcrEngine = currentEngine;
+            if (previous !== null) {
+              logToConsole(buttonName, task, `OCR motoru değişti: ${previous} → ${currentEngine}.`, true);
+            }
+          }
         }
       } catch (e) {
         logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
@@ -1894,7 +2014,7 @@
       drawRoiCanvas();
     }
 
-    function roiPointerUp(evt) {
+    async function roiPointerUp(evt) {
       if (!roiDrawing) return;
       evt.preventDefault();
       const x = Math.min(roiDrawing.startX, roiDrawing.curX);
@@ -1923,33 +2043,79 @@
         drawRoiCanvas();
         return;
       }
-      const name = prompt("Bu ROI için bir isim/etiket girin (örn. sicaklik_degeri):");
-      if (!name || !name.trim()) {
+      // 30-09-2026 (saha bulgusu düzeltmesi): isim + tip + okuma yöntemi artık
+      // native prompt()/confirm() zinciri yerine TEK bir mini-form modalında
+      // sorulur (bkz. openRoiFormDialog) — dokunmatik ekranda net/atlanamaz.
+      const formResult = await openRoiFormDialog();
+      if (!formResult) {
         drawRoiCanvas();
         return;
       }
-      // Görev A: ROI tipi — "Sayısal" (OCR, Grup 1/3) ya da "Durum" (Grup 2 —
-      // READY/WORKING/SCAN OK/ERROR kareleri, OCR yerine parlaklık eşiği).
-      const isBoolean = confirm(
-        "Bu ROI bir DURUM karesi mi (READY/WORKING/SCAN OK/ERROR gibi dolu/boş kare)?\n\n" +
-        "Tamam = Durum (0/1)\nİptal = Sayısal (OCR ile okunur)"
-      );
-      // Görev C (30-09-2026): Sayısal ROI'lerde okuma yöntemi seçimi —
-      // Tesseract (varsayılan, olgun/test edilmiş) ya da Özel Şablon
-      // (deneysel, digit_reader.py — sadece sabit-fontlu/sabit-pozisyonlu
-      // HMI rakamları için, saha testi gerektirir). Durum ROI'lerinde zaten
-      // hiç OCR çağrılmadığı için bu soru sadece Sayısal seçilince sorulur.
-      let reader = "tesseract";
-      if (!isBoolean) {
-        const useTemplate = confirm(
-          "Okuma yöntemi:\n\nTamam = Özel Şablon (deneysel — digit_reader, sabit fontlu HMI rakamı gerektirir)\n" +
-          "İptal = Tesseract (varsayılan, OCR)"
-        );
-        reader = useTemplate ? "template" : "tesseract";
-      }
-      roiList.push({ name: name.trim(), x, y, w, h, kind: isBoolean ? "boolean" : "numeric", reader });
+      roiList.push({ name: formResult.name, x, y, w, h, kind: formResult.kind, reader: formResult.reader });
       renderRoiList();
       drawRoiCanvas();
+    }
+
+    // ==========================================================================
+    //  ROI EKLEME FORMU — native <dialog>, Konsol Rehberi/Kamera Ayarları info
+    //  ile aynı pattern. openRoiFormDialog() bir Promise döner: Kaydet'e
+    //  basılırsa {name, kind, reader}, Vazgeç'e basılırsa null.
+    // ==========================================================================
+    let roiFormResolve = null;
+
+    function onRoiFormKindChange() {
+      const isBoolean = document.querySelector('input[name="roi-form-kind"]:checked').value === "boolean";
+      // Görev C — okuma yöntemi sadece Sayısal ROI'lerde anlamlı (Durum
+      // ROI'lerinde zaten hiç OCR/şablon çağrılmıyor, bkz. main._read_all_rois).
+      document.getElementById("roi-form-reader-group").style.display = isBoolean ? "none" : "block";
+    }
+
+    function openRoiFormDialog() {
+      const dlg = document.getElementById("roi-form-dialog");
+      const nameInput = document.getElementById("roi-form-name-input");
+      const errorEl = document.getElementById("roi-form-error");
+      // Her açılışta forma sıfırdan başla — önceki ROI'nin kalıntısı kalmasın.
+      nameInput.value = "";
+      errorEl.classList.remove("show");
+      errorEl.textContent = "";
+      document.querySelector('input[name="roi-form-kind"][value="numeric"]').checked = true;
+      document.querySelector('input[name="roi-form-reader"][value="tesseract"]').checked = true;
+      onRoiFormKindChange();
+      if (!dlg.open) dlg.showModal();
+      nameInput.focus();
+      return new Promise((resolve) => {
+        roiFormResolve = resolve;
+      });
+    }
+
+    function submitRoiFormDialog() {
+      const nameInput = document.getElementById("roi-form-name-input");
+      const errorEl = document.getElementById("roi-form-error");
+      const name = nameInput.value.trim();
+      if (!name) {
+        errorEl.textContent = "İsim boş olamaz.";
+        errorEl.classList.add("show");
+        nameInput.focus();
+        return;
+      }
+      const kind = document.querySelector('input[name="roi-form-kind"]:checked').value;
+      const reader = kind === "boolean"
+        ? "tesseract" // Durum ROI'lerinde okuma yöntemi hiç kullanılmıyor, geriye uyumlu varsayılan.
+        : document.querySelector('input[name="roi-form-reader"]:checked').value;
+      document.getElementById("roi-form-dialog").close();
+      if (roiFormResolve) {
+        roiFormResolve({ name, kind, reader });
+        roiFormResolve = null;
+      }
+    }
+
+    function cancelRoiFormDialog() {
+      const dlg = document.getElementById("roi-form-dialog");
+      if (dlg.open) dlg.close();
+      if (roiFormResolve) {
+        roiFormResolve(null);
+        roiFormResolve = null;
+      }
     }
 
     function setupRoiCanvasEvents() {
@@ -2083,6 +2249,15 @@
       document.getElementById("clahe-toggle").checked = data.preprocess.clahe_enabled;
       onExposureAutoToggle();
       statusEl.textContent = "Ayarlar yüklendi.";
+      // Görev (30-09-2026): backend'in fiilen hangi OCR motorunu kullandığı
+      // (tesserocr hızlı yol / pytesseract yavaş yedek) — bkz. main.py
+      // vision_get_settings, screen_reader.TESSEROCR_AVAILABLE.
+      const engineInfoEl = document.getElementById("ocr-engine-info");
+      if (engineInfoEl && data.ocr_engine) {
+        engineInfoEl.textContent = data.ocr_engine === "tesserocr"
+          ? "OCR motoru: tesserocr (hızlı) ✅"
+          : "OCR motoru: pytesseract (yavaş, tesserocr kurulu değil)";
+      }
       logToConsole(buttonName, task, "Kayıtlı pozlama/CLAHE ayarları yüklendi.", false);
     }
 

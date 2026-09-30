@@ -125,6 +125,13 @@ class ScreenReadResult:
     esikle 0/1'e yuvarlandigini gorunur kilmak icin debug/kalibrasyon
     amacli tasinir (duration_ms'in UI'da gosterilmesiyle ayni desen);
     "numeric" ROI'lerde None kalir.
+
+    engine_used (30-09-2026 eklendi): "numeric" ROI'lerde OCR icin fiilen
+    kullanilan yol — TESSEROCR_AVAILABLE ise "tesserocr", degilse (ve
+    PYTESSERACT_AVAILABLE ise) "pytesseract"; hicbiri kurulu degilse None
+    (zaten ocr_error dolu olur). "boolean" ROI'lerde OCR hic calismadigi
+    icin None kalir. Amac: her okuma sonucu arka planda ne calistigi
+    konusunda seffaf olsun (ocr_error/duration_ms ile ayni debug deseni).
     """
 
     roi: tuple[int, int, int, int]
@@ -135,6 +142,7 @@ class ScreenReadResult:
     kind: str = "numeric"
     bool_state: int | None = None
     match_ratio: float | None = None
+    engine_used: str | None = None
 
 
 def crop_roi(frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI) -> np.ndarray:
@@ -504,6 +512,17 @@ def read_roi(
             match_ratio=match_ratio,
         )
     text, ocr_error = read_text_ocr(cropped, char_whitelist=ocr_whitelist)
+    # engine_used (30-09-2026): read_text_ocr'in kendi ici hangi yolu (tesserocr/
+    # pytesseract) sectigiyle AYNI kosul burada tekrarlaniyor -- read_text_ocr'in
+    # dis imzasini (mevcut testler/cagiranlar cok sayida, bkz. tests/test_screen_reader.py)
+    # DEGISTIRMEDEN seffaflik eklemenin en dusuk riskli yolu bu. Bos goruntude
+    # (hic OCR calismadi) veya hicbir motor kurulu degilse None kalir.
+    engine_used = None
+    if cropped.size != 0:
+        if TESSEROCR_AVAILABLE:
+            engine_used = "tesserocr"
+        elif PYTESSERACT_AVAILABLE:
+            engine_used = "pytesseract"
     return ScreenReadResult(
         roi=roi,
         avg_color_hsv=hsv_color,
@@ -513,4 +532,5 @@ def read_roi(
         kind="numeric",
         bool_state=None,
         match_ratio=None,
+        engine_used=engine_used,
     )

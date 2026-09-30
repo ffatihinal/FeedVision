@@ -156,6 +156,59 @@ class TestReadRoiKindDispatch:
         assert result.kind == "numeric"
 
 
+class TestReadRoiEngineUsed:
+    """engine_used (30-09-2026 eklendi) — hangi OCR yolunun fiilen kullanildigi
+    seffaf olsun diye eklendi (bkz. ScreenReadResult docstring'i). read_roi
+    icindeki secim, TESSEROCR_AVAILABLE/PYTESSERACT_AVAILABLE modul bayraklarina
+    gore yapiliyor -- monkeypatch ile HER IKI yolu da gercek Tesseract'a
+    dokunmadan test edebiliyoruz (TestReadTextOcrTesserocrPath ile ayni desen)."""
+
+    def test_boolean_kind_leaves_engine_used_none(self):
+        frame = _solid_turquoise_image(100)
+        result = read_roi(frame, roi=(0, 0, 50, 50), kind="boolean")
+        assert result.engine_used is None
+
+    def test_numeric_kind_reports_tesserocr_when_available(self, monkeypatch):
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "PYTESSERACT_AVAILABLE", False)
+        monkeypatch.setattr(
+            screen_reader, "read_text_ocr", lambda image, char_whitelist=None: ("", None)
+        )
+        frame = _solid_bgr_image(100, value=255)
+        result = read_roi(frame, roi=(0, 0, 50, 50), kind="numeric")
+        assert result.engine_used == "tesserocr"
+
+    def test_numeric_kind_reports_pytesseract_when_tesserocr_unavailable(self, monkeypatch):
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", False)
+        monkeypatch.setattr(screen_reader, "PYTESSERACT_AVAILABLE", True)
+        monkeypatch.setattr(
+            screen_reader, "read_text_ocr", lambda image, char_whitelist=None: ("", None)
+        )
+        frame = _solid_bgr_image(100, value=255)
+        result = read_roi(frame, roi=(0, 0, 50, 50), kind="numeric")
+        assert result.engine_used == "pytesseract"
+
+    def test_numeric_kind_reports_none_when_no_engine_installed(self, monkeypatch):
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", False)
+        monkeypatch.setattr(screen_reader, "PYTESSERACT_AVAILABLE", False)
+        monkeypatch.setattr(
+            screen_reader,
+            "read_text_ocr",
+            lambda image, char_whitelist=None: ("", "pytesseract Python paketi kurulu degil"),
+        )
+        frame = _solid_bgr_image(100, value=255)
+        result = read_roi(frame, roi=(0, 0, 50, 50), kind="numeric")
+        assert result.engine_used is None
+
+    def test_numeric_kind_reports_none_when_crop_is_empty(self, monkeypatch):
+        # ROI karenin tamamen disinda kalirsa crop_roi bos bir goruntu doner —
+        # OCR hic calismadigi icin engine_used da None kalmali.
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        frame = _solid_bgr_image(100, value=255)
+        result = read_roi(frame, roi=(500, 500, 50, 50), kind="numeric")
+        assert result.engine_used is None
+
+
 class TestCropRoi:
     def test_crop_within_bounds(self):
         frame = np.zeros((100, 100, 3), dtype=np.uint8)

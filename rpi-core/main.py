@@ -58,7 +58,7 @@ from screen_calibration import (
     warp_roi_quad,
     warp_roi_rect,
 )
-from screen_reader import average_color_hsv, average_color_rgb, crop_roi, crop_roi_quad, read_roi
+from screen_reader import TESSEROCR_AVAILABLE, average_color_hsv, average_color_rgb, crop_roi, crop_roi_quad, read_roi
 from serial_bridge import bridge
 from vision import CAMERA_NUMS, STREAM_SIZE, vision
 
@@ -638,7 +638,12 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
 
     Doner: (okuma sonuc listesi [{"name","roi","kind","text","ocr_error",
     "bool_state","match_ratio","avg_color_hsv","avg_color_rgb","reader",
-    "confidence"}, ...], roi_reference_uncertain)
+    "confidence","engine_used"}, ...], roi_reference_uncertain)
+
+    engine_used (30-09-2026 eklendi): fiilen hangi OCR/okuma yolunun
+    kullanildigi — "tesserocr" | "pytesseract" | "template" | None (OCR hic
+    calismadi, ör. bos goruntu ya da hicbir motor kurulu degil). Amac: her
+    okuma sonucu arka planda ne calistigi konusunda seffaf olsun.
 
     reader (Görev C, 2026-09-30): ROI'nin "reader" alani "template" ise
     (bkz. RoiDef) Tesseract YERINE digit_reader.read_digits (sablon
@@ -690,6 +695,9 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
                     "avg_color_rgb": list(average_color_rgb(cropped)),
                     "reader": "template",
                     "confidence": confidence,
+                    # engine_used (30-09-2026): Tesseract hic devreye girmedi,
+                    # digit_reader sablon eslestirme kullanildi — bkz. ScreenReadResult.engine_used docstring'i.
+                    "engine_used": "template",
                 }
             )
             continue
@@ -709,6 +717,7 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
                 "avg_color_rgb": list(result.avg_color_rgb),
                 "reader": reader,
                 "confidence": None,
+                "engine_used": result.engine_used,
             }
         )
     return results, uncertain
@@ -855,10 +864,21 @@ def vision_set_preprocess(cam_id: str, payload: PreprocessSettings):
 @app.get("/vision/{cam_id}/settings")
 def vision_get_settings(cam_id: str):
     """Admin panelinin sayfa acilisinda slider/checkbox'lari mevcut kayitli
-    degerle doldurabilmesi icin — pozlama + on-isleme ayarlarini birlikte doner."""
+    degerle doldurabilmesi icin — pozlama + on-isleme ayarlarini birlikte doner.
+
+    ocr_engine (30-09-2026 eklendi): arka planda fiilen hangi OCR motorunun
+    aktif oldugu (tesserocr hizli yol / pytesseract yavas subprocess-bazli
+    yedek) — Admin'de ROI panelinin yaninda kucuk bir bilgi satirinda
+    gosterilir (bkz. ui/admin.html loadVisionSettings). Kamera-bazinda
+    degil, surec-genelinde SABIT bir bayrak (screen_reader.TESSEROCR_AVAILABLE,
+    import zamaninda belirlenir) — ama diger ayarlarla AYNI endpoint'ten
+    donmesi Admin'in zaten sayfa acilisinda cektigi tek cagriya bindirir,
+    ayri bir endpoint gerektirmez."""
     if cam_id not in VALID_CAM_IDS:
         raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
-    return vision_settings_store.get_settings(cam_id)
+    settings = vision_settings_store.get_settings(cam_id)
+    settings["ocr_engine"] = "tesserocr" if TESSEROCR_AVAILABLE else "pytesseract"
+    return settings
 
 
 # ==============================================================================
