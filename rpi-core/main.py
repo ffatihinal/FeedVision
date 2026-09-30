@@ -385,7 +385,8 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
         kind = roi_def.get("kind", "numeric")  # eski kayitli ROI'lerde alan yok -> "numeric" (geriye uyumlu)
         quad = roi_def.get("quad")  # kalibrasyon yoksa yok -> read_roi eski duz-dikdortgen davranisina duser
         quad_arr = np.array(quad, dtype=np.float32) if quad is not None else None
-        result = read_roi(frame, roi_tuple, kind=kind, quad=quad_arr)
+        ocr_whitelist = roi_def.get("ocr_whitelist")  # eski kayitli ROI'lerde alan yok -> None (whitelist yok)
+        result = read_roi(frame, roi_tuple, kind=kind, quad=quad_arr, ocr_whitelist=ocr_whitelist)
         results.append(
             {
                 "name": roi_def["name"],
@@ -445,6 +446,12 @@ class RoiDef(BaseModel):
     # okunur, bkz. screen_reader.read_boolean_state). Eski kayitli ROI'lerde
     # bu alan hic yoktu -> Pydantic varsayilani "numeric" ile geriye uyumlu.
     kind: Literal["numeric", "boolean"] = "numeric"
+    # Opsiyonel/ROI-bazinda Tesseract karakter whitelist'i (ör. "0123456789.-"
+    # sayisal bir ROI icin) — bkz. screen_reader.read_text_ocr docstring'i
+    # (30-09-2026 eklendi). None = whitelist yok (varsayilan, geriye uyumlu).
+    # GLOBAL/sabit yapilmadi cunku ROI'ler arasi beklenen karakter kumesi
+    # farkli olabilir (bazilari ileride harf de icerebilir).
+    ocr_whitelist: str | None = Field(default=None, max_length=32)
 
 
 class RoiListPayload(BaseModel):

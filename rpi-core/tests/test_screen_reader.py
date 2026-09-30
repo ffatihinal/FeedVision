@@ -12,8 +12,12 @@ import cv2
 import numpy as np
 import pytest
 
+import screen_reader
 from screen_reader import (
     BOOLEAN_BRIGHTNESS_THRESHOLD,
+    _build_ocr_config,
+    _pin_current_process_to_ocr_cores,
+    _restore_process_affinity,
     crop_roi,
     crop_roi_quad,
     read_boolean_state,
@@ -151,3 +155,169 @@ class TestReadRoiQuadPath:
         # quad'ın kullanıldığı (kırmızı bölgenin baskın çıkması).
         assert r > 200
         assert r > g and r > b
+
+
+class TestBuildOcrConfig:
+    """_build_ocr_config saf/yan-etkisiz bir string kurucu — Tesseract'a hiç
+    girmeden test edilebilir (30-09-2026, saha OCR intermittent-fail düzeltmesi)."""
+
+    def test_default_uses_psm_7_no_whitelist(self):
+        assert _build_ocr_config(None) == "--psm 7"
+
+    def test_empty_string_whitelist_treated_as_no_whitelist(self):
+        # "" da None gibi davranmalı (falsy) — çağıran taraf yanlışlıkla boş
+        # string geçirirse Tesseract'a anlamsız bir "-c ...=" eklenmemeli.
+        assert _build_ocr_config("") == "--psm 7"
+
+    def test_whitelist_appended_as_tesseract_char_whitelist_option(self):
+        config = _build_ocr_config("0123456789.-")
+        assert config == "--psm 7 -c tessedit_char_whitelist=0123456789.-"
+
+
+class TestOcrAffinityPinning:
+    """CPU affinity pin/restore — Pi 5'te (Linux) Tesseract subprocess'lerini
+    {2,3} çekirdeklerine sabitler, kamera+web sunucusunun kullandığı 0-1'i
+    serbest bırakır (30-09-2026, saha FPS düşüşü bulgusu). Mac'te (geliştirme
+    ortamı) os.sched_setaffinity yok -> gerçek platformda (bu makinede) no-op
+    olduğu, SİMÜLE edilmiş Linux davranışının da doğru çalıştığı ayrı ayrı
+    doğrulanıyor."""
+
+    def test_noop_on_platform_without_sched_setaffinity(self):
+        # Bu test makinesi (Mac) zaten os.sched_setaffinity'ye sahip değil —
+        # gerçek/doğal no-op davranışını doğrular (hasattr kontrolü).
+        if hasattr(screen_reader.os, "sched_setaffinity"):
+            pytest.skip("bu platformda sched_setaffinity mevcut, no-op yolu test edilemez")
+        previous = _pin_current_process_to_ocr_cores()
+        assert previous is None
+        _restore_process_affinity(previous)  # None ile çağrılırsa hata vermemeli
+
+    def test_pin_sets_affinity_and_returns_previous_on_simulated_linux(self, monkeypatch):
+        state = {"affinity": {0, 1, 2, 3}}
+        monkeypatch.setattr(screen_reader.os, "sched_setaffinity", lambda pid, cores: state.__setitem__("affinity", set(cores)), raising=False)
+        monkeypatch.setattr(screen_reader.os, "sched_getaffinity", lambda pid: set(state["affinity"]), raising=False)
+
+        previous = _pin_current_process_to_ocr_cores()
+
+        assert previous == frozenset({0, 1, 2, 3})
+        assert state["affinity"] == {2, 3}
+
+    def test_restore_puts_previous_affinity_back(self, monkeypatch):
+        state = {"affinity": {2, 3}}
+        monkeypatch.setattr(screen_reader.os, "sched_setaffinity", lambda pid, cores: state.__setitem__("affinity", set(cores)), raising=False)
+
+        _restore_process_affinity(frozenset({0, 1, 2, 3}))
+
+        assert state["affinity"] == {0, 1, 2, 3}
+
+    def test_restore_noop_when_previous_is_none(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(screen_reader.os, "sched_setaffinity", lambda pid, cores: calls.append(cores), raising=False)
+
+        _restore_process_affinity(None)
+
+        assert calls == []  # sabitleme hiç uygulanmadıysa geri yükleme de yapılmamalı
+
+    def test_pin_skips_when_target_cores_unavailable(self, monkeypatch):
+        # Örn. 2 çekirdekli bir cihaz/cgroup kısıtı — {2,3} zaten kullanılabilir
+        # değilse sabitlemenin anlamı yok, mevcut kümeye dokunulmamalı.
+        monkeypatch.setattr(screen_reader.os, "sched_getaffinity", lambda pid: {0, 1}, raising=False)
+        calls = []
+        monkeypatch.setattr(screen_reader.os, "sched_setaffinity", lambda pid, cores: calls.append(cores), raising=False)
+
+        previous = _pin_current_process_to_ocr_cores()
+
+        assert previous is None
+        assert calls == []
+
+    def test_pin_swallows_oserror_and_returns_none(self, monkeypatch):
+        monkeypatch.setattr(screen_reader.os, "sched_getaffinity", lambda pid: {0, 1, 2, 3}, raising=False)
+
+        def _raise(pid, cores):
+            raise OSError("izin yok")
+
+        monkeypatch.setattr(screen_reader.os, "sched_setaffinity", _raise, raising=False)
+
+        assert _pin_current_process_to_ocr_cores() is None
+
+
+class TestReadTextOcrUsesConfigAndAffinity:
+    """read_text_ocr'ın Tesseract'a doğru config'i geçirdiğini VE affinity
+    pin/restore çağrılarını (başarı + exception yolunda) doğru sırayla
+    yaptığını, gerçek Tesseract binary'sine bağımlı olmadan (pytesseract
+    mock'lanarak) doğrular."""
+
+    def _gray_image(self):
+        return np.full((10, 10, 3), 200, dtype=np.uint8)
+
+    def test_passes_psm_and_whitelist_config_to_pytesseract(self, monkeypatch):
+        captured = {}
+
+        class _FakePytesseract:
+            @staticmethod
+            def image_to_string(image, config=""):
+                captured["config"] = config
+                return "19"
+
+        monkeypatch.setattr(screen_reader, "PYTESSERACT_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "pytesseract", _FakePytesseract)
+
+        text, err = screen_reader.read_text_ocr(self._gray_image(), char_whitelist="0123456789.-")
+
+        assert text == "19"
+        assert err is None
+        assert captured["config"] == "--psm 7 -c tessedit_char_whitelist=0123456789.-"
+
+    def test_affinity_is_pinned_during_call_and_restored_after(self, monkeypatch):
+        affinity_during_call = {}
+
+        class _FakePytesseract:
+            @staticmethod
+            def image_to_string(image, config=""):
+                affinity_during_call["value"] = screen_reader.os.sched_getaffinity(0)
+                return "42"
+
+        monkeypatch.setattr(screen_reader, "PYTESSERACT_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "pytesseract", _FakePytesseract)
+        state = {"affinity": {0, 1, 2, 3}}
+        monkeypatch.setattr(screen_reader.os, "sched_setaffinity", lambda pid, cores: state.__setitem__("affinity", set(cores)), raising=False)
+        monkeypatch.setattr(screen_reader.os, "sched_getaffinity", lambda pid: set(state["affinity"]), raising=False)
+
+        screen_reader.read_text_ocr(self._gray_image())
+
+        assert affinity_during_call["value"] == {2, 3}  # Tesseract çağrısı SIRASINDA {2,3}'e sabitlenmiş olmalı
+        assert state["affinity"] == {0, 1, 2, 3}  # çağrı bitince eski hale dönmüş olmalı
+
+    def test_affinity_restored_even_if_pytesseract_raises(self, monkeypatch):
+        class _FakePytesseract:
+            @staticmethod
+            def image_to_string(image, config=""):
+                raise RuntimeError("tesseract binary bulunamadı")
+
+        monkeypatch.setattr(screen_reader, "PYTESSERACT_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "pytesseract", _FakePytesseract)
+        state = {"affinity": {0, 1, 2, 3}}
+        monkeypatch.setattr(screen_reader.os, "sched_setaffinity", lambda pid, cores: state.__setitem__("affinity", set(cores)), raising=False)
+        monkeypatch.setattr(screen_reader.os, "sched_getaffinity", lambda pid: set(state["affinity"]), raising=False)
+
+        text, err = screen_reader.read_text_ocr(self._gray_image())
+
+        assert text == ""
+        assert "tesseract binary bulunamadı" in err
+        assert state["affinity"] == {0, 1, 2, 3}  # exception olsa da affinity geri yüklenmiş olmalı
+
+
+class TestReadRoiForwardsOcrWhitelist:
+    def test_read_roi_passes_ocr_whitelist_to_read_text_ocr(self, monkeypatch):
+        captured = {}
+
+        def _fake_read_text_ocr(image, char_whitelist=None):
+            captured["char_whitelist"] = char_whitelist
+            return "19", None
+
+        monkeypatch.setattr(screen_reader, "read_text_ocr", _fake_read_text_ocr)
+        frame = np.full((100, 100, 3), 200, dtype=np.uint8)
+
+        result = read_roi(frame, roi=(0, 0, 50, 50), kind="numeric", ocr_whitelist="0123456789.-")
+
+        assert result.text == "19"
+        assert captured["char_whitelist"] == "0123456789.-"

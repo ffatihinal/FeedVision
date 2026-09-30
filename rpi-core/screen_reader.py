@@ -18,6 +18,7 @@ dikdortgen. Saha fotograflari gelince gercek HMI ekraninin piksel
 koordinatlariyla degistirilecek (bkz. Azobex_WP1 saha notlari).
 """
 
+import os
 from dataclasses import dataclass
 
 import cv2
@@ -161,7 +162,91 @@ def average_color_rgb(image: np.ndarray) -> tuple[float, float, float]:
     return (float(mean[2]), float(mean[1]), float(mean[0]))
 
 
-def read_text_ocr(image: np.ndarray) -> tuple[str, str | None]:
+# --- Tesseract PSM secimi (30-09-2026 saha bulgusu) -------------------------
+# Sorun: kamera/ROI SABITKEN bile "Oksijen: 19" gibi degerler 5-6 okumadan
+# sadece 1'inde dogru okunuyordu ("metin bulunamadi" kalani). Kok neden: eski
+# kod pytesseract.image_to_string()'i config'siz cagiriyordu -> Tesseract
+# varsayilan PSM 3'u (tam otomatik SAYFA analizi) kullaniyordu; bu mod kucuk,
+# tek-satir/tek-sayi kirpilmis goruntulerde (bizim ROI'lerimiz tam bu) sayfa
+# duzeni/blok tespiti yaparken tutarsiz calisiyor.
+#
+# Ampirik test (sentetik ROI benzeri goruntuler: "19", "-1", "-12.5", "100",
+# "0", "1.05e+03"; 12 varyasyon/deger, gurultu+pozisyon jitter'i ile, bkz.
+# gelistirme notlari): PSM 7 ("tek satir metin varsay") %73.6 dogruluk +
+# %0 "bos donme" oraniyla PSM 3 varsayilanini (%52.8, %27.8 bos) VE PSM 8'i
+# ("tek kelime varsay", %8.3 dogruluk — noktali/eksili kisa sayilari "kelime"
+# olarak segmentlemeye calisirken sistematik basarisiz oluyor) acik farkla
+# gecti. Bu yuzden PSM 7 sabit/varsayilan secildi.
+_TESSERACT_PSM = "--psm 7"
+
+# Pi 5 (4 cekirdek) sahada: surekli OCR donguye girildiginde (her ROI okumasi
+# ayri bir Tesseract subprocess'i baslatiyor) Chamber Camera'nin FPS'i dustu
+# (30-09-2026 saha gozlemi) -- kamera decode + web sunucusu ile Tesseract
+# subprocess'leri CPU cekirdeklerini rastgele paylasiyordu. Cozum: Tesseract
+# cagrisi SIRASINDA ana sureci (bu Python process) gecici olarak {2,3}
+# cekirdeklerine sabitleyip kamera+web sunucusunun kullandigi 0-1'i serbest
+# birakiyoruz.
+#
+# Neden Tesseract subprocess'ini DOGRUDAN degil ANA SURECI pinliyoruz:
+# pytesseract.image_to_string() icerde subprocess.Popen kullanarak Tesseract'i
+# baslatiyor ama Popen nesnesine kutuphane API'si uzerinden erisimimiz yok.
+# POSIX'te DOGAN bir alt-surec, dogdugu anda EBEVEYNININ (bizim ana surecimiz)
+# CPU affinity kumesini MIRAS ALIR -- yani ana sureci cagri oncesi {2,3}'e
+# sabitleyip cagri BITER BITMEZ eski haline dondurmek, doğan Tesseract
+# subprocess'inin de {2,3}'te calismasini SAGLAR (ekstra izin/uid gerekmez).
+_OCR_AFFINITY_CORES = frozenset({2, 3})
+
+
+def _pin_current_process_to_ocr_cores() -> frozenset[int] | None:
+    """Mevcut sureci OCR icin ayrilan cekirdeklere gecici sabitler.
+
+    Geri yukleme icin ONCEKI affinity kumesini doner; hicbir sey
+    degistirmediyse (asagidaki durumlardan biri) None doner:
+    - Linux disi platform (ör. Mac gelistirme ortami) -> os.sched_setaffinity
+      hic yok, hasattr kontroluyle sessizce no-op.
+    - Hedef cekirdekler ({2,3}) bu surec icin zaten kullanilabilir degil
+      (ör. Pi 5 disinda 4'ten az cekirdekli/cgroup ile kisitlanmis bir cihaz)
+      -> sabitlemenin anlami yok, mevcut kumeyi degistirmeden birak.
+    - sched_setaffinity beklenmedik sekilde OSError firlatirsa (ör. izin
+      sorunu) -> OCR'i engellemesin diye sessizce vazgecilir.
+    """
+    if not hasattr(os, "sched_setaffinity"):
+        return None
+    try:
+        previous = os.sched_getaffinity(0)
+        target = _OCR_AFFINITY_CORES & previous
+        if not target:
+            return None
+        os.sched_setaffinity(0, target)
+        return frozenset(previous)
+    except OSError:
+        return None
+
+
+def _restore_process_affinity(previous: frozenset[int] | None) -> None:
+    """_pin_current_process_to_ocr_cores() ile sabitlenmis affinity'yi geri yukler.
+
+    previous None ise (sabitleme hic uygulanmadiysa) hicbir sey yapmaz.
+    """
+    if previous is None:
+        return
+    try:
+        os.sched_setaffinity(0, previous)
+    except OSError:
+        pass
+
+
+def _build_ocr_config(char_whitelist: str | None) -> str:
+    """Tesseract'a gecirilecek config string'ini kurar: sabit PSM 7 + opsiyonel
+    karakter whitelist'i. Saf/yan-etkisiz — Tesseract cagrilmadan test edilebilir.
+    """
+    config = _TESSERACT_PSM
+    if char_whitelist:
+        config += f" -c tessedit_char_whitelist={char_whitelist}"
+    return config
+
+
+def read_text_ocr(image: np.ndarray, char_whitelist: str | None = None) -> tuple[str, str | None]:
     """Kirpilan ROI goruntusunu Tesseract'tan gecirip (metin, hata) tuple'i doner.
 
     Uc durum ayirt edilir:
@@ -171,6 +256,16 @@ def read_text_ocr(image: np.ndarray) -> tuple[str, str | None]:
       ("", gercek exception mesaji).
     Bos goruntude (boyut 0) Tesseract'a hic girmeden ("", None) donulur —
     bu OCR'in basarisizligi degil, zaten okunacak goruntu yok demektir.
+
+    char_whitelist: verilirse SADECE bu karakterlere izin verilir (ör.
+    "0123456789.-" sayisal ROI'ler icin, bkz. main.py RoiDef.ocr_whitelist).
+    Opsiyonel/ROI-bazinda tutuluyor, GLOBAL/sabit yapilmadi — bazi ROI'ler
+    gelecekte harf de icerebilir (ör. durum metni). DIKKAT (ampirik gozlem):
+    cok kisa (tek karakter) girdilerde whitelist bazen OCR'in TAMAMEN bos
+    ("") donmesine yol aciyor (LSTM motorunun bilinen bir kisitlamasi — kisa
+    girdide whitelist kisitlamasi ic guven skorunu sifira dusurebiliyor) —
+    bu yuzden whitelist'i tek karakterlik degil 2+ karakterlik sayisal ROI'ler
+    icin kullanmak daha tutarli sonuc verir.
     """
     if image.size == 0:
         return "", None
@@ -180,10 +275,17 @@ def read_text_ocr(image: np.ndarray) -> tuple[str, str | None]:
     # kucuk/HMI fontlarinda dogruluk icin genelde daha iyi sonuc verir.
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    config = _build_ocr_config(char_whitelist)
+    previous_affinity = _pin_current_process_to_ocr_cores()
     try:
-        text = pytesseract.image_to_string(upscaled)
+        text = pytesseract.image_to_string(upscaled, config=config)
     except Exception as exc:  # noqa: BLE001 — Tesseract binary eksik/izin hatasi vb. onceden bilinmiyor
         return "", f"Tesseract calistirilamadi: {exc}"
+    finally:
+        # finally: hem basarili donuste hem exception'da (yukaridaki return
+        # dahil) affinity mutlaka eski haline donsun, OCR sonrasi kamera/web
+        # sunucusu dongusu eskisi gibi tum cekirdekleri kullanabilsin.
+        _restore_process_affinity(previous_affinity)
     return text.strip(), None
 
 
@@ -213,6 +315,7 @@ def read_roi(
     roi: tuple[int, int, int, int] = DEFAULT_ROI,
     kind: str = "numeric",
     quad: np.ndarray | None = None,
+    ocr_whitelist: str | None = None,
 ) -> ScreenReadResult:
     """ROI'yi kirpar; "numeric" ise OCR+renk, "boolean" ise SADECE renk/parlaklik
     esigiyle 0/1 karari hesaplar — bu modulun tek giris noktasi.
@@ -224,6 +327,9 @@ def read_roi(
     bkz. screen_calibration.warp_roi_quad) crop_roi_quad ile perspektif-
     duzeltilmis kirpma yapilir; quad None ise (kalibrasyon yok/geriye uyumluluk)
     eskisi gibi crop_roi (duz dikdortgen, roi bbox) kullanilir.
+
+    ocr_whitelist: sadece kind="numeric" icin anlamli, read_text_ocr'a oldugu
+    gibi iletilir (bkz. o fonksiyonun docstring'i — opsiyonel/ROI-bazinda).
     """
     cropped = crop_roi_quad(frame, quad) if quad is not None else crop_roi(frame, roi)
     hsv_color = average_color_hsv(cropped)
@@ -239,7 +345,7 @@ def read_roi(
             kind="boolean",
             bool_state=state,
         )
-    text, ocr_error = read_text_ocr(cropped)
+    text, ocr_error = read_text_ocr(cropped, char_whitelist=ocr_whitelist)
     return ScreenReadResult(
         roi=roi,
         avg_color_hsv=hsv_color,
