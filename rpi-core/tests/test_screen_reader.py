@@ -14,7 +14,7 @@ import pytest
 
 import screen_reader
 from screen_reader import (
-    BOOLEAN_BRIGHTNESS_THRESHOLD,
+    BOOLEAN_MATCH_RATIO_THRESHOLD,
     _build_ocr_config,
     _pin_current_process_to_ocr_cores,
     _restore_process_affinity,
@@ -27,53 +27,131 @@ from screen_reader import (
 
 def _solid_bgr_image(size: int, value: int) -> np.ndarray:
     """Tum pikselleri ayni gri tonda (value, value, value) olan kare bir goruntu —
-    HSV'ye cevrilince V kanali da value'ya esit olur, esik testlerini basitlestirir."""
+    dusuk doygunluklu (S=0) test senaryolari icin (turkuaz DEGIL)."""
     return np.full((size, size, 3), value, dtype=np.uint8)
 
 
+# BGR degeri — web "turquoise" rengi (RGB 64,224,208), ampirik olcumde
+# HSV H=87 S=182 V=224 verir (bkz. screen_reader.BOOLEAN_HUE_RANGE'deki not) —
+# gercek HMI'nin dolu-kare rengini temsil eden sentetik test rengi.
+_TURQUOISE_BGR = (208, 224, 64)
+
+
+def _solid_turquoise_image(size: int) -> np.ndarray:
+    return np.full((size, size, 3), _TURQUOISE_BGR, dtype=np.uint8)
+
+
 class TestReadBooleanState:
+    """30-09-2026 duzeltmesi: read_boolean_state artik SADECE parlakliga degil
+    turkuaz/cyan renk (Hue+Saturation) kriterine bakiyor — eski "sadece
+    parlaklik" yaklasiminin parlak-ama-turkuaz-degil yanlis-pozitif riskini
+    (ör. beyaz/gri parlak alan) burada acikca kapatiyoruz."""
+
     def test_empty_image_returns_zero(self):
         empty = np.zeros((0, 0, 3), dtype=np.uint8)
-        state, brightness = read_boolean_state(empty)
+        state, match_ratio = read_boolean_state(empty)
         assert state == 0
-        assert brightness == 0.0
+        assert match_ratio == 0.0
 
-    def test_dark_image_below_threshold_is_zero(self):
-        dark = _solid_bgr_image(20, value=30)
-        state, brightness = read_boolean_state(dark)
+    def test_black_image_is_zero(self):
+        black = _solid_bgr_image(20, value=0)
+        state, match_ratio = read_boolean_state(black)
         assert state == 0
-        assert brightness < BOOLEAN_BRIGHTNESS_THRESHOLD
+        assert match_ratio == 0.0
 
-    def test_bright_image_above_threshold_is_one(self):
-        bright = _solid_bgr_image(20, value=220)
-        state, brightness = read_boolean_state(bright)
+    def test_solid_turquoise_is_one(self):
+        # Gercek turkuaz/cyan renkte dolu bir kare -> state=1, tum pikseller
+        # kriteri karsiladigi icin match_ratio tam 1.0 olmali.
+        turquoise = _solid_turquoise_image(20)
+        state, match_ratio = read_boolean_state(turquoise)
         assert state == 1
-        assert brightness > BOOLEAN_BRIGHTNESS_THRESHOLD
+        assert match_ratio == pytest.approx(1.0)
 
-    def test_custom_threshold_is_respected(self):
-        image = _solid_bgr_image(20, value=100)
-        # Varsayilan esikte (130) 0 doner, dusuk ozel esikte 1 donmeli.
-        assert read_boolean_state(image)[0] == 0
-        assert read_boolean_state(image, threshold=50.0)[0] == 1
+    def test_bright_white_is_not_falsely_positive(self):
+        # KRITIK regresyon: eski kod (sadece V/parlaklik esigi 130) beyaz
+        # (V=255) icin YANLISLIKLA 1 donerdi. Yeni kod dusuk doygunluk (S=0)
+        # nedeniyle bunu 0 olarak elemeli.
+        white = _solid_bgr_image(20, value=255)
+        state, match_ratio = read_boolean_state(white)
+        assert state == 0
+        assert match_ratio == 0.0
+
+    def test_bright_gray_is_not_falsely_positive(self):
+        # Ayni regresyon, daha az uc bir deger (parlak gri metin/yansima
+        # senaryosunu temsil eder) ile.
+        bright_gray = _solid_bgr_image(20, value=200)
+        state, match_ratio = read_boolean_state(bright_gray)
+        assert state == 0
+        assert match_ratio == 0.0
+
+    def test_partial_turquoise_gives_intermediate_match_ratio(self):
+        # Karenin yarisi turkuaz, yarisi siyah -> match_ratio ~0.5, esigin
+        # (varsayilan ~0.28) USTUNDE oldugu icin state=1 olmali.
+        half = np.zeros((20, 20, 3), dtype=np.uint8)
+        half[:10, :, :] = _TURQUOISE_BGR
+        state, match_ratio = read_boolean_state(half)
+        assert match_ratio == pytest.approx(0.5)
+        assert state == 1
+
+    def test_small_turquoise_fraction_below_threshold_is_zero(self):
+        # Karenin sadece %10'u turkuaz (gurultu/kismi yansima senaryosu) —
+        # match_ratio esigin ALTINDA kalmali, state=0.
+        mostly_black = np.zeros((20, 20, 3), dtype=np.uint8)
+        mostly_black[:2, :, :] = _TURQUOISE_BGR
+        state, match_ratio = read_boolean_state(mostly_black)
+        assert match_ratio == pytest.approx(0.1)
+        assert match_ratio < BOOLEAN_MATCH_RATIO_THRESHOLD
+        assert state == 0
+
+    def test_custom_match_ratio_threshold_is_respected(self):
+        # %10 turkuaz varsayilan esikte 0 donuyordu (yukaridaki test) — ozel
+        # olarak dusuk bir esik verilirse 1 donmeli.
+        mostly_black = np.zeros((20, 20, 3), dtype=np.uint8)
+        mostly_black[:2, :, :] = _TURQUOISE_BGR
+        state, _ratio = read_boolean_state(mostly_black, match_ratio_threshold=0.05)
+        assert state == 1
+
+    def test_custom_hue_range_can_target_a_different_color(self):
+        # Guvenlik agi: hue_range/sat_min disaridan verilebiliyor -- ileride
+        # farkli renkte bir gosterge (ör. kirmizi alarm karesi, BGR (0,0,200))
+        # cikarsa kod DEGISMEDEN cagiran taraf yeni araligi gecebilir.
+        red_bgr = (0, 0, 200)
+        red_image = np.full((20, 20, 3), red_bgr, dtype=np.uint8)
+        # Varsayilan turkuaz araliginda kirmizi 0 donmeli.
+        assert read_boolean_state(red_image)[0] == 0
+        # Kirmizinin gercek Hue'sunu (~0) hedefleyen ozel bir aralikla 1 donmeli.
+        state, match_ratio = read_boolean_state(red_image, hue_range=(0, 10), sat_min=100.0)
+        assert state == 1
+        assert match_ratio == pytest.approx(1.0)
 
 
 class TestReadRoiKindDispatch:
     def test_boolean_kind_skips_ocr_and_fills_bool_state(self):
-        frame = _solid_bgr_image(100, value=200)
+        frame = _solid_turquoise_image(100)
         result = read_roi(frame, roi=(0, 0, 50, 50), kind="boolean")
         assert result.kind == "boolean"
         assert result.bool_state == 1
+        assert result.match_ratio == pytest.approx(1.0)
         assert result.text == ""
         assert result.ocr_error is None
 
-    def test_numeric_kind_leaves_bool_state_none(self):
-        frame = _solid_bgr_image(100, value=200)
+    def test_boolean_kind_bright_white_is_zero_not_falsely_positive(self):
+        # Ayni kritik regresyon read_roi uzerinden de dogrulanir: parlak ama
+        # turkuaz OLMAYAN bir ROI "dolu" sayilmamali.
+        frame = _solid_bgr_image(100, value=255)
+        result = read_roi(frame, roi=(0, 0, 50, 50), kind="boolean")
+        assert result.bool_state == 0
+        assert result.match_ratio == pytest.approx(0.0)
+
+    def test_numeric_kind_leaves_bool_state_and_match_ratio_none(self):
+        frame = _solid_turquoise_image(100)
         result = read_roi(frame, roi=(0, 0, 50, 50), kind="numeric")
         assert result.kind == "numeric"
         assert result.bool_state is None
+        assert result.match_ratio is None
 
     def test_default_kind_is_numeric(self):
-        frame = _solid_bgr_image(100, value=200)
+        frame = _solid_turquoise_image(100)
         result = read_roi(frame, roi=(0, 0, 50, 50))
         assert result.kind == "numeric"
 

@@ -59,13 +59,49 @@ except ImportError:
 # sonrasi) config'e tasinacak sekilde guncellenecek.
 DEFAULT_ROI: tuple[int, int, int, int] = (340, 160, 600, 400)
 
-# Grup 2 (READY/WORKING/SCAN OK/ERROR) kareleri icin: ROI'nin ortalama HSV
-# V (parlaklik) kanali bu esigin ustundeyse "dolu/1", altindaysa "bos/0"
-# kabul edilir. Icin bos kare koyu/dusuk parlaklik, ici mavi dolu kare
-# belirgin sekilde daha parlak/doygun olur. GECICI SABIT — gercek HMI
-# fotograflari elde olunca (saha ziyareti sonrasi) kalibre edilecek; simdilik
-# 0-255 araliginin ortasinin biraz ustu makul bir baslangic noktasi.
-BOOLEAN_BRIGHTNESS_THRESHOLD: float = 130.0
+# --- Grup 2 (READY/WORKING/SCAN OK/ERROR) renk-ozel tespiti (30-09-2026 saha
+# bulgusu duzeltmesi) ------------------------------------------------------
+# Sorun: eski kod SADECE ortalama parlakliga (V kanali, sabit esik 130.0)
+# bakiyordu — HMI ekranindaki dolu kareler TURKUAZ/CYAN renge burunuyor, ama
+# "bu bolge yeterince parlak mi" sorusu "bu bolge turkuaz mi" sorusuyla ayni
+# sey degil. Sahada gercek dolu bir kare bile bazen "bos (0)" okunuyordu,
+# cunku kameranin gercek pozlama/isik kosulunda turkuazin parlakligi bazen
+# 130 esiginin ALTINDA kaliyor; tersine, parlak ama turkuaz OLMAYAN (beyaz
+# yansima, parlak gri metin) bir alan yanlislikla "dolu (1)" donebiliyordu.
+#
+# Cozum: parlakliga degil HSV Ton (Hue) araligina + doygunluk (Saturation)
+# alt sinirina bakiyoruz. cv2.inRange ile turkuaz aralik+doygunluk kriterini
+# KARSILAYAN piksel oranini (match_ratio) hesaplayip bir esikle karsilastiriyoruz
+# — dusuk doygunluklu (gri/beyaz, S dusuk) parlak alanlar boylece ELENIYOR,
+# cunku onlarin Hue degeri anlamsiz/rastgele olsa da S kriterini gecemiyorlar.
+#
+# HSV Hue degerleri (OpenCV 0-179 olcegi, ampirik olcum — bkz. gelistirme
+# notlari): saf cyan H=90, web "turquoise" H=87, "medium/dark turquoise"
+# H=89-90. (80, 105) araligi bu degerlerin etrafinda kamera renk sapmasina
+# (beyaz dengesi, LED spektrumu farki) makul bir tolerans birakiyor, ama yesil
+# (H=60) ve saf mavi (H=120) gibi komsu renkleri DISARIDA birakiyor.
+BOOLEAN_HUE_RANGE: tuple[int, int] = (80, 105)
+
+# Doygunluk (S, 0-255) alt siniri — beyaz/gri/siyah gibi renksiz (dusuk S)
+# alanlarin, parlakligi ne olursa olsun turkuaz sayilmasini engeller (eski
+# koddaki yanlis-pozitif riskinin kok nedeni buydu). Turkuaz renkler S=167-255
+# araliginda olculdu (yukaridaki not); 80 makul, gevsek bir alt sinir.
+BOOLEAN_SAT_MIN: float = 80.0
+
+# Parlaklik (V) alt siniri — cok karanlik/neredeyse siyah piksellerde Hue
+# degeri sayisal olarak tanimsiz/gurultulu olabilir (dusuk V'de renk bilgisi
+# guvenilmez); bu tabanin altindaki pikseller Hue/Saturation kriterini
+# karsilasa bile turkuaz sayilmaz.
+BOOLEAN_VAL_MIN: float = 40.0
+
+# ROI icindeki piksellerin en az bu orani (0.0-1.0) yukaridaki turkuaz
+# kriterini (Hue araligi + S/V alt sinirlari) karsilarsa "dolu/1" kabul
+# edilir, azsa "bos/0". GECICI/makul baslangic degeri (~%28) — gercek HMI
+# fotograflari/saha testleriyle kalibre edilecek. Kismi/gurultulu turkuaz
+# (ör. kare kismen dolu, kismen arka plan karisik) bu esigin etrafinda
+# ara bir match_ratio uretir; debug/kalibrasyon icin ScreenReadResult.match_ratio
+# olarak da UI'a tasinir (bkz. asagidaki ScreenReadResult).
+BOOLEAN_MATCH_RATIO_THRESHOLD: float = 0.28
 
 
 @dataclass
@@ -82,6 +118,13 @@ class ScreenReadResult:
     SCAN OK/ERROR kareleri) OCR hic calistirilmaz, bunun yerine bool_state
     0/1 olarak doldurulur; "numeric" ROI'lerde (varsayilan) bool_state None
     kalir, text/ocr_error eskisi gibi doldurulur.
+
+    match_ratio: SADECE kind="boolean" icin doldurulur — ROI icindeki
+    piksellerin turkuaz/cyan renk kriterini (Hue+Saturation, bkz.
+    read_boolean_state) karsilama orani (0.0-1.0). bool_state'in HANGI
+    esikle 0/1'e yuvarlandigini gorunur kilmak icin debug/kalibrasyon
+    amacli tasinir (duration_ms'in UI'da gosterilmesiyle ayni desen);
+    "numeric" ROI'lerde None kalir.
     """
 
     roi: tuple[int, int, int, int]
@@ -91,6 +134,7 @@ class ScreenReadResult:
     ocr_error: str | None = None
     kind: str = "numeric"
     bool_state: int | None = None
+    match_ratio: float | None = None
 
 
 def crop_roi(frame: np.ndarray, roi: tuple[int, int, int, int] = DEFAULT_ROI) -> np.ndarray:
@@ -376,24 +420,51 @@ def read_text_ocr(image: np.ndarray, char_whitelist: str | None = None) -> tuple
 
 
 def read_boolean_state(
-    image: np.ndarray, threshold: float = BOOLEAN_BRIGHTNESS_THRESHOLD
+    image: np.ndarray,
+    hue_range: tuple[int, int] = BOOLEAN_HUE_RANGE,
+    sat_min: float = BOOLEAN_SAT_MIN,
+    val_min: float = BOOLEAN_VAL_MIN,
+    match_ratio_threshold: float = BOOLEAN_MATCH_RATIO_THRESHOLD,
 ) -> tuple[int, float]:
     """Grup 2 (READY/WORKING/SCAN OK/ERROR) kareleri icin OCR YERINE karar verir.
 
-    Kirpilan ROI'nin ortalama HSV V (parlaklik) kanalini hesaplar; esigin
-    ustundeyse 1 (dolu/mavi), altindaysa 0 (bos) doner. Boyutu 0 olan
-    (kare disina tasmis) goruntude 0/0.0 doner — "bos" ile ayni sonuc,
-    zaten okunacak piksel yok.
+    ESKI davranis (30-09-2026'ya kadar) SADECE ortalama HSV V (parlaklik)
+    kanalina bakiyordu — bu, saha gozlemiyle YANLIS bulundu: dolu kareler
+    turkuaz/cyan renge burunuyor, "parlak mi" sorusu "turkuaz mi" sorusuyla
+    ayni sey degil (bkz. BOOLEAN_HUE_RANGE tanimindaki not). YENI davranis:
+    ROI'nin HSV Hue (ton) + Saturation (doygunluk) + Value (parlaklik) alt
+    sinirlarini AYNI ANDA karsilayan piksellerin oranini (match_ratio) hesaplar
+    (cv2.inRange + cv2.countNonZero) ve bu oran match_ratio_threshold'u gecerse
+    1 (dolu/turkuaz), gecmezse 0 (bos) doner.
 
-    Doner: (state 0|1, avg_brightness) — avg_brightness debug/kalibrasyon
-    icin ham deger olarak da UI'a tasinir.
+    Neden Hue+Saturation birlikte: Hue tek basina yeterli degil — dusuk
+    doygunluklu (gri/beyaz/siyah) bir piksel de HSV donusumunde "tesadufen"
+    turkuaz Hue araligina dusebilir (renk bilgisi neredeyse yok, Hue gurultulu);
+    sat_min bu yanlis-pozitifi eler. val_min ise ayni nedenle cok karanlik
+    pikselleri (Hue/S guvenilmez) eler.
+
+    Boyutu 0 olan (kare disina tasmis) goruntude 0/0.0 doner — "bos" ile ayni
+    sonuc, zaten okunacak piksel yok.
+
+    hue_range/sat_min/val_min/match_ratio_threshold opsiyonel parametreler —
+    varsayilanlar turkuaz icin kalibre edildi, ama ileride farkli renkte bir
+    gosterge (ör. kirmizi alarm karesi) cikarsa kod DEGISMEDEN, cagiran taraf
+    farkli degerler gecerek ayarlayabilir (bkz. modul-seviyesi BOOLEAN_*
+    sabitlerindeki notlar).
+
+    Doner: (state 0|1, match_ratio) — match_ratio debug/kalibrasyon icin ham
+    deger olarak da UI'a tasinir (bkz. ScreenReadResult.match_ratio).
     """
     if image.size == 0:
         return 0, 0.0
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    avg_brightness = float(cv2.mean(hsv)[2])
-    state = 1 if avg_brightness >= threshold else 0
-    return state, avg_brightness
+    hue_min, hue_max = hue_range
+    lower = np.array([hue_min, sat_min, val_min], dtype=np.uint8)
+    upper = np.array([hue_max, 255, 255], dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower, upper)
+    match_ratio = float(cv2.countNonZero(mask)) / float(mask.size)
+    state = 1 if match_ratio >= match_ratio_threshold else 0
+    return state, match_ratio
 
 
 def read_roi(
@@ -403,8 +474,8 @@ def read_roi(
     quad: np.ndarray | None = None,
     ocr_whitelist: str | None = None,
 ) -> ScreenReadResult:
-    """ROI'yi kirpar; "numeric" ise OCR+renk, "boolean" ise SADECE renk/parlaklik
-    esigiyle 0/1 karari hesaplar — bu modulun tek giris noktasi.
+    """ROI'yi kirpar; "numeric" ise OCR+renk, "boolean" ise SADECE renk (Hue/
+    Saturation) kriteriyle 0/1 karari hesaplar — bu modulun tek giris noktasi.
 
     kind="boolean" durumunda OCR hic calistirilmaz (Tesseract kucuk dolu/bos
     kareler icin anlamsiz/gereksiz CPU yuku) — bunun yerine bool_state doldurulur.
@@ -421,7 +492,7 @@ def read_roi(
     hsv_color = average_color_hsv(cropped)
     rgb_color = average_color_rgb(cropped)
     if kind == "boolean":
-        state, _avg_brightness = read_boolean_state(cropped)
+        state, match_ratio = read_boolean_state(cropped)
         return ScreenReadResult(
             roi=roi,
             avg_color_hsv=hsv_color,
@@ -430,6 +501,7 @@ def read_roi(
             ocr_error=None,
             kind="boolean",
             bool_state=state,
+            match_ratio=match_ratio,
         )
     text, ocr_error = read_text_ocr(cropped, char_whitelist=ocr_whitelist)
     return ScreenReadResult(
@@ -440,4 +512,5 @@ def read_roi(
         ocr_error=ocr_error,
         kind="numeric",
         bool_state=None,
+        match_ratio=None,
     )

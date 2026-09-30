@@ -637,8 +637,8 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
     mantigin tekrarlanip zamanla birbirinden sapmasini onler.
 
     Doner: (okuma sonuc listesi [{"name","roi","kind","text","ocr_error",
-    "bool_state","avg_color_hsv","avg_color_rgb","reader","confidence"}, ...],
-    roi_reference_uncertain)
+    "bool_state","match_ratio","avg_color_hsv","avg_color_rgb","reader",
+    "confidence"}, ...], roi_reference_uncertain)
 
     reader (Görev C, 2026-09-30): ROI'nin "reader" alani "template" ise
     (bkz. RoiDef) Tesseract YERINE digit_reader.read_digits (sablon
@@ -685,6 +685,7 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
                     "text": text,
                     "ocr_error": None,
                     "bool_state": None,
+                    "match_ratio": None,
                     "avg_color_hsv": list(average_color_hsv(cropped)),
                     "avg_color_rgb": list(average_color_rgb(cropped)),
                     "reader": "template",
@@ -703,6 +704,7 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
                 "text": result.text,
                 "ocr_error": result.ocr_error,
                 "bool_state": result.bool_state,
+                "match_ratio": result.match_ratio,
                 "avg_color_hsv": list(result.avg_color_hsv),
                 "avg_color_rgb": list(result.avg_color_rgb),
                 "reader": reader,
@@ -751,9 +753,10 @@ class RoiDef(BaseModel):
     w: int = Field(gt=0)
     h: int = Field(gt=0)
     # "numeric" (varsayilan, OCR ile okunur — Grup 1/3) ya da "boolean"
-    # (Grup 2 durum kareleri — OCR YERINE ortalama parlaklik esigiyle 0/1
-    # okunur, bkz. screen_reader.read_boolean_state). Eski kayitli ROI'lerde
-    # bu alan hic yoktu -> Pydantic varsayilani "numeric" ile geriye uyumlu.
+    # (Grup 2 durum kareleri — OCR YERINE turkuaz/cyan renk (Hue+Saturation)
+    # kriteriyle 0/1 okunur, bkz. screen_reader.read_boolean_state). Eski
+    # kayitli ROI'lerde bu alan hic yoktu -> Pydantic varsayilani "numeric"
+    # ile geriye uyumlu.
     kind: Literal["numeric", "boolean"] = "numeric"
     # Opsiyonel/ROI-bazinda Tesseract karakter whitelist'i (ör. "0123456789.-"
     # sayisal bir ROI icin) — bkz. screen_reader.read_text_ocr docstring'i

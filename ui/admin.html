@@ -1623,6 +1623,16 @@
           stateEl.style.color = r.bool_state === 1 ? "#00e0a0" : "#888";
           stateEl.textContent = ` : ${r.bool_state === 1 ? "DOLU (1)" : "BOŞ (0)"}`;
           line.appendChild(stateEl);
+          // Debug/kalibrasyon degeri — turkuaz renk kriterini (Hue+Saturation)
+          // karsilayan piksel orani; bool_state'in hangi esikle 0/1'e
+          // yuvarlandigini gorunur kilar (duration_ms ile ayni desen).
+          if (typeof r.match_ratio === "number") {
+            const ratioEl = document.createElement("span");
+            ratioEl.style.color = "#555";
+            ratioEl.style.fontSize = "0.9em";
+            ratioEl.textContent = `  (match_ratio: ${(r.match_ratio * 100).toFixed(0)}%)`;
+            line.appendChild(ratioEl);
+          }
         } else if (r.ocr_error) {
           // OCR hic calisamadi (pytesseract/Tesseract eksik vb.) — bunu
           // "metin bulunamadi" ile karistirmamak icin ayri, kirmizi gosterilir.
