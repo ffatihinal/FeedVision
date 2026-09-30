@@ -38,6 +38,8 @@ from typing import Literal
 
 import alarm_sounds
 import calibration_store
+import digit_reader
+import digit_templates_store
 import journal
 import motion_calc
 import motion_params
@@ -56,7 +58,7 @@ from screen_calibration import (
     warp_roi_quad,
     warp_roi_rect,
 )
-from screen_reader import read_roi
+from screen_reader import average_color_hsv, average_color_rgb, crop_roi, crop_roi_quad, read_roi
 from serial_bridge import bridge
 from vision import CAMERA_NUMS, STREAM_SIZE, vision
 
@@ -525,6 +527,71 @@ def vision_current_corners(cam_id: str):
     return {"corners": corners.tolist() if corners is not None else None}
 
 
+class DigitTemplateCapture(BaseModel):
+    """Operatörün Admin'de (ROI/kalibrasyon şablonu çizimiyle AYNI tıkla-
+    sürükle mekanizmasıyla) işaretlediği TEK BİR karakterin bölgesi + o
+    bölgenin HANGİ karakter (0-9, '.', '-') olduğu (Görev B, 2026-09-30).
+    label, digit_reader.CHARACTER_LABELS ile birebir kısıtlı — geçersiz bir
+    karakter (ör. yanlışlıkla harf) Pydantic tarafından 422 ile reddedilir,
+    main.py'nin kendisi ayrıca kontrol etmek zorunda kalmaz."""
+
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    w: int = Field(gt=0)
+    h: int = Field(gt=0)
+    label: Literal["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-"]
+
+
+@app.post("/vision/{cam_id}/digit-template")
+def vision_add_digit_template(cam_id: str, payload: DigitTemplateCapture):
+    """Görev B (2026-09-30) — Fatih'in sahada, GERÇEK HMI ekranından, tek bir
+    karakterin (ör. gerçekten "1" gösteren bir ROI içinden küçük bir bölge)
+    görüntüsünü yakalayıp digit_reader'ın kullanacağı referans şablonu olarak
+    kaydetmesi. calibration/template endpoint'iyle AYNI akış (şimdiki kareyi
+    yakala, bölgeyi kırp, JPEG'e kodla, depoya yaz) — TEK fark: index değil
+    LABEL bazında saklanır, aynı etiket ÜZERİNE YAZILIR (bkz.
+    digit_templates_store.add_template docstring'i)."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    frame = _capture_frame(cam_id)
+    if frame is None:
+        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı / kare çözümlenemedi")
+    frame_h, frame_w = frame.shape[:2]
+    if payload.x + payload.w > frame_w or payload.y + payload.h > frame_h:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Şablon bölgesi kare sınırlarını aşıyor (kare: {frame_w}x{frame_h})",
+        )
+    crop = frame[payload.y : payload.y + payload.h, payload.x : payload.x + payload.w]
+    ok, jpg = cv2.imencode(".jpg", crop)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Şablon görüntüsü kodlanamadı (JPEG encode hatası)")
+    entry = digit_templates_store.add_template(cam_id, payload.label, jpg.tobytes())
+    return {"success": True, "label": payload.label, "template": entry, "templates": digit_templates_store.get_templates(cam_id)}
+
+
+@app.get("/vision/{cam_id}/digit-templates")
+def vision_get_digit_templates(cam_id: str):
+    """Kamera için kayıtlı rakam şablonlarını (etiket -> {filename,
+    captured_at}) döner — hiç yakalanmamış etiketler sözlükte hiç yer almaz
+    (main._load_digit_template_set o eksik etiketler için sentetik yedeğe
+    düşer, bkz. o fonksiyonun docstring'i)."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    return {"templates": digit_templates_store.get_templates(cam_id)}
+
+
+@app.delete("/vision/{cam_id}/digit-template/{label}")
+def vision_delete_digit_template(cam_id: str, label: str):
+    """Kayıtlı bir karakter şablonunu (metadata + diskteki JPEG) siler.
+    Kayıtlı olmayan bir etiket sessizce yok sayılır (bkz.
+    digit_templates_store.remove_template)."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    templates = digit_templates_store.remove_template(cam_id, label)
+    return {"success": True, "templates": templates}
+
+
 def _capture_frame(cam_id: str) -> np.ndarray | None:
     """Kameradan tek kare alip decode eder. Kamera kapaliysa/decode
     basarisizsa None doner (cagiran taraf HTTP hatasi ya da sessiz atlama
@@ -536,6 +603,33 @@ def _capture_frame(cam_id: str) -> np.ndarray | None:
     return cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
 
 
+def _load_digit_template_set(cam_id: str) -> digit_reader.DigitTemplateSet:
+    """Kamera icin kullanima hazir rakam sablon setini kurar: ONCE
+    digit_reader.generate_default_templates() (PIL sentetik yedek -- "hic
+    gercek sablon yoksa bile calisir" garantisi, bkz. o fonksiyonun
+    docstring'i) ile baslar, SONRA digit_templates_store'da kayitli GERCEK
+    sablonlar (varsa) per-etiket bazinda UZERINE YAZAR (bkz.
+    digit_templates_store modul docstring'i).
+
+    Her cagrida YENIDEN olusturulur (ontbellek/cache YOK) -- asagidaki
+    _adjust_rois_via_templates (kalibrasyon sablonlari) ile AYNI kasitli
+    tercih: sablon sayisi kucuk (en fazla 12 karakter), JPEG decode/PIL
+    render maliyeti Tesseract subprocess baslatma maliyetinin yaninda
+    ONEMSIZ kaliyor (bkz. tests/test_digit_reader.py::TestPerformanceComparison)
+    -- cache gecersizleme (invalidation) karmasikligina bugun saha zamaninda
+    girmeye deger degil (Görev C, 2026-09-30, kapsam kararı)."""
+    template_set = digit_reader.generate_default_templates()
+    for label, meta in digit_templates_store.get_templates(cam_id).items():
+        image_bytes = digit_templates_store.read_template_image_bytes(cam_id, meta["filename"])
+        if image_bytes is None:
+            continue
+        image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            continue
+        template_set.add(label, image)
+    return template_set
+
+
 def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
     """Bir kamera icin kayitli TUM ROI'leri (kalibrasyona gore kaymayi
     telafi ederek) okur. Hem /vision/{cam_id}/read-test endpoint'i hem
@@ -543,7 +637,15 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
     mantigin tekrarlanip zamanla birbirinden sapmasini onler.
 
     Doner: (okuma sonuc listesi [{"name","roi","kind","text","ocr_error",
-    "bool_state","avg_color_hsv","avg_color_rgb"}, ...], roi_reference_uncertain)
+    "bool_state","avg_color_hsv","avg_color_rgb","reader","confidence"}, ...],
+    roi_reference_uncertain)
+
+    reader (Görev C, 2026-09-30): ROI'nin "reader" alani "template" ise
+    (bkz. RoiDef) Tesseract YERINE digit_reader.read_digits (sablon
+    eslestirme) cagrilir -- SADECE o ROI icin, digerleri etkilenmez. Alan
+    yoksa/varsayilan "tesseract" ise ASAGIDAKI ESKI YOL AYNEN calisir --
+    bu fonksiyonun geri kalani (kind/quad/ocr_whitelist islenmesi) 30-09-2026
+    ONCESI ile birebir ayni, HICBIR SATIRI degismedi.
 
     On-isleme (CLAHE): SADECE ui_screen icin, Admin'den acilmissa (bkz.
     vision_settings_store.py) ROI kirpmadan ONCE karenin tamamina uygulanir.
@@ -563,6 +665,34 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
         quad = roi_def.get("quad")  # kalibrasyon yoksa yok -> read_roi eski duz-dikdortgen davranisina duser
         quad_arr = np.array(quad, dtype=np.float32) if quad is not None else None
         ocr_whitelist = roi_def.get("ocr_whitelist")  # eski kayitli ROI'lerde alan yok -> None (whitelist yok)
+        reader = roi_def.get("reader", "tesseract")  # eski kayitli ROI'lerde alan yok -> "tesseract" (geriye uyumlu)
+
+        if kind == "numeric" and reader == "template":
+            # Görev C — opsiyonel/deneysel yol: SADECE operator acikca
+            # reader="template" secmisse buraya girilir (bkz. yukaridaki
+            # docstring). crop/renk hesabi read_roi ile AYNI yardimci
+            # fonksiyonlarla (screen_reader.crop_roi/crop_roi_quad/
+            # average_color_*) yapiliyor ki iki yol arasinda renk/kirpma
+            # davranisi tutarli kalsin.
+            cropped = crop_roi_quad(frame, quad_arr) if quad_arr is not None else crop_roi(frame, roi_tuple)
+            text, confidence = digit_reader.read_digits(cropped, _load_digit_template_set(cam_id))
+            results.append(
+                {
+                    "name": roi_def["name"],
+                    "roi": list(roi_tuple),
+                    "roi_quad": quad,
+                    "kind": "numeric",
+                    "text": text,
+                    "ocr_error": None,
+                    "bool_state": None,
+                    "avg_color_hsv": list(average_color_hsv(cropped)),
+                    "avg_color_rgb": list(average_color_rgb(cropped)),
+                    "reader": "template",
+                    "confidence": confidence,
+                }
+            )
+            continue
+
         result = read_roi(frame, roi_tuple, kind=kind, quad=quad_arr, ocr_whitelist=ocr_whitelist)
         results.append(
             {
@@ -575,6 +705,8 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
                 "bool_state": result.bool_state,
                 "avg_color_hsv": list(result.avg_color_hsv),
                 "avg_color_rgb": list(result.avg_color_rgb),
+                "reader": reader,
+                "confidence": None,
             }
         )
     return results, uncertain
@@ -629,6 +761,13 @@ class RoiDef(BaseModel):
     # GLOBAL/sabit yapilmadi cunku ROI'ler arasi beklenen karakter kumesi
     # farkli olabilir (bazilari ileride harf de icerebilir).
     ocr_whitelist: str | None = Field(default=None, max_length=32)
+    # Görev C (2026-09-30) — hangi motor bu ROI'yi okuyacak: "tesseract"
+    # (varsayilan, OCR — GERİYE UYUMLU, mevcut hiçbir ROI bozulmaz) ya da
+    # "template" (deneysel — digit_reader.read_digits, sabit-fontlu HMI
+    # rakamları için template-matching). Sadece kind="numeric" ROI'lerde
+    # anlamlı (bkz. main._read_all_rois) — "boolean" ROI'lerde zaten hiç OCR
+    # çağrılmıyor, bu alan orada yok sayılır.
+    reader: Literal["tesseract", "template"] = "tesseract"
 
 
 class RoiListPayload(BaseModel):
