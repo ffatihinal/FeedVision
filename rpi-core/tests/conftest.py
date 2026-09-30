@@ -54,6 +54,20 @@ def isolated_calibration_config(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def isolated_digit_templates_store(tmp_path, monkeypatch):
+    """digit_templates_store.CONFIG_PATH'i (VE şablon JPEG'lerinin yazıldığı
+    TEMPLATES_DIR'i) geçici bir dizine yönlendirir — calibration_store'daki
+    isolated_calibration_config fixture'ıyla aynı gerekçe (2026-09-30, Görev B:
+    testler gerçek rpi-core/digit_templates/ klasörüne dosya yazmasın diye)."""
+    import digit_templates_store
+
+    path = tmp_path / "digit_templates_config.json"
+    monkeypatch.setattr(digit_templates_store, "CONFIG_PATH", path)
+    monkeypatch.setattr(digit_templates_store, "TEMPLATES_DIR", tmp_path / "digit_templates")
+    return path
+
+
+@pytest.fixture
 def isolated_feed_total_state(tmp_path, monkeypatch):
     """feed_totalizer.STATE_PATH'i geçici bir dosyaya yönlendirir."""
     import feed_totalizer
