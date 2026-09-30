@@ -346,6 +346,30 @@
       <span style="color:#2ecc71;">●</span> şimdiki tespit edilen köşe (canlı)
     </div>
     <hr style="border-color:#292929; margin:16px 0;">
+    <!-- Görev B (30-09-2026): Tesseract'a alternatif, DENEYSEL rakam okuma
+         (digit_reader.py) için gerçek karakter şablonu yakalama akışı.
+         Operatör ROI çizim mekanizmasının AYNISIYLA canvas üzerinde bir
+         karakterin (ör. gerçekten "1" gösteren bölge) üzerine küçük bir
+         dikdörtgen çizer, hangi karakter olduğunu seçer — 0-9/./- için ayrı
+         ayrı yakalanır. Hiç yakalanmamış karakterler PIL ile üretilmiş
+         sentetik (düşük doğruluklu) yedekle okunmaya devam eder (bkz.
+         main._load_digit_template_set). -->
+    <h3 style="font-size:15px; margin-bottom:6px;">Rakam Şablonları (Özel Şablon okuma — deneysel)</h3>
+    <div class="row-group">
+      <button onclick="toggleDigitTemplateMode()" id="digit-template-mode-btn">Rakam Şablonlarını Yakala</button>
+      <span id="digit-template-status" style="color:#888; font-size:13px;">Rakam şablonu durumu yükleniyor…</span>
+    </div>
+    <div style="color:#888; font-size:12px; margin:4px 0;">
+      "Rakam Şablonlarını Yakala" AÇIKKEN canvas üzerinde TEK BİR karakterin
+      (ör. bir ROI içindeki "1" rakamının) üzerine dikdörtgen çizin, hangi
+      karakter olduğunu (0-9, "." veya "-") sorulduğunda girin. Her karakter
+      için AYRI AYRI yapılması gerekir — aynı karakteri tekrar yakalarsanız
+      eskisinin üzerine yazılır. Bitirince butona tekrar basıp modu kapatın.
+    </div>
+    <ul id="digit-template-list" style="list-style:none; padding:0; margin:0 0 8px 0; font-size:13px;">
+      <li style="color:#888;">Henüz hiç rakam şablonu yakalanmadı (sentetik yedek kullanılıyor).</li>
+    </ul>
+    <hr style="border-color:#292929; margin:16px 0;">
     <!-- Gorev D (23-09-2026): manuel pozlama + CLAHE kontrast artirma -
          SADECE UI Screen Camera icin, Chamber Camera'ya dokunmuyor. -->
     <h3 style="font-size:15px; margin-bottom:6px; display:flex; align-items:center; gap:8px;">
@@ -1126,6 +1150,147 @@
       }
     }
 
+    // ==========================================================================
+    //  Görev B (30-09-2026) — rakam (digit) şablon yakalama akışı. calibration
+    //  template akışıyla (yukarısı) AYNI tıkla-sürükle mekanizması, TEK fark:
+    //  index değil LABEL (0-9,.,-) bazında saklanıyor (bkz. digit_templates_
+    //  store.py) — aynı karakter tekrar yakalanırsa üzerine yazılır.
+    // ==========================================================================
+    const DIGIT_LABELS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-"];
+    let digitTemplates = {};       // { label: {filename, captured_at} }
+    let digitTemplateMode = false;
+
+    function renderDigitTemplates() {
+      const ul = document.getElementById("digit-template-list");
+      const statusEl = document.getElementById("digit-template-status");
+      ul.innerHTML = "";
+      const capturedLabels = Object.keys(digitTemplates);
+      if (capturedLabels.length === 0) {
+        ul.innerHTML = '<li style="color:#888;">Henüz hiç rakam şablonu yakalanmadı (sentetik yedek kullanılıyor).</li>';
+      } else {
+        // Sabit sırada (0-9,.,-) göster — Object.keys'in rastgele sırası yerine.
+        DIGIT_LABELS.filter((label) => label in digitTemplates).forEach((label) => {
+          const li = document.createElement("li");
+          li.style.display = "flex";
+          li.style.alignItems = "center";
+          li.style.gap = "8px";
+          li.style.padding = "3px 0";
+          const labelSpan = document.createElement("span");
+          labelSpan.textContent = `"${label}" — yakalandı`;
+          const delBtn = document.createElement("button");
+          delBtn.textContent = "Sil";
+          delBtn.style.fontSize = "12px";
+          delBtn.style.padding = "3px 8px";
+          delBtn.onclick = () => deleteDigitTemplate(label);
+          li.appendChild(labelSpan);
+          li.appendChild(delBtn);
+          ul.appendChild(li);
+        });
+      }
+      const missing = DIGIT_LABELS.filter((label) => !(label in digitTemplates));
+      if (missing.length === 0) {
+        statusEl.textContent = `Tüm karakterler (0-9,.,-) yakalandı — gerçek şablonlar kullanılıyor.`;
+      } else {
+        statusEl.textContent = `${capturedLabels.length}/12 karakter yakalandı. Eksik: ${missing.join(" ")} (bunlar için sentetik yedek kullanılıyor).`;
+      }
+    }
+
+    async function loadDigitTemplates() {
+      const buttonName = "Rakam Şablonları - Yükle";
+      const task = `GET /vision/${ROI_CAM_ID}/digit-templates`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/digit-templates`);
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      if (!response.ok) {
+        logToConsole(buttonName, task, `Sunucu ${response.status}`, true);
+        return;
+      }
+      const data = await response.json();
+      digitTemplates = data.templates || {};
+      renderDigitTemplates();
+      logToConsole(buttonName, task, `${Object.keys(digitTemplates).length}/12 rakam şablonu yüklendi.`, false);
+    }
+
+    function toggleDigitTemplateMode() {
+      digitTemplateMode = !digitTemplateMode;
+      const btn = document.getElementById("digit-template-mode-btn");
+      btn.textContent = digitTemplateMode ? "Şablon Yakalamayı Bitir" : "Rakam Şablonlarını Yakala";
+      const canvas = roiCanvasEl();
+      canvas.style.outline = digitTemplateMode ? "3px solid #00e5ff" : (calibrationTemplateMode ? "3px solid #f4d03f" : "none");
+    }
+
+    // roiPointerUp bu fonksiyonu çağırır (digitTemplateMode AÇIKKEN) — çizilen
+    // bölge ŞİMDİKİ kareden kırpılıp, operatörün seçtiği etiketle kaydedilir
+    // (main.py kendi kare yakalar, tarayıcı sadece koordinat+etiket gönderir).
+    async function submitDigitTemplate(x, y, w, h) {
+      const label = prompt('Bu bölgedeki karakter hangisi? (0-9, "." veya "-")');
+      if (label === null) return;  // iptal
+      const trimmed = label.trim();
+      if (!DIGIT_LABELS.includes(trimmed)) {
+        alert(`Geçersiz karakter: "${trimmed}". Sadece 0-9, "." ve "-" kabul edilir.`);
+        return;
+      }
+      const statusEl = document.getElementById("digit-template-status");
+      const buttonName = "Rakam Şablonu Ekle";
+      const task = `POST /vision/${ROI_CAM_ID}/digit-template`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/digit-template`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ x, y, w, h, label: trimmed }),
+        });
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        alert(`Şablon eklenemedi (ağ hatası): ${e.message}`);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        const detail = data?.detail ?? "bilinmeyen hata";
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        alert(`Şablon eklenemedi: ${detail}`);
+        return;
+      }
+      digitTemplates = data.templates || {};
+      renderDigitTemplates();
+      logToConsole(buttonName, task, `Sunucu 200 OK — "${trimmed}" şablonu kaydedildi.`, false);
+    }
+
+    async function deleteDigitTemplate(label) {
+      const buttonName = "Rakam Şablonu Sil";
+      const task = `DELETE /vision/${ROI_CAM_ID}/digit-template/${label}`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/digit-template/${encodeURIComponent(label)}`, { method: "DELETE" });
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${data?.detail ?? "bilinmeyen hata"}`, true);
+        return;
+      }
+      digitTemplates = data.templates || {};
+      renderDigitTemplates();
+      logToConsole(buttonName, task, `Sunucu 200 OK — "${label}" şablonu silindi.`, false);
+    }
+
     // Görev B — canlı overlay için "şimdiki" (yeşil) köşe tespiti. Sürekli
     // okuma döngüsüyle aynı ritimde olmasına gerek yok (referans noktası
     // gösterimi, kritik okuma değil) — bu yüzden ayrı, daha seyrek bir
@@ -1687,7 +1852,10 @@
         const li = document.createElement("li");
         const label = document.createElement("span");
         const kindLabel = roi.kind === "boolean" ? "Durum" : "Sayısal";
-        label.textContent = `${roi.name} [${kindLabel}]: [${roi.x}, ${roi.y}, ${roi.w}, ${roi.h}]`;
+        // Görev C — okuma yöntemi sadece Sayısal ROI'lerde anlamlı (Durum
+        // ROI'lerinde zaten hiç OCR/şablon çağrılmıyor, bkz. main._read_all_rois).
+        const readerLabel = roi.kind === "boolean" ? "" : (roi.reader === "template" ? "/Şablon" : "/Tesseract");
+        label.textContent = `${roi.name} [${kindLabel}${readerLabel}]: [${roi.x}, ${roi.y}, ${roi.w}, ${roi.h}]`;
         const delBtn = document.createElement("button");
         delBtn.textContent = "Sil";
         delBtn.onclick = () => {
@@ -1737,6 +1905,14 @@
         drawRoiCanvas();
         return;
       }
+      // Görev B (30-09-2026): "Rakam Şablonlarını Yakala" modu AÇIKKEN, çizilen
+      // dikdörtgen de ROI DEĞİL — TEK BİR karakterin referans şablonu olarak
+      // gönderilir (bkz. submitDigitTemplate).
+      if (digitTemplateMode) {
+        submitDigitTemplate(x, y, w, h);
+        drawRoiCanvas();
+        return;
+      }
       const name = prompt("Bu ROI için bir isim/etiket girin (örn. sicaklik_degeri):");
       if (!name || !name.trim()) {
         drawRoiCanvas();
@@ -1748,7 +1924,20 @@
         "Bu ROI bir DURUM karesi mi (READY/WORKING/SCAN OK/ERROR gibi dolu/boş kare)?\n\n" +
         "Tamam = Durum (0/1)\nİptal = Sayısal (OCR ile okunur)"
       );
-      roiList.push({ name: name.trim(), x, y, w, h, kind: isBoolean ? "boolean" : "numeric" });
+      // Görev C (30-09-2026): Sayısal ROI'lerde okuma yöntemi seçimi —
+      // Tesseract (varsayılan, olgun/test edilmiş) ya da Özel Şablon
+      // (deneysel, digit_reader.py — sadece sabit-fontlu/sabit-pozisyonlu
+      // HMI rakamları için, saha testi gerektirir). Durum ROI'lerinde zaten
+      // hiç OCR çağrılmadığı için bu soru sadece Sayısal seçilince sorulur.
+      let reader = "tesseract";
+      if (!isBoolean) {
+        const useTemplate = confirm(
+          "Okuma yöntemi:\n\nTamam = Özel Şablon (deneysel — digit_reader, sabit fontlu HMI rakamı gerektirir)\n" +
+          "İptal = Tesseract (varsayılan, OCR)"
+        );
+        reader = useTemplate ? "template" : "tesseract";
+      }
+      roiList.push({ name: name.trim(), x, y, w, h, kind: isBoolean ? "boolean" : "numeric", reader });
       renderRoiList();
       drawRoiCanvas();
     }
@@ -2862,6 +3051,7 @@
     loadWheelDiameters();
     loadMotionParams();
     refreshCalibrationStatus();
+    loadDigitTemplates();
     loadRules();
     loadVisionRawLogInterval();
     loadAlarmSounds();
