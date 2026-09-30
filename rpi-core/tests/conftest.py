@@ -41,11 +41,15 @@ def isolated_roi_config(tmp_path, monkeypatch):
 
 @pytest.fixture
 def isolated_calibration_config(tmp_path, monkeypatch):
-    """calibration_store.CONFIG_PATH'i geçici bir dosyaya yönlendirir."""
+    """calibration_store.CONFIG_PATH'i (VE şablon JPEG'lerinin yazıldığı
+    TEMPLATES_DIR'i) geçici bir dizine yönlendirir — şablon testleri gerçek
+    rpi-core/calibration_templates/ klasörüne dosya yazmasın diye (2026-09-30,
+    Görev A: add_template artık diske gerçek JPEG yazıyor)."""
     import calibration_store
 
     path = tmp_path / "calibration_config.json"
     monkeypatch.setattr(calibration_store, "CONFIG_PATH", path)
+    monkeypatch.setattr(calibration_store, "TEMPLATES_DIR", tmp_path / "calibration_templates")
     return path
 
 

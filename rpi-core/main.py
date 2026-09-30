@@ -48,7 +48,14 @@ import vision_settings_store
 from feed_totalizer import totalizer as feed_totalizer
 from image_preprocess import apply_clahe
 from rule_engine import evaluate_rules
-from screen_calibration import compute_warp_matrix, detect_screen_corners, warp_roi_quad, warp_roi_rect
+from screen_calibration import (
+    compute_warp_matrix,
+    compute_warp_matrix_from_anchors,
+    detect_screen_corners,
+    find_template_anchor,
+    warp_roi_quad,
+    warp_roi_rect,
+)
 from screen_reader import read_roi
 from serial_bridge import bridge
 from vision import CAMERA_NUMS, STREAM_SIZE, vision
@@ -125,6 +132,13 @@ _last_step_dir: "int | None" = None
 # başlarsa (servis restart) sıfırlanır — sorun değil, bir sonraki başarılı
 # karede yeniden dolar.
 _last_known_corners: dict[str, "np.ndarray"] = {}
+
+# ROI drift düzeltme — ŞABLON (template) kaynağı için aynı fikir: bir önceki
+# karede gerçekten eşleşen (referans_anchor, şimdiki_konum) nokta çiftleri
+# kamera başına bellekte tutulur (bkz. _adjust_rois_via_templates, 2026-09-30
+# Görev A). Tek bir karede şablon(lar) bulunamazsa (glare/obstrüksiyon) son
+# bilinen eşleşmeye düşülür — _last_known_corners ile birebir aynı gerekçe.
+_last_known_anchors: dict[str, tuple[list, list]] = {}
 
 
 class _PollingAccessLogFilter(logging.Filter):
@@ -248,26 +262,78 @@ def vision_scan_save(cam_id: str):
     return {"success": True, "filename": filename}
 
 
-def _adjust_rois_for_drift(cam_id: str, frame: np.ndarray, rois: list[dict]) -> tuple[list[dict], bool]:
-    """Kayıtlı ROI'leri, kamera kaymasını (drift) telafi edecek şekilde günceller.
+def _warp_rois_with_matrix(rois: list[dict], matrix: np.ndarray) -> list[dict]:
+    """Ortak son adım: kaynağı ne olursa olsun (bezel KÖŞE yöntemi ya da
+    ŞABLON yöntemi, bkz. çağıranlar) hesaplanan dönüşüm matrisini ROI
+    listesine uygular — iki kaynağın da ürettiği matris compute_warp_matrix
+    ile AYNI 3x3 formatta olduğu için warp_roi_rect/warp_roi_quad ortak
+    kalabiliyor (2026-09-30, Görev A entegrasyonu)."""
+    adjusted = []
+    for roi_def in rois:
+        roi_tuple = (roi_def["x"], roi_def["y"], roi_def["w"], roi_def["h"])
+        x, y, w, h = warp_roi_rect(roi_tuple, matrix)
+        quad = warp_roi_quad(roi_tuple, matrix)
+        adjusted.append({**roi_def, "x": x, "y": y, "w": w, "h": h, "quad": quad.tolist()})
+    return adjusted
 
-    Kalibrasyon (bkz. /vision/{cam_id}/calibrate) hiç yapılmamışsa ROI'ler
-    olduğu gibi (düzeltmesiz) döner — bu özellik OPSİYONEL/geriye uyumlu,
-    kalibrasyon yapılmadan da eski davranış (ham ROI) çalışmaya devam eder.
 
-    Döner: (düzeltilmiş roi listesi, uncertain) — uncertain=True ise bezel bu
-    karede bulunamadı ve son bilinen köşe (ya da hiç yoksa referansın kendisi)
-    kullanıldı; çağıran taraf bunu kullanıcıya/Kontrol Kriterleri'ne "ROI referansı
-    belirsiz" olarak iletmeli (sessizce yanlış okumak yerine açıkça bildirmek).
+def _adjust_rois_via_templates(
+    cam_id: str, frame: np.ndarray, rois: list[dict], templates: list[dict]
+) -> tuple[list[dict], bool]:
+    """Görev A (2026-09-30) — BİRİNCİL referans kaynağı: sabit UI şablon(lar)ı
+    (ör. dişli ikonu). Kayıtlı her şablonu find_template_anchor ile şimdiki
+    karede arar; bulunanlardan (referans_anchor, şimdiki_konum) çiftleri
+    biriktirip compute_warp_matrix_from_anchors ile dönüşüm hesaplar (1
+    nokta -> sadece öteleme, 2+ nokta -> dönme+ölçek de kestirilir).
 
-    Kalibrasyon VARSA, her roi_def'e ayrıca "quad" (4x2 liste, gerçek/olası
-    eğik dörtgen köşeleri — bkz. warp_roi_quad) eklenir; x/y/w/h alanları
-    geriye uyumluluk için bounding box olarak kalmaya devam eder (2026-09-29,
-    Görev A: bounding box'a indirgeme yerine gerçek dörtgen geometrisi de
-    taşınıyor, okuma/overlay tarafı bunu tercih edecek).
+    Neden bu, eski bezel yönteminden AYRI bir fonksiyon: bezel yöntemi TEK
+    bir 4-köşe kümesi arıyordu, bu yöntem 1..N ayrı nokta arıyor — eşleşme
+    bulma/uncertain mantığı farklı (bazı şablonlar bulunup bazıları
+    bulunamayabilir, bezelde ise "ya hep ya hiç").
     """
+    ref_points: list[list[float]] = []
+    cur_points: list[list[float]] = []
+    for tpl in templates:
+        img_bytes = calibration_store.read_template_image_bytes(cam_id, tpl["filename"])
+        if img_bytes is None:
+            continue
+        template_img = cv2.imdecode(np.frombuffer(img_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if template_img is None:
+            continue
+        found = find_template_anchor(frame, template_img)
+        if found is None:
+            continue
+        ref_points.append(list(tpl["anchor"]))
+        cur_points.append([float(found[0]), float(found[1])])
+
+    if ref_points:
+        _last_known_anchors[cam_id] = (ref_points, cur_points)
+        uncertain = False
+    else:
+        cached = _last_known_anchors.get(cam_id)
+        if cached is None:
+            # Hiç iyi kare görülmedi (servis yeni başladı) VE bu karede de
+            # hiçbir şablon bulunamadı — düzeltmesiz devam, ama belirsiz.
+            return rois, True
+        ref_points, cur_points = cached
+        uncertain = True
+
+    matrix = compute_warp_matrix_from_anchors(ref_points, cur_points)
+    if matrix is None:
+        # Nokta sayıları tutarsız ya da affine kestirimi başarısız (çok
+        # nadir) — sessizce yanlış konumlamak yerine düzeltmesiz devam.
+        return rois, True
+    return _warp_rois_with_matrix(rois, matrix), uncertain
+
+
+def _adjust_rois_via_bezel(cam_id: str, frame: np.ndarray, rois: list[dict]) -> tuple[list[dict], bool]:
+    """Eski/YEDEK referans kaynağı — ekranın dış siyah bezel köşeleri
+    (bkz. detect_screen_corners). Şablon hiç kaydedilmemişse buraya
+    GERİYE UYUMLU olarak düşülür (2026-09-30, Görev A) — bu fonksiyonun
+    gövdesi, şablon entegrasyonundan ÖNCEKİ _adjust_rois_for_drift ile
+    birebir aynı, davranış değişmedi."""
     reference = calibration_store.get_reference(cam_id)
-    if reference is None:
+    if reference is None or reference.get("corners") is None:
         return rois, False
 
     reference_corners = np.array(reference["corners"], dtype=np.float32)
@@ -285,13 +351,42 @@ def _adjust_rois_for_drift(cam_id: str, frame: np.ndarray, rois: list[dict]) -> 
         _last_known_corners[cam_id] = current_corners
 
     matrix = compute_warp_matrix(reference_corners, current_corners)
-    adjusted = []
-    for roi_def in rois:
-        roi_tuple = (roi_def["x"], roi_def["y"], roi_def["w"], roi_def["h"])
-        x, y, w, h = warp_roi_rect(roi_tuple, matrix)
-        quad = warp_roi_quad(roi_tuple, matrix)
-        adjusted.append({**roi_def, "x": x, "y": y, "w": w, "h": h, "quad": quad.tolist()})
-    return adjusted, uncertain
+    return _warp_rois_with_matrix(rois, matrix), uncertain
+
+
+def _adjust_rois_for_drift(cam_id: str, frame: np.ndarray, rois: list[dict]) -> tuple[list[dict], bool]:
+    """Kayıtlı ROI'leri, kamera kaymasını (drift) telafi edecek şekilde günceller.
+
+    Sıra (2026-09-30, Görev A+B):
+    1. Kalibrasyon KAPALI (calibration_store.get_enabled) ise hiçbir referans
+       araması yapılmadan (CPU tasarrufu) ROI'ler ham haliyle döner — bu artık
+       operatörün BİLİNÇLİ seçimi (bkz. ui/admin.html toggle), "kalibrasyon
+       hiç yapılmamış" durumuyla aynı davranış ama farklı gerekçe.
+    2. AÇIKSA: önce kayıtlı referans ŞABLON(lar)ı var mı bakılır (BİRİNCİL
+       kaynak — Fatih'in talebi: bezel yerine dişli ikonu gibi sabit bir UI
+       öğesi). Varsa _adjust_rois_via_templates kullanılır.
+    3. Şablon hiç kaydedilmemişse eski bezel-köşe yöntemine
+       (_adjust_rois_via_bezel) GERİYE UYUMLU olarak düşülür — regresyon yok,
+       kalibrasyon hiç kurulmamış kurulumlarda eski davranış aynen çalışır.
+
+    Döner: (düzeltilmiş roi listesi, uncertain) — uncertain=True ise referans
+    (köşe ya da şablon) bu karede bulunamadı ve son bilinen değer kullanıldı;
+    çağıran taraf bunu kullanıcıya/Kontrol Kriterleri'ne "ROI referansı belirsiz"
+    olarak iletmeli (sessizce yanlış okumak yerine açıkça bildirmek).
+
+    Referans (köşe ya da şablon) bulunduğunda, her roi_def'e ayrıca "quad"
+    (4x2 liste, gerçek/olası eğik dörtgen köşeleri — bkz. warp_roi_quad)
+    eklenir; x/y/w/h alanları geriye uyumluluk için bounding box olarak
+    kalmaya devam eder.
+    """
+    if not calibration_store.get_enabled(cam_id):
+        return rois, False
+
+    templates = calibration_store.get_templates(cam_id)
+    if templates:
+        return _adjust_rois_via_templates(cam_id, frame, rois, templates)
+
+    return _adjust_rois_via_bezel(cam_id, frame, rois)
 
 
 @app.post("/vision/{cam_id}/calibrate")
@@ -325,10 +420,92 @@ def vision_calibrate(cam_id: str):
 
 @app.get("/vision/{cam_id}/calibration")
 def vision_get_calibration(cam_id: str):
-    """Kamera için kayıtlı kalibrasyon referansını döner (hiç yapılmamışsa null)."""
+    """Kamera için kayıtlı kalibrasyon referansını (hiç yapılmamışsa null) +
+    açık/kapalı durumunu + kayıtlı referans şablon listesini döner
+    (2026-09-30, Görev B: "enabled" eklendi — Admin sayfa açılışında toggle'ı
+    doğru durumla doldurabilsin diye; "templates" de aynı gerekçeyle, ayrı
+    bir endpoint açıp Admin'i iki istek atmaya zorlamamak için buraya eklendi)."""
     if cam_id not in VALID_CAM_IDS:
         raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
-    return {"calibration": calibration_store.get_reference(cam_id)}
+    return {
+        "calibration": calibration_store.get_reference(cam_id),
+        "enabled": calibration_store.get_enabled(cam_id),
+        "templates": calibration_store.get_templates(cam_id),
+    }
+
+
+class CalibrationTemplateRegion(BaseModel):
+    """Operatörün Admin'de (ROI çizimiyle AYNI tıkla-sürükle mekanizmasıyla)
+    işaretlediği referans şablon bölgesi — RoiDef ile aynı geometri
+    kısıtları (bkz. yukarısı), ama ayrı bir model: ROI değil, kalibrasyon
+    referans şablonu (kind/ocr_whitelist gibi ROI'ye özgü alanlar yok)."""
+
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    w: int = Field(gt=0)
+    h: int = Field(gt=0)
+
+
+@app.post("/vision/{cam_id}/calibration/template")
+def vision_add_calibration_template(cam_id: str, payload: CalibrationTemplateRegion):
+    """Görev A (2026-09-30) — Fatih'in talebi: bezel/köşe yerine ekranın
+    SABİT bir UI öğesini (ör. dişli ikonu) referans olarak kullan. Operatör
+    Admin'de ROI çizim mekanizmasıyla AYNI şekilde bir dikdörtgen çizer
+    (bkz. ui/admin.html calibrationTemplateMode) — burada o bölge ŞİMDİKİ
+    kareden kırpılıp kalıcı olarak saklanır (calibration_store.add_template).
+
+    Var olan şablonlara EKLENİR (replace değil) — en az 1, tercihen 2+
+    (birbirinden uzak) şablon seçilebilsin diye (bkz. calibration_store
+    docstring'i: 2+ nokta dönme+ölçek de kestirebiliyor).
+    """
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    frame = _capture_frame(cam_id)
+    if frame is None:
+        raise HTTPException(status_code=503, detail=vision.errors.get(cam_id) or "Kamera açılamadı / kare çözümlenemedi")
+    frame_h, frame_w = frame.shape[:2]
+    if payload.x + payload.w > frame_w or payload.y + payload.h > frame_h:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Şablon bölgesi kare sınırlarını aşıyor (kare: {frame_w}x{frame_h})",
+        )
+    crop = frame[payload.y : payload.y + payload.h, payload.x : payload.x + payload.w]
+    ok, jpg = cv2.imencode(".jpg", crop)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Şablon görüntüsü kodlanamadı (JPEG encode hatası)")
+    entry = calibration_store.add_template(
+        cam_id,
+        anchor=[float(payload.x), float(payload.y)],
+        size=[payload.w, payload.h],
+        image_bytes=jpg.tobytes(),
+    )
+    return {"success": True, "template": entry, "templates": calibration_store.get_templates(cam_id)}
+
+
+@app.delete("/vision/{cam_id}/calibration/template/{index}")
+def vision_delete_calibration_template(cam_id: str, index: int):
+    """Görev A — kayıtlı bir referans şablonunu (metadata + diskteki JPEG)
+    siler. Geçersiz index sessizce yok sayılır (bkz. calibration_store.remove_template)."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    templates = calibration_store.remove_template(cam_id, index)
+    return {"success": True, "templates": templates}
+
+
+class CalibrationTogglePayload(BaseModel):
+    enabled: bool
+
+
+@app.post("/vision/{cam_id}/calibration/toggle")
+def vision_toggle_calibration(cam_id: str, payload: CalibrationTogglePayload):
+    """Görev B (2026-09-30) — kalibrasyon (drift düzeltme) açık/kapalı.
+    KAPALI iken _adjust_rois_for_drift hiçbir referans araması (ne şablon ne
+    bezel) yapmadan ham ROI'leri döner — operatörün "ROI'ler tamamen sabit
+    kalsın" bilinçli tercihi, CPU'yu da gereksiz yere yormaz."""
+    if cam_id not in VALID_CAM_IDS:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kamera: {cam_id}")
+    calibration_store.set_enabled(cam_id, payload.enabled)
+    return {"success": True, "enabled": payload.enabled}
 
 
 @app.get("/vision/{cam_id}/current-corners")
