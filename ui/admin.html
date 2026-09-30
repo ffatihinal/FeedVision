@@ -290,13 +290,33 @@
       </div>
     </div>
     <hr style="border-color:#292929; margin:16px 0;">
-    <!-- ROI drift düzeltme: kamera titrer/kayarsa ROI'ler yanlış bölgeyi
-         okumasın diye ekranın çerçevesi (bezel) referans olarak kaydedilir.
-         Operatör kamerayı yeni monte ettiğinde/oynattığında bu butona basar. -->
+    <!-- ROI drift düzeltme (2026-09-30, Görev A+B): BİRİNCİL referans kaynağı
+         artık sabit bir UI şablonu (ör. dişli ikonu) — operatör ROI çizim
+         mekanizmasının AYNISIYLA canvas üzerinde bir dikdörtgen çizer, o
+         bölge referans olarak kaydedilir. Şablon hiç seçilmemişse eski
+         "Ekranı Kalibre Et" (bezel köşe) yöntemine geriye uyumlu düşülür —
+         bu yüzden o buton da hâlâ burada duruyor (yedek yol). -->
+    <h3 style="font-size:15px; margin-bottom:6px;">Kalibrasyon (ROI Drift Düzeltme)</h3>
     <div class="row-group">
-      <button onclick="calibrateScreen()">Ekranı Kalibre Et</button>
+      <label style="font-size:13px;">
+        <input type="checkbox" id="calibration-enabled-toggle" checked onchange="onCalibrationEnabledToggle()">
+        Kalibrasyon açık (drift düzeltme uygulansın)
+      </label>
+    </div>
+    <div class="row-group">
+      <button onclick="toggleCalibrationTemplateMode()" id="calib-template-mode-btn">Referans Şablonu Seç</button>
+      <button onclick="calibrateScreen()">Ekranı Kalibre Et (yedek: bezel köşesi)</button>
       <span id="calibration-status" style="color:#888; font-size:13px;">Kalibrasyon durumu yükleniyor…</span>
     </div>
+    <div style="color:#888; font-size:12px; margin:4px 0;">
+      "Referans Şablonu Seç" AÇIKKEN canvas üzerinde dişli ikonu gibi sabit bir
+      UI öğesinin üzerine dikdörtgen çizin (ROI çizimiyle aynı tıkla-sürükle) —
+      en az 1, tercihen birbirinden uzak 2 şablon önerilir. Bitirince butona
+      tekrar basıp modu kapatın.
+    </div>
+    <ul id="calibration-template-list" style="list-style:none; padding:0; margin:0 0 8px 0; font-size:13px;">
+      <li style="color:#888;">Henüz referans şablonu yok (bezel yöntemine düşülür).</li>
+    </ul>
     <!-- Görev B (29-09-2026): canlı overlay'de referans/şimdiki köşe rengi lejantı. -->
     <div style="color:#888; font-size:12px; margin-top:4px;">
       Overlay: <span style="color:#f4d03f;">●</span> referans köşe (kalibrasyon anı) &nbsp;
@@ -861,14 +881,170 @@
         statusEl.textContent = "Durum alınamadı.";
         return;
       }
-      if (!data.calibration) {
+      // Görev B (30-09-2026): toggle checkbox'ını sunucudaki gerçek durumla
+      // doldur (sayfa açılışında Fatih'in en son bıraktığı hâli görsün).
+      document.getElementById("calibration-enabled-toggle").checked = data.enabled !== false;
+      // Görev A — kayıtlı referans şablon listesini de burada alıyoruz (ayrı
+      // bir endpoint açıp Admin'i iki istek atmaya zorlamamak için GET
+      // .../calibration'a eklendi, bkz. main.py).
+      calibrationTemplates = data.templates || [];
+      renderCalibrationTemplates();
+      referenceCorners = data.calibration?.corners || null;
+      // Şablon(lar) kayıtlıysa durum metninde BUNU öne çıkar (artık birincil
+      // kaynak bu) — bezel tarihini göstermek şablon varken yanıltıcı olurdu
+      // (şablon kullanılıyor olsa bile eski bir bezel kalibrasyon tarihi
+      // "son kalibrasyon" gibi görünüp kafa karıştırabilirdi).
+      if (calibrationTemplates.length > 0) {
+        statusEl.textContent = `${calibrationTemplates.length} referans şablonu kayıtlı (birincil kaynak).`;
+      } else if (!data.calibration || !data.calibration.calibrated_at) {
         statusEl.textContent = "Henüz kalibre edilmedi (ROI'ler düzeltmesiz okunuyor).";
+      } else {
+        const when = new Date(data.calibration.calibrated_at * 1000);
+        statusEl.textContent = `Son kalibrasyon (bezel, yedek yöntem): ${when.toLocaleString("tr-TR")}`;
+      }
+      drawRoiCanvas();
+    }
+
+    // Görev A (30-09-2026) — kayıtlı referans şablon listesini render eder +
+    // her birine "Sil" butonu koyar (roi-list ile aynı desen, bkz. renderRoiList).
+    let calibrationTemplates = [];  // [{filename, anchor:[x,y], size:[w,h], captured_at}]
+
+    function renderCalibrationTemplates() {
+      const ul = document.getElementById("calibration-template-list");
+      ul.innerHTML = "";
+      if (calibrationTemplates.length === 0) {
+        ul.innerHTML = '<li style="color:#888;">Henüz referans şablonu yok (bezel yöntemine düşülür).</li>';
         return;
       }
-      const when = new Date(data.calibration.calibrated_at * 1000);
-      statusEl.textContent = `Son kalibrasyon: ${when.toLocaleString("tr-TR")}`;
-      referenceCorners = data.calibration.corners || null;
-      drawRoiCanvas();
+      calibrationTemplates.forEach((tpl, idx) => {
+        const li = document.createElement("li");
+        li.style.display = "flex";
+        li.style.alignItems = "center";
+        li.style.gap = "8px";
+        li.style.padding = "4px 0";
+        const label = document.createElement("span");
+        label.textContent = `Şablon ${idx + 1}: konum [${tpl.anchor[0]}, ${tpl.anchor[1]}], boyut [${tpl.size[0]}x${tpl.size[1]}]`;
+        const delBtn = document.createElement("button");
+        delBtn.textContent = "Sil";
+        delBtn.style.fontSize = "12px";
+        delBtn.style.padding = "3px 8px";
+        delBtn.onclick = () => deleteCalibrationTemplate(idx);
+        li.appendChild(label);
+        li.appendChild(delBtn);
+        ul.appendChild(li);
+      });
+    }
+
+    // Görev A — "Referans Şablonu Seç" modu: AÇIKKEN roiPointerUp (mevcut ROI
+    // çizim mekanizması, AYNEN yeniden kullanılıyor) çizilen dikdörtgeni ROI
+    // olarak değil, referans şablonu olarak sunucuya gönderir.
+    let calibrationTemplateMode = false;
+
+    function toggleCalibrationTemplateMode() {
+      calibrationTemplateMode = !calibrationTemplateMode;
+      const btn = document.getElementById("calib-template-mode-btn");
+      btn.textContent = calibrationTemplateMode ? "Şablon Seçimini Bitir" : "Referans Şablonu Seç";
+      const canvas = roiCanvasEl();
+      canvas.style.outline = calibrationTemplateMode ? "3px solid #f4d03f" : "none";
+    }
+
+    // roiPointerUp bu fonksiyonu çağırır (calibrationTemplateMode AÇIKKEN,
+    // ROI isim/tip sormak yerine) — çizilen bölge ŞİMDİKİ kareden kırpılıp
+    // kalıcı referans şablonu olarak kaydedilir (main.py kendi kare
+    // yakalar, tarayıcı sadece koordinatları gönderir).
+    async function submitCalibrationTemplate(x, y, w, h) {
+      const statusEl = document.getElementById("calibration-status");
+      const buttonName = "Referans Şablonu Ekle";
+      const task = `POST /vision/${ROI_CAM_ID}/calibration/template`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/calibration/template`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ x, y, w, h }),
+        });
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        alert(`Şablon eklenemedi (ağ hatası): ${e.message}`);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        const detail = data?.detail ?? "bilinmeyen hata";
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${detail}`, true);
+        alert(`Şablon eklenemedi: ${detail}`);
+        return;
+      }
+      calibrationTemplates = data.templates || [];
+      renderCalibrationTemplates();
+      logToConsole(buttonName, task, `Sunucu 200 OK — şablon eklendi (${calibrationTemplates.length} toplam).`, false);
+      statusEl.textContent = `Referans şablonu eklendi (${calibrationTemplates.length} toplam) — birincil kaynak artık şablon(lar).`;
+    }
+
+    async function deleteCalibrationTemplate(index) {
+      const buttonName = "Referans Şablonu Sil";
+      const task = `DELETE /vision/${ROI_CAM_ID}/calibration/template/${index}`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/calibration/template/${index}`, { method: "DELETE" });
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${data?.detail ?? "bilinmeyen hata"}`, true);
+        return;
+      }
+      calibrationTemplates = data.templates || [];
+      renderCalibrationTemplates();
+      logToConsole(buttonName, task, `Sunucu 200 OK — şablon silindi (${calibrationTemplates.length} kaldı).`, false);
+    }
+
+    // Görev B — kalibrasyon (drift düzeltme) açık/kapalı toggle'ı.
+    async function onCalibrationEnabledToggle() {
+      const checkbox = document.getElementById("calibration-enabled-toggle");
+      const enabled = checkbox.checked;
+      const buttonName = "Kalibrasyon Aç/Kapat";
+      const task = `POST /vision/${ROI_CAM_ID}/calibration/toggle`;
+      let response;
+      try {
+        response = await fetch(`/vision/${ROI_CAM_ID}/calibration/toggle`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+      } catch (e) {
+        logToConsole(buttonName, task, `Sunucuya ulaşılamadı (ağ hatası): ${e.message}`, true);
+        checkbox.checked = !enabled;  // basarisiz - gorsel durumu geri al
+        return;
+      }
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok) {
+        logToConsole(buttonName, task, `Sunucu ${response.status}: ${data?.detail ?? "bilinmeyen hata"}`, true);
+        checkbox.checked = !enabled;
+        return;
+      }
+      logToConsole(buttonName, task, `Kalibrasyon ${enabled ? "açıldı" : "kapatıldı"}.`, false);
+      const statusEl = document.getElementById("calibration-status");
+      if (!enabled) {
+        statusEl.textContent = "Kalibrasyon KAPALI — ROI'ler ham (düzeltmesiz) koordinatlarıyla okunuyor.";
+      }
     }
 
     // Görev B — canlı overlay için "şimdiki" (yeşil) köşe tespiti. Sürekli
@@ -1404,6 +1580,21 @@
       // Görev B — referans (sarı) ve şimdiki (yeşil) bezel köşeleri.
       drawCornerSet(ctx, referenceCorners, "#f4d03f");
       drawCornerSet(ctx, currentCorners, "#2ecc71");
+      // Görev A (30-09-2026) — kayıtlı referans şablon bölgeleri (magenta,
+      // kesikli çizgi) — operatör hangi bölgelerin seçili olduğunu görsün.
+      ctx.strokeStyle = "#e040fb";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 3]);
+      calibrationTemplates.forEach((tpl, idx) => {
+        const [tx, ty] = tpl.anchor;
+        const [tw, th] = tpl.size;
+        ctx.strokeRect(tx, ty, tw, th);
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#e040fb";
+        ctx.fillText(`Ş${idx + 1}`, tx + 2, ty - 4 >= 12 ? ty - 4 : ty + th + 14);
+        ctx.setLineDash([6, 3]);
+      });
+      ctx.setLineDash([]);
     }
 
     function renderRoiList() {
@@ -1456,6 +1647,14 @@
       roiDrawing = null;
       if (w < 5 || h < 5) {
         // Çok küçük/yanlışlıkla tıklama — dikdörtgen sayılmaz, yok say.
+        drawRoiCanvas();
+        return;
+      }
+      // Görev A (30-09-2026): "Referans Şablonu Seç" modu AÇIKKEN, çizilen
+      // dikdörtgen ROI DEĞİL — kalibrasyon referans şablonu olarak
+      // gönderilir (aynı çizim mekanizması, farklı hedef).
+      if (calibrationTemplateMode) {
+        submitCalibrationTemplate(x, y, w, h);
         drawRoiCanvas();
         return;
       }
