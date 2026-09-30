@@ -6,6 +6,7 @@ opencv-python>=4.9
 pyserial>=3.5
 psutil>=5.9
 pytesseract>=0.3.10
+Pillow>=10.0
 
 # pytesseract, Tesseract OCR'in kendisini (sistem binary'si) DEGIL, ona giden
 # Python sarmalayicisini kurar — asil OCR motoru ayrica apt ile gelmeli:
