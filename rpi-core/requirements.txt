@@ -19,3 +19,17 @@ Pillow>=10.0
 #   sudo apt install -y python3-picamera2
 # --system-site-packages ile olusturulmus venv'de otomatik gorunur;
 # ayrica requirements.txt'e eklemiyoruz ki bu dosya Mac'te de calissin.
+
+# tesserocr (opsiyonel/hizli OCR yolu, 30-09-2026 eklendi, bkz. screen_reader.py
+# TESSEROCR_AVAILABLE): pytesseract Tesseract'i HER OCR cagrisinda ayri bir
+# subprocess olarak baslatip kapatir (~130ms sabit maliyet/cagri — 12 ROI'lik
+# bir dongude ~1.6sn). tesserocr motoru BIR KERE acip surekli acik tutan
+# Cython tabanli bir baglayicidir (subprocess YOK, dogrudan C++ API cagrisi).
+# Native derleme gerektirir — Pi'de ONCE sistem paketleri, SONRA pip:
+#   sudo apt install -y libtesseract-dev libleptonica-dev
+#   pip install tesserocr
+# picamera2 ile AYNI sebeple BURAYA aktif bir satir olarak EKLENMIYOR: bu
+# sistem kutuphaneleri cogu Mac/CI ortaminda yok, aktif bir satir
+# "pip install -r requirements.txt"i bu ortamlarda KIRAR. screen_reader.py
+# import'u try/except ImportError ile sarar (PYTESSERACT_AVAILABLE ile AYNI
+# desen) — kurulu degilse otomatik pytesseract yoluna duser, kod kirilmaz.

@@ -306,6 +306,276 @@ class TestReadTextOcrUsesConfigAndAffinity:
         assert state["affinity"] == {0, 1, 2, 3}  # exception olsa da affinity geri yüklenmiş olmalı
 
 
+class _FakeTesserocrPSM:
+    SINGLE_LINE = 7
+
+
+class _FakeTesserocrAPI:
+    """tesserocr.PyTessBaseAPI'nin sahte/stub bir sürümü — gerçek Tesseract
+    motoruna dokunmadan (bu makinede tesserocr kurulu olmayabilir) PSM/
+    whitelist/görüntü çağrılarının doğru sırayla/parametreyle yapıldığını
+    doğrulamak için kullanılır."""
+
+    def __init__(self):
+        self.psm_calls: list[int] = []
+        self.whitelist_calls: list[tuple[str, str]] = []
+        self.image_calls: list[object] = []
+        self.text = "19"
+
+    def SetPageSegMode(self, psm):
+        self.psm_calls.append(psm)
+
+    def SetVariable(self, name, value):
+        self.whitelist_calls.append((name, value))
+
+    def SetImage(self, image):
+        self.image_calls.append(image)
+
+    def GetUTF8Text(self):
+        return self.text
+
+
+class _FakeTesserocrModule:
+    """tesserocr modülünün sahte sürümü — PyTessBaseAPI() her çağrıldığında
+    yeni bir _FakeTesserocrAPI üretir, ama hepsini created_apis'te tutar
+    (böylece "motor bir kere açıldı mı" testleri yapılabilir)."""
+
+    PSM = _FakeTesserocrPSM
+
+    def __init__(self, api_factory=_FakeTesserocrAPI):
+        self.created_apis: list[_FakeTesserocrAPI] = []
+        self._api_factory = api_factory
+
+    def PyTessBaseAPI(self):
+        api = self._api_factory()
+        self.created_apis.append(api)
+        return api
+
+
+class TestReadTextOcrPytesseractPathRegressionWhenTesserocrUnavailable:
+    """TESSEROCR_AVAILABLE=False durumunda (tesserocr kurulu değil/Mac'te
+    derlenemedi senaryosu) pytesseract yolunun HİÇ değişmediğini kilitler —
+    30-09-2026 tesserocr eklenmesi sonrası regresyon kilidi."""
+
+    def test_pytesseract_path_used_unchanged_with_config_and_result(self, monkeypatch):
+        captured = {}
+
+        class _FakePytesseract:
+            @staticmethod
+            def image_to_string(image, config=""):
+                captured["config"] = config
+                return "19"
+
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", False)
+        monkeypatch.setattr(screen_reader, "PYTESSERACT_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "pytesseract", _FakePytesseract)
+
+        text, err = screen_reader.read_text_ocr(
+            np.full((10, 10, 3), 200, dtype=np.uint8), char_whitelist="0123456789.-"
+        )
+
+        assert text == "19"
+        assert err is None
+        assert captured["config"] == "--psm 7 -c tessedit_char_whitelist=0123456789.-"
+
+    def test_neither_backend_available_returns_same_error_as_before(self, monkeypatch):
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", False)
+        monkeypatch.setattr(screen_reader, "PYTESSERACT_AVAILABLE", False)
+
+        text, err = screen_reader.read_text_ocr(np.full((10, 10, 3), 200, dtype=np.uint8))
+
+        assert text == ""
+        assert err == "pytesseract Python paketi kurulu degil (pip install pytesseract)"
+
+
+class TestReadTextOcrTesserocrPath:
+    """TESSEROCR_AVAILABLE=True simülasyonu (sahte tesserocr modülü ile) —
+    gerçek tesserocr bu ortamda kurulu olmasa da PSM/whitelist kararlarının
+    doğru API çağrılarına dönüştüğünü doğrular."""
+
+    def setup_method(self):
+        # Modül-seviyesinde saklanan lazy-init singleton'ı her testten önce
+        # sıfırla — testler birbirinin API örneğini miras almasın.
+        screen_reader._tesserocr_api = None
+
+    def teardown_method(self):
+        screen_reader._tesserocr_api = None
+
+    def test_sets_psm_and_whitelist_then_reads_image(self, monkeypatch):
+        fake_module = _FakeTesserocrModule()
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "tesserocr", fake_module)
+
+        text, err = screen_reader.read_text_ocr(
+            np.full((10, 10, 3), 200, dtype=np.uint8), char_whitelist="0123456789.-"
+        )
+
+        assert err is None
+        assert text == "19"
+        assert len(fake_module.created_apis) == 1
+        api = fake_module.created_apis[0]
+        assert api.psm_calls == [_FakeTesserocrPSM.SINGLE_LINE]
+        assert api.whitelist_calls == [("tessedit_char_whitelist", "0123456789.-")]
+        assert len(api.image_calls) == 1
+
+    def test_api_instance_created_once_and_reused_across_calls(self, monkeypatch):
+        fake_module = _FakeTesserocrModule()
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "tesserocr", fake_module)
+        image = np.full((10, 10, 3), 200, dtype=np.uint8)
+
+        screen_reader.read_text_ocr(image)
+        screen_reader.read_text_ocr(image)
+        screen_reader.read_text_ocr(image)
+
+        # Motor (PyTessBaseAPI) sadece BİR KERE açılmış olmalı — asıl amaç
+        # pytesseract'ın her çağrıda yeni subprocess açmasının aksine burada
+        # tek bir örneğin tekrar kullanılması.
+        assert len(fake_module.created_apis) == 1
+
+    def test_empty_whitelist_clears_previous_call_whitelist(self, monkeypatch):
+        fake_module = _FakeTesserocrModule()
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "tesserocr", fake_module)
+        image = np.full((10, 10, 3), 200, dtype=np.uint8)
+
+        screen_reader.read_text_ocr(image, char_whitelist="0123456789")
+        screen_reader.read_text_ocr(image, char_whitelist=None)
+
+        api = fake_module.created_apis[0]
+        assert api.whitelist_calls[-1] == ("tessedit_char_whitelist", "")
+
+    def test_exception_from_tesserocr_returns_same_error_format_as_pytesseract(self, monkeypatch):
+        class _RaisingAPI(_FakeTesserocrAPI):
+            def GetUTF8Text(self):
+                raise RuntimeError("motor baslatilamadi")
+
+        fake_module = _FakeTesserocrModule(api_factory=_RaisingAPI)
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "tesserocr", fake_module)
+
+        text, err = screen_reader.read_text_ocr(np.full((10, 10, 3), 200, dtype=np.uint8))
+
+        assert text == ""
+        assert "motor baslatilamadi" in err
+
+    def test_affinity_pinned_during_call_and_restored_after_tesserocr_path(self, monkeypatch):
+        fake_module = _FakeTesserocrModule()
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "tesserocr", fake_module)
+        state = {"affinity": {0, 1, 2, 3}}
+        monkeypatch.setattr(
+            screen_reader.os,
+            "sched_setaffinity",
+            lambda pid, cores: state.__setitem__("affinity", set(cores)),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            screen_reader.os, "sched_getaffinity", lambda pid: set(state["affinity"]), raising=False
+        )
+
+        screen_reader.read_text_ocr(np.full((10, 10, 3), 200, dtype=np.uint8))
+
+        assert state["affinity"] == {0, 1, 2, 3}  # çağrı bitince eski hale dönmüş olmalı
+
+    def test_tesserocr_preferred_over_pytesseract_when_both_available(self, monkeypatch):
+        fake_module = _FakeTesserocrModule()
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "tesserocr", fake_module)
+        monkeypatch.setattr(screen_reader, "PYTESSERACT_AVAILABLE", True)
+
+        class _ShouldNotBeCalled:
+            @staticmethod
+            def image_to_string(image, config=""):
+                raise AssertionError("pytesseract çağrılmamalı — tesserocr öncelikli olmalı")
+
+        monkeypatch.setattr(screen_reader, "pytesseract", _ShouldNotBeCalled)
+
+        text, err = screen_reader.read_text_ocr(np.full((10, 10, 3), 200, dtype=np.uint8))
+
+        assert err is None
+        assert text == "19"
+
+    def test_empty_image_returns_before_touching_tesserocr(self, monkeypatch):
+        fake_module = _FakeTesserocrModule()
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "tesserocr", fake_module)
+
+        text, err = screen_reader.read_text_ocr(np.zeros((0, 0, 3), dtype=np.uint8))
+
+        assert text == ""
+        assert err is None
+        assert fake_module.created_apis == []  # boş görüntüde motora hiç girilmemeli
+
+
+class TestReadTextOcrTesserocrThreadSafety:
+    """_tesserocr_lock'un gercekten koruma sagladigini dogrular (30-09-2026,
+    tester FAIL bulgusu): main.py'de vision_read_test/_rule_engine_loop/
+    _journal_loop AYRI thread'lerden ayni paylasilan _tesserocr_api'yi
+    cagirabiliyordu -- kilitsiz durumda SetVariable/SetImage/GetUTF8Text
+    ic ice girip (interleave) bir ROI'nin whitelist/goruntusu digerininkiyle
+    KARISABILIRDI. Sahte tesserocr modulunde GetUTF8Text'e kucuk bir gecikme
+    konup iki thread ayni anda read_text_ocr() cagirdiginda sonuclarin
+    KARISMADIGI (her thread kendi whitelist'ine karsilik gelen metni aldigi)
+    dogrulanir."""
+
+    def setup_method(self):
+        screen_reader._tesserocr_api = None
+
+    def teardown_method(self):
+        screen_reader._tesserocr_api = None
+
+    def test_concurrent_calls_do_not_interleave_results(self, monkeypatch):
+        import threading
+        import time
+
+        class _SlowInterleavingAPI:
+            """GetUTF8Text'te kasitli gecikme -- kilit olmasaydi iki thread'in
+            SetVariable/SetImage cagrilari bu gecikme sirasinda ic ice girip
+            digerinin whitelist'ini/goruntusunu 'calardi'."""
+
+            def __init__(self):
+                self._whitelist = None
+
+            def SetPageSegMode(self, psm):
+                pass
+
+            def SetVariable(self, name, value):
+                self._whitelist = value
+
+            def SetImage(self, image):
+                pass
+
+            def GetUTF8Text(self):
+                time.sleep(0.05)  # kilit yoksa diger thread bu sirada whitelist'i degistirebilir
+                return f"text-for-{self._whitelist}"
+
+        fake_module = _FakeTesserocrModule(api_factory=_SlowInterleavingAPI)
+        monkeypatch.setattr(screen_reader, "TESSEROCR_AVAILABLE", True)
+        monkeypatch.setattr(screen_reader, "tesserocr", fake_module)
+        image = np.full((10, 10, 3), 200, dtype=np.uint8)
+
+        results: dict[str, tuple[str, str | None]] = {}
+
+        def _call(thread_name, whitelist):
+            results[thread_name] = screen_reader.read_text_ocr(image, char_whitelist=whitelist)
+
+        t1 = threading.Thread(target=_call, args=("t1", "AAAA"))
+        t2 = threading.Thread(target=_call, args=("t2", "BBBB"))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Kilit calisiyorsa her thread KENDI whitelist'ine karsilik gelen
+        # metni almis olmali -- interleave olsaydi biri digerinin whitelist'ini
+        # gorup "text-for-BBBB"/"text-for-AAAA" karisikligi yasardi.
+        assert results["t1"] == ("text-for-AAAA", None)
+        assert results["t2"] == ("text-for-BBBB", None)
+        # Motor tek kilit altinda lazy-init edildigi icin yine tek ornek olmali.
+        assert len(fake_module.created_apis) == 1
+
+
 class TestReadRoiForwardsOcrWhitelist:
     def test_read_roi_passes_ocr_whitelist_to_read_text_ocr(self, monkeypatch):
         captured = {}

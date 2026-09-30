@@ -19,10 +19,12 @@ koordinatlariyla degistirilecek (bkz. Azobex_WP1 saha notlari).
 """
 
 import os
+import threading
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
+from PIL import Image
 
 try:
     import pytesseract
@@ -34,6 +36,23 @@ except ImportError:
     # diye burada yutuyoruz, gercek cagri read_text_ocr() icinde denenir.
     pytesseract = None
     PYTESSERACT_AVAILABLE = False
+
+try:
+    import tesserocr
+
+    TESSEROCR_AVAILABLE = True
+except ImportError:
+    # tesserocr, pytesseract'in aksine Tesseract motorunu HER OCR cagrisinda
+    # ayri bir subprocess olarak baslatmaz -- motoru BIR KERE acip surekli
+    # acik tutan Cython tabanli bir baglayicidir (subprocess YOK, dogrudan
+    # C++ API cagrisi, bkz. _get_tesserocr_api). Ama native derleme gerektirir:
+    # sistem paketleri (libtesseract-dev + libleptonica-dev, bkz.
+    # requirements.txt) onceden kurulu olmali. Bu genelde Mac gelistirme
+    # ortaminda yok -> import basarisiz olur; PYTESSERACT_AVAILABLE ile AYNI
+    # desenle burada sessizce yutuluyor, read_text_ocr() otomatik olarak
+    # pytesseract yoluna duser (regresyon yok).
+    tesserocr = None
+    TESSEROCR_AVAILABLE = False
 
 # (x, y, genislik, yukseklik) piksel cinsinden — 1280x720 karede merkezi
 # kaplayan gecici test ROI'si. Gercek koordinatlar yarin (saha fotograflari
@@ -239,6 +258,9 @@ def _restore_process_affinity(previous: frozenset[int] | None) -> None:
 def _build_ocr_config(char_whitelist: str | None) -> str:
     """Tesseract'a gecirilecek config string'ini kurar: sabit PSM 7 + opsiyonel
     karakter whitelist'i. Saf/yan-etkisiz — Tesseract cagrilmadan test edilebilir.
+    Sadece pytesseract yolunda kullanilir (tesserocr ayni PSM/whitelist
+    kararlarini kendi API'si -- SetPageSegMode/SetVariable -- uzerinden alir,
+    bkz. _get_tesserocr_api / _read_text_via_tesserocr).
     """
     config = _TESSERACT_PSM
     if char_whitelist:
@@ -246,14 +268,75 @@ def _build_ocr_config(char_whitelist: str | None) -> str:
     return config
 
 
+# tesserocr.PyTessBaseAPI ornegi -- lazy-init (ilk gercek OCR cagrisinda
+# olusturulur, IMPORT ANINDA degil). Neden lazy: Tesseract veri yolu
+# bulunamamasi gibi bir kurulum sorunu boylece modul import'unu KIRMAZ,
+# screen_reader yine de import edilebilir kalir; hata sadece gercekten OCR
+# cagrildiginda (read_text_ocr icinde, ayni try/except ile) ortaya cikar.
+# Motor BIR KERE acilip surekli acik tutuldugu icin (subprocess YOK) sonraki
+# her cagrida ayni ornek tekrar kullanilir.
+_tesserocr_api = None
+
+# _tesserocr_api paylasilan, thread-safe OLMAYAN bir C++ nesnesi (PyTessBaseAPI)
+# sarmalar; main.py'de en az uc ayri thread bunu ayni anda cagirabilir:
+# vision_read_test (FastAPI threadpool worker), _rule_engine_loop (asyncio
+# event-loop thread, her 2sn) ve _journal_loop (aynisi, her 10sn). Kilitsiz
+# durumda iki cagri ic ice girerse (SetVariable/SetImage/GetUTF8Text) bir
+# ROI'nin whitelist'i baska ROI'nin goruntusuyle karisabilir -- bu da
+# rule_engine'in motor durdurma kararina yanlis veri karistirir.
+# calibration_store.py'deki modul-seviyesi _lock deseniyle ayni: tek kilit,
+# hem lazy-init hem her cagri bu kilit altinda.
+_tesserocr_lock = threading.Lock()
+
+
+def _get_tesserocr_api():
+    """tesserocr.PyTessBaseAPI ornegini ilk cagrida olusturup modul-seviyesinde
+    saklar, sonraki cagrilarda ayni orneği doner. PSM 7 burada BIR KERE
+    ayarlanir (_build_ocr_config'teki PSM 7 karariyla AYNI, farkli API
+    uzerinden: SetPageSegMode).
+
+    Cagiran taraf (_read_text_via_tesserocr) _tesserocr_lock'u zaten tutuyor
+    olmali -- bu fonksiyon kendi basina kilitlenmez (ayni thread'in ayni
+    kilidi iki kez almasi RLock olmadan deadlock olurdu)."""
+    global _tesserocr_api
+    if _tesserocr_api is None:
+        api = tesserocr.PyTessBaseAPI()
+        api.SetPageSegMode(tesserocr.PSM.SINGLE_LINE)
+        _tesserocr_api = api
+    return _tesserocr_api
+
+
+def _read_text_via_tesserocr(image: np.ndarray, char_whitelist: str | None) -> str:
+    """tesserocr (motor surekli acik, subprocess YOK) uzerinden OCR calistirir.
+
+    whitelist ROI'den ROI'ye degisebildigi (bkz. read_text_ocr docstring'i)
+    icin PSM'in aksine HER cagrida yeniden ayarlanir -- bos string Tesseract
+    icin "kisitlama yok" anlamina gelir, bu yuzden char_whitelist None/bos
+    oldugunda onceki bir cagridan kalma whitelist'i de temizler.
+
+    TUMU _tesserocr_lock altinda: lazy-init + SetVariable + SetImage +
+    GetUTF8Text tek bir atomik blok olmali -- yoksa iki thread'in cagrilari
+    ic ice girip (interleave) bir ROI'nin whitelist/goruntusu digerininkiyle
+    karisabilir (bkz. _tesserocr_lock tanimindaki not)."""
+    with _tesserocr_lock:
+        api = _get_tesserocr_api()
+        api.SetVariable("tessedit_char_whitelist", char_whitelist or "")
+        api.SetImage(Image.fromarray(image))
+        text = api.GetUTF8Text()
+    return text or ""
+
+
 def read_text_ocr(image: np.ndarray, char_whitelist: str | None = None) -> tuple[str, str | None]:
     """Kirpilan ROI goruntusunu Tesseract'tan gecirip (metin, hata) tuple'i doner.
 
-    Uc durum ayirt edilir:
+    Iki OCR yolu vardır — TESSEROCR_AVAILABLE ise tesserocr (motor surekli
+    acik, subprocess YOK, ~130ms/cagri sabit maliyeti YOK) kullanilir; degilse
+    (kurulu degil/Mac'te derlenemedi) mevcut pytesseract yoluna (subprocess
+    bazli, HER ortamda calisan) duşülür — davranis/donus degerleri asagidaki
+    uc durum icin HER IKI yolda da AYNIDIR:
     - OCR calisti, metin bulunamadi -> ("", None) — normal/beklenen, hata degil.
-    - pytesseract (Python paketi) kurulu degil -> ("", "acik sebep mesaji").
-    - Tesseract binary'si (sistem paketi) bulunamadi / cagri patladi ->
-      ("", gercek exception mesaji).
+    - ne tesserocr ne pytesseract kurulu -> ("", "acik sebep mesaji").
+    - Tesseract calisamadi / cagri patladi -> ("", gercek exception mesaji).
     Bos goruntude (boyut 0) Tesseract'a hic girmeden ("", None) donulur —
     bu OCR'in basarisizligi degil, zaten okunacak goruntu yok demektir.
 
@@ -269,17 +352,20 @@ def read_text_ocr(image: np.ndarray, char_whitelist: str | None = None) -> tuple
     """
     if image.size == 0:
         return "", None
-    if not PYTESSERACT_AVAILABLE:
+    if not TESSEROCR_AVAILABLE and not PYTESSERACT_AVAILABLE:
         return "", "pytesseract Python paketi kurulu degil (pip install pytesseract)"
     # Tesseract renkli goruntude de calisir ama gri tonlama + upsample
     # kucuk/HMI fontlarinda dogruluk icin genelde daha iyi sonuc verir.
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-    config = _build_ocr_config(char_whitelist)
     previous_affinity = _pin_current_process_to_ocr_cores()
     try:
-        text = pytesseract.image_to_string(upscaled, config=config)
-    except Exception as exc:  # noqa: BLE001 — Tesseract binary eksik/izin hatasi vb. onceden bilinmiyor
+        if TESSEROCR_AVAILABLE:
+            text = _read_text_via_tesserocr(upscaled, char_whitelist)
+        else:
+            config = _build_ocr_config(char_whitelist)
+            text = pytesseract.image_to_string(upscaled, config=config)
+    except Exception as exc:  # noqa: BLE001 — Tesseract binary/motor eksik/izin hatasi vb. onceden bilinmiyor
         return "", f"Tesseract calistirilamadi: {exc}"
     finally:
         # finally: hem basarili donuste hem exception'da (yukaridaki return
