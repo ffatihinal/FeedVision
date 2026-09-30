@@ -168,6 +168,29 @@
     #guide-body td { color: #ddd; }
     #guide-body .note { font-size: 12.5px; color: #888; margin-top: 4px; }
 
+    /* --- Kamera Ayarları info butonu + modali (Konsol Rehberi ile aynı
+         native <dialog> pattern, sadece daha kısa içerik için dar genişlik). --- */
+    #camera-settings-info-btn {
+      font-size: 13px; padding: 2px 9px; margin: 0; background: #446;
+      border-radius: 6px; vertical-align: middle;
+    }
+    #camera-settings-info-btn:active { background: #335; }
+    dialog#camera-settings-guide-dialog {
+      width: min(640px, 92vw); max-height: 82vh; padding: 0;
+      background: #1a1a1a; color: #eee; border: 1px solid #333; border-radius: 10px;
+    }
+    dialog#camera-settings-guide-dialog::backdrop { background: rgba(0,0,0,.6); }
+    #camera-settings-guide-body {
+      padding: 14px 18px; overflow-y: auto; max-height: calc(82vh - 60px);
+      font-size: 13.5px; line-height: 1.6; color: #ccc;
+    }
+    #camera-settings-guide-body ul { margin: 0 0 12px; padding-left: 20px; }
+    #camera-settings-guide-body li { margin-bottom: 10px; }
+    #camera-settings-guide-body .tip {
+      background: #000; border: 1px solid #333; border-radius: 6px;
+      padding: 10px 14px; margin-top: 4px; color: #9c9; font-style: italic;
+    }
+
     /* --- Sistem widget'ları (SoC sıcaklığı, CPU, RAM): 15-09-2026'da alt
        alta dizilimden (dar/uzun sidebar) YAN YANA 3 sütuna geçirildi — alt
        alta gereksiz dikey yer kaplıyordu (Fatih notu). */
@@ -325,7 +348,10 @@
     <hr style="border-color:#292929; margin:16px 0;">
     <!-- Gorev D (23-09-2026): manuel pozlama + CLAHE kontrast artirma -
          SADECE UI Screen Camera icin, Chamber Camera'ya dokunmuyor. -->
-    <h3 style="font-size:15px; margin-bottom:6px;">Kamera Ayarları (Pozlama / Kontrast)</h3>
+    <h3 style="font-size:15px; margin-bottom:6px; display:flex; align-items:center; gap:8px;">
+      Kamera Ayarları (Pozlama / Kontrast)
+      <button id="camera-settings-info-btn" onclick="openCameraSettingsGuideDialog()" title="Bu ayarlar ne işe yarar?">ℹ️</button>
+    </h3>
     <div class="row-group" style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
       <label style="font-size:13px;">
         <input type="checkbox" id="exposure-auto-toggle" checked onchange="onExposureAutoToggle()">
@@ -704,6 +730,47 @@
     </div>
   </dialog>
 
+  <!-- Kamera Ayarları (Pozlama/Kontrast) info modali — ayarların fonksiyonel
+       koduna dokunmadan, sadece ne işe yaradığını açıklayan pop-up (30-09-2026,
+       sahadan operatörlerin bu ayarları anlamadığı geri bildirimi üzerine). -->
+  <dialog id="camera-settings-guide-dialog">
+    <div class="guide-header">
+      <h2>Kamera Ayarları — Ne İşe Yarar?</h2>
+      <button class="close-btn" onclick="closeCameraSettingsGuideDialog()">Kapat</button>
+    </div>
+    <div id="camera-settings-guide-body">
+      <ul>
+        <li>
+          <strong>Otomatik pozlama:</strong> Sistem, ışık koşuluna göre görüntü parlaklığını
+          kendi ayarlar. Çoğu durumda önerilen ayardır.
+        </li>
+        <li>
+          <strong>Exposure Time (Pozlama Süresi, µs):</strong> Kameranın her kareyi ne kadar
+          süre "ışığa açık" tuttuğudur. Uzun süre daha parlak ama hareketli/titreşen
+          görüntülerde bulanıklığa yol açabilir; kısa süre daha karanlık ama nettir. Ekran
+          görüntüsü çok parlak/patlamış görünüyorsa bu değeri manuel düşürmek, ekranın kendi
+          parlaklığına dokunmadan görüntüyü netleştirebilir.
+        </li>
+        <li>
+          <strong>Gain (Kazanç):</strong> Kameranın sensör sinyalini elektronik olarak
+          "yükseltmesi"dir — düşük ışıkta görüntüyü parlatır ama gürültü/pikselli görünümü de
+          artırır. Genelde düşük tutmak daha net bir görüntü verir.
+        </li>
+        <li>
+          <strong>Kontrast artırma (CLAHE):</strong> Görüntüdeki açık/koyu alanlar arasındaki
+          farkı yapay olarak belirginleştirir — parlama/yansıma nedeniyle okunaksız olan
+          yazıları daha okunaklı hale getirebilir. Fazla kullanıldığında görüntüde yapay/aşırı
+          keskin bir görünüme yol açabilir.
+        </li>
+      </ul>
+      <p class="tip">
+        İpucu: Ekran görüntüsü çok parlak/patlamış görünüyorsa önce Otomatik pozlamayı kapatıp
+        Exposure Time'ı düşürmeyi dene — ekranın kendi parlaklık ayarını değiştirmeden çözüm
+        genelde budur.
+      </p>
+    </div>
+  </dialog>
+
   <script src="/shared.js"></script>
   <script>
     // logToConsole artik /shared.js'de (Operator sayfasiyla ortak) - burada
@@ -722,6 +789,18 @@
 
     function closeGuideDialog() {
       document.getElementById("guide-dialog").close();
+    }
+
+    // ==========================================================================
+    //  KAMERA AYARLARI INFO — native <dialog>, Konsol Rehberi ile aynı pattern
+    // ==========================================================================
+    function openCameraSettingsGuideDialog() {
+      const dlg = document.getElementById("camera-settings-guide-dialog");
+      if (!dlg.open) dlg.showModal();
+    }
+
+    function closeCameraSettingsGuideDialog() {
+      document.getElementById("camera-settings-guide-dialog").close();
     }
 
     // ==========================================================================
