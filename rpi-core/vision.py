@@ -32,12 +32,19 @@ except ImportError:
     Picamera2 = None
     PICAMERA2_AVAILABLE = False
 
-STREAM_SIZE = (1640, 1232)  # 4:3, IMX219 sensorunun 2x2-binned tam-FOV modu — 01-10-2026
-# sahada bulgu: 16:9 (1280x720) istemek picamera2/libcamera'nin sensorun
-# ust/alt kismini kirpmasina sebep oluyordu (IMX219'un dogal gorus alani
-# 4:3). 1640x1232, 3280x2464 tam sensorun 2'ye bolunmus hali — Picamera2'nin
-# "tam FOV, makul CPU/bant genisligi" icin onerdigi standart boyut.
-STREAM_FPS = 12.0  # 10-15fps hedef araligi (kamera_entegrasyon_onerisi.md Bolum 1)
+STREAM_SIZE = (3280, 2464)  # 4:3, IMX219'un TAM/native sensor cozunurlugu — 01-10-2026
+# Fatih talebi (01-10-2026, sahada): goruntu isleme (OCR/ROI okuma) icin
+# mumkun olan en yuksek cozunurluk istendi. Onceki 1640x1232 (2x2-binned)
+# daha dusuk CPU/bant genisligi icin secilmisti; artik tam 8MP (3280x2464)
+# kullaniliyor — 16:9 kirpma sorunundan etkilenmeyen 4:3 orani korunuyor.
+STREAM_FPS = 30.0  # tavan deger — donanimin GERCEK hizi muhtemelen bunun altinda kalacak
+# Fatih talebi (01-10-2026): "mumkun olan en yuksek frekans". Asagidaki
+# mjpeg_generator'daki time.sleep(interval) sadece bir ALT sinir/throttle —
+# IMX219 + Picamera2'nin tam cozunurlukte gercekte ulasabildigi fps donanima
+# bagli ve bu degerden DUSUK olabilir (RPi 5 CPU/ISP yuku, USB/CSI bant
+# genisligi vs.) — 30.0 sadece yapay throttle'i gevsetiyor, gercek hiz
+# donanimdan dusuk kalirsa sorun olmaz. SAHADA OLCULUP GEREKIRSE BU DEGER
+# GERI DUSURULMELI (ozellikle CPU'nun OCR ile birlikte yetismedigi gorulurse).
 
 
 class VisionManager:
