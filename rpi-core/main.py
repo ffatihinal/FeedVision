@@ -671,6 +671,7 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
         quad_arr = np.array(quad, dtype=np.float32) if quad is not None else None
         ocr_whitelist = roi_def.get("ocr_whitelist")  # eski kayitli ROI'lerde alan yok -> None (whitelist yok)
         reader = roi_def.get("reader", "tesseract")  # eski kayitli ROI'lerde alan yok -> "tesseract" (geriye uyumlu)
+        bool_threshold = roi_def.get("bool_threshold")  # eski kayitli ROI'lerde alan yok -> None (read_roi sabit 0.28 kullanir)
 
         if kind == "numeric" and reader == "template":
             # Görev C — opsiyonel/deneysel yol: SADECE operator acikca
@@ -702,7 +703,7 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
             )
             continue
 
-        result = read_roi(frame, roi_tuple, kind=kind, quad=quad_arr, ocr_whitelist=ocr_whitelist)
+        result = read_roi(frame, roi_tuple, kind=kind, quad=quad_arr, ocr_whitelist=ocr_whitelist, bool_threshold=bool_threshold)
         results.append(
             {
                 "name": roi_def["name"],
@@ -780,6 +781,12 @@ class RoiDef(BaseModel):
     # anlamlı (bkz. main._read_all_rois) — "boolean" ROI'lerde zaten hiç OCR
     # çağrılmıyor, bu alan orada yok sayılır.
     reader: Literal["tesseract", "template"] = "tesseract"
+    # Saha bulgusu (01-10-2026): sabit BOOLEAN_MATCH_RATIO_THRESHOLD (0.28) bazi
+    # kamera/isik kosullarinda "0" ROI'lerini kararsiz okuyor — operator sahada
+    # admin UI'daki slider ile ROI-bazinda ayarlayabilsin diye eklendi. Sadece
+    # kind="boolean" ROI'lerde anlamli. None = eski sabit 0.28 davranisi
+    # (gerıye uyumlu, mevcut ROI'ler bozulmaz) — bkz. screen_reader.read_roi.
+    bool_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class RoiListPayload(BaseModel):

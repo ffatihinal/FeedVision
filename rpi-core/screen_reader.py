@@ -481,6 +481,7 @@ def read_roi(
     kind: str = "numeric",
     quad: np.ndarray | None = None,
     ocr_whitelist: str | None = None,
+    bool_threshold: float | None = None,
 ) -> ScreenReadResult:
     """ROI'yi kirpar; "numeric" ise OCR+renk, "boolean" ise SADECE renk (Hue/
     Saturation) kriteriyle 0/1 karari hesaplar — bu modulun tek giris noktasi.
@@ -495,12 +496,20 @@ def read_roi(
 
     ocr_whitelist: sadece kind="numeric" icin anlamli, read_text_ocr'a oldugu
     gibi iletilir (bkz. o fonksiyonun docstring'i — opsiyonel/ROI-bazinda).
+
+    bool_threshold (01-10-2026, saha bulgusu): sadece kind="boolean" icin
+    anlamli — ROI-bazinda match_ratio esigi, admin UI'daki slider'dan gelir.
+    None ise (eski kayitli ROI/alan yok) read_boolean_state kendi varsayilani
+    BOOLEAN_MATCH_RATIO_THRESHOLD'u (0.28) kullanir — geriye uyumlu.
     """
     cropped = crop_roi_quad(frame, quad) if quad is not None else crop_roi(frame, roi)
     hsv_color = average_color_hsv(cropped)
     rgb_color = average_color_rgb(cropped)
     if kind == "boolean":
-        state, match_ratio = read_boolean_state(cropped)
+        if bool_threshold is not None:
+            state, match_ratio = read_boolean_state(cropped, match_ratio_threshold=bool_threshold)
+        else:
+            state, match_ratio = read_boolean_state(cropped)
         return ScreenReadResult(
             roi=roi,
             avg_color_hsv=hsv_color,

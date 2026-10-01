@@ -205,8 +205,9 @@
       padding: 14px 18px; overflow-y: auto; max-height: calc(82vh - 60px);
       font-size: 14px; line-height: 1.6; color: #ccc;
     }
-    #roi-form-body label.roi-form-field { display: block; margin-bottom: 14px; }
-    #roi-form-body label.roi-form-field > span.roi-form-label-text {
+    #roi-form-body label.roi-form-field, #roi-form-body div.roi-form-field { display: block; margin-bottom: 14px; }
+    #roi-form-body label.roi-form-field > span.roi-form-label-text,
+    #roi-form-body div.roi-form-field > span.roi-form-label-text {
       display: block; margin-bottom: 6px; color: #aaa; font-size: 13px;
     }
     #roi-form-name-input {
@@ -888,6 +889,13 @@
             <span class="roi-form-option-sub">deneysel</span>
           </span>
         </label>
+      </div>
+
+      <div id="roi-form-threshold-group" class="roi-form-field">
+        <span class="roi-form-label-text">Eşik (match_ratio) — <span id="roi-form-threshold-value">%28</span> turkuaz</span>
+        <input type="range" id="roi-form-threshold-input" min="0" max="1" step="0.01" value="0.28"
+               oninput="document.getElementById('roi-form-threshold-value').textContent = Math.round(this.value * 100) + '%'">
+        <span class="roi-form-option-sub">Sahada canlı okuma panelindeki match_ratio'ya bakarak ayarla — "0" ROI yanlış "1" okuyorsa eşiği yükselt.</span>
       </div>
 
       <div id="roi-form-error"></div>
@@ -1985,7 +1993,22 @@
         // Görev C — okuma yöntemi sadece Sayısal ROI'lerde anlamlı (Durum
         // ROI'lerinde zaten hiç OCR/şablon çağrılmıyor, bkz. main._read_all_rois).
         const readerLabel = roi.kind === "boolean" ? "" : (roi.reader === "template" ? "/Şablon" : "/Tesseract");
-        label.textContent = `${roi.name} [${kindLabel}${readerLabel}]: [${roi.x}, ${roi.y}, ${roi.w}, ${roi.h}]`;
+        const thresholdLabel = roi.kind === "boolean"
+          ? ` [eşik: ${Math.round((typeof roi.bool_threshold === "number" ? roi.bool_threshold : 0.28) * 100)}%]`
+          : "";
+        label.textContent = `${roi.name} [${kindLabel}${readerLabel}]: [${roi.x}, ${roi.y}, ${roi.w}, ${roi.h}]${thresholdLabel}`;
+        // Düzenle (01-10-2026, saha bulgusu): mevcut ROI'nin eşik/tip/okuma
+        // yöntemini aynı mini-formla değiştirmeyi sağlar — konum/boyut
+        // değişmez, sadece bu alanlar güncellenir.
+        const editBtn = document.createElement("button");
+        editBtn.textContent = "Düzenle";
+        editBtn.onclick = async () => {
+          const formResult = await openRoiFormDialog(roi);
+          if (!formResult) return;
+          roiList[idx] = { ...roi, name: formResult.name, kind: formResult.kind, reader: formResult.reader, bool_threshold: formResult.bool_threshold };
+          renderRoiList();
+          drawRoiCanvas();
+        };
         const delBtn = document.createElement("button");
         delBtn.textContent = "Sil";
         delBtn.onclick = () => {
@@ -1994,6 +2017,7 @@
           drawRoiCanvas();
         };
         li.appendChild(label);
+        li.appendChild(editBtn);
         li.appendChild(delBtn);
         ul.appendChild(li);
       });
@@ -2051,7 +2075,7 @@
         drawRoiCanvas();
         return;
       }
-      roiList.push({ name: formResult.name, x, y, w, h, kind: formResult.kind, reader: formResult.reader });
+      roiList.push({ name: formResult.name, x, y, w, h, kind: formResult.kind, reader: formResult.reader, bool_threshold: formResult.bool_threshold });
       renderRoiList();
       drawRoiCanvas();
     }
@@ -2068,18 +2092,27 @@
       // Görev C — okuma yöntemi sadece Sayısal ROI'lerde anlamlı (Durum
       // ROI'lerinde zaten hiç OCR/şablon çağrılmıyor, bkz. main._read_all_rois).
       document.getElementById("roi-form-reader-group").style.display = isBoolean ? "none" : "block";
+      // Saha bulgusu (01-10-2026): eşik slider'ı da sadece Durum ROI'lerinde anlamlı.
+      document.getElementById("roi-form-threshold-group").style.display = isBoolean ? "block" : "none";
     }
 
-    function openRoiFormDialog() {
+    // editRoi: düzenlenen mevcut ROI (varsa) — {name, kind, reader, bool_threshold}.
+    // Yeni ROI çiziminde undefined geçilir, form varsayılanlarla açılır.
+    function openRoiFormDialog(editRoi) {
       const dlg = document.getElementById("roi-form-dialog");
       const nameInput = document.getElementById("roi-form-name-input");
       const errorEl = document.getElementById("roi-form-error");
-      // Her açılışta forma sıfırdan başla — önceki ROI'nin kalıntısı kalmasın.
-      nameInput.value = "";
+      const thresholdInput = document.getElementById("roi-form-threshold-input");
+      const thresholdValue = document.getElementById("roi-form-threshold-value");
       errorEl.classList.remove("show");
       errorEl.textContent = "";
-      document.querySelector('input[name="roi-form-kind"][value="numeric"]').checked = true;
-      document.querySelector('input[name="roi-form-reader"][value="tesseract"]').checked = true;
+      nameInput.value = editRoi ? editRoi.name : "";
+      document.querySelector(`input[name="roi-form-kind"][value="${editRoi ? editRoi.kind : "numeric"}"]`).checked = true;
+      document.querySelector(`input[name="roi-form-reader"][value="${editRoi && editRoi.reader ? editRoi.reader : "tesseract"}"]`).checked = true;
+      // bool_threshold yoksa (yeni ROI veya eski kayıt) screen_reader.py'deki sabit varsayılan 0.28 gösterilir.
+      const thresholdVal = (editRoi && typeof editRoi.bool_threshold === "number") ? editRoi.bool_threshold : 0.28;
+      thresholdInput.value = thresholdVal;
+      thresholdValue.textContent = Math.round(thresholdVal * 100) + "%";
       onRoiFormKindChange();
       if (!dlg.open) dlg.showModal();
       nameInput.focus();
@@ -2102,9 +2135,13 @@
       const reader = kind === "boolean"
         ? "tesseract" // Durum ROI'lerinde okuma yöntemi hiç kullanılmıyor, geriye uyumlu varsayılan.
         : document.querySelector('input[name="roi-form-reader"]:checked').value;
+      // bool_threshold sadece Durum ROI'lerinde gönderilir — Sayısal ROI'lerde null (RoiDef varsayılanı).
+      const boolThreshold = kind === "boolean"
+        ? parseFloat(document.getElementById("roi-form-threshold-input").value)
+        : null;
       document.getElementById("roi-form-dialog").close();
       if (roiFormResolve) {
-        roiFormResolve({ name, kind, reader });
+        roiFormResolve({ name, kind, reader, bool_threshold: boolThreshold });
         roiFormResolve = null;
       }
     }

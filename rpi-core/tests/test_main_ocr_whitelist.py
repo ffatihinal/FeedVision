@@ -23,7 +23,7 @@ def _blank_frame():
 
 
 def _fake_read_roi_factory(captured: dict):
-    def _fake_read_roi(frame, roi, kind="numeric", quad=None, ocr_whitelist=None):
+    def _fake_read_roi(frame, roi, kind="numeric", quad=None, ocr_whitelist=None, bool_threshold=None):
         captured["ocr_whitelist"] = ocr_whitelist
         captured["kind"] = kind
         return ScreenReadResult(

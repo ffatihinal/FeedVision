@@ -63,7 +63,7 @@ class TestReadAllRoisDefaultTesseractPathUnchanged:
         read_roi_called = {"count": 0}
         digit_reader_called = {"count": 0}
 
-        def _fake_read_roi(frame, roi, kind="numeric", quad=None, ocr_whitelist=None):
+        def _fake_read_roi(frame, roi, kind="numeric", quad=None, ocr_whitelist=None, bool_threshold=None):
             read_roi_called["count"] += 1
             return ScreenReadResult(
                 roi=roi,
