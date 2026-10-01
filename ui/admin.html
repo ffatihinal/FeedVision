@@ -353,6 +353,16 @@
           <button onclick="toggleRoiStream()" id="roi-stream-toggle-btn">Canlı Yayını Başlat</button>
           <button onclick="saveRois()">Kaydet</button>
         </div>
+        <!-- Görev (01-10-2026, saha bulgusu): ekranda tek bir ton turkuaz olduğu
+             için tüm Durum ROI'leri aynı eşiği kullanıyor — tek tek açıp
+             ayarlamak yerine TEK global slider tüm bool_threshold alanlarını
+             aynı anda günceller (client-side, roiList toplu güncelleme).
+             Sadece bu kamerada en az bir Durum ROI'si varsa görünür. -->
+        <div id="global-bool-threshold-group" style="display:none; margin-bottom:14px; padding:10px; border:1px solid #333; border-radius:6px;">
+          <span style="display:block; margin-bottom:4px; font-size:13px; color:#aaa;">Durum ROI'leri İçin Ortak Eşik (match_ratio) — <span id="global-bool-threshold-value">%28</span> turkuaz</span>
+          <input type="range" id="global-bool-threshold-input" min="0" max="1" step="0.01" value="0.28" oninput="onGlobalBoolThresholdInput(this.value)">
+          <span style="display:block; font-size:12px; color:#888; margin-top:4px;">Tüm Durum ROI'lerini aynı anda ayarlar — her birini tek tek açmaya gerek yok. "Kaydet" ile kalıcı yapılır.</span>
+        </div>
         <h3 style="margin-top:0; font-size:15px;">Tanımlı ROI'ler</h3>
         <ul id="roi-list"><li style="border:none; color:#888;">Henüz ROI yok.</li></ul>
       </div>
@@ -2021,6 +2031,36 @@
         li.appendChild(delBtn);
         ul.appendChild(li);
       });
+      updateGlobalBoolThresholdVisibility();
+    }
+
+    // Görev (01-10-2026): global eşik slider'ını kamerada Durum ROI'si olup
+    // olmamasına göre göster/gizle, görünür değeri mevcut ROI'lerden biriyle
+    // senkronlar (ilk Durum ROI'sinin bool_threshold'u — hepsi zaten aynı olmalı).
+    function updateGlobalBoolThresholdVisibility() {
+      const group = document.getElementById("global-bool-threshold-group");
+      const boolRois = roiList.filter((roi) => roi.kind === "boolean");
+      if (boolRois.length === 0) {
+        group.style.display = "none";
+        return;
+      }
+      group.style.display = "block";
+      const firstVal = typeof boolRois[0].bool_threshold === "number" ? boolRois[0].bool_threshold : 0.28;
+      const input = document.getElementById("global-bool-threshold-input");
+      const valueLabel = document.getElementById("global-bool-threshold-value");
+      input.value = firstVal;
+      valueLabel.textContent = Math.round(firstVal * 100) + "%";
+    }
+
+    // Görev (01-10-2026): slider hareket ettikçe kameradaki TÜM Durum
+    // ROI'lerinin bool_threshold'unu aynı anda günceller (client-side).
+    // Kaydetme ayrı adım (mevcut "Kaydet" butonu / saveRois()).
+    function onGlobalBoolThresholdInput(rawValue) {
+      const value = parseFloat(rawValue);
+      document.getElementById("global-bool-threshold-value").textContent = Math.round(value * 100) + "%";
+      roiList = roiList.map((roi) => roi.kind === "boolean" ? { ...roi, bool_threshold: value } : roi);
+      renderRoiList();
+      drawRoiCanvas();
     }
 
     function roiPointerDown(evt) {
