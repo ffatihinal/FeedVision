@@ -184,13 +184,17 @@ class TestReadDigitsWithDefaultTemplates:
         empty = np.zeros((0, 0, 3), dtype=np.uint8)
         assert read_digits(empty, templates) == ("", 0.0)
 
-    def test_garbled_input_does_not_silently_misread(self, templates):
+    @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4, 7, 13, 21, 42, 99])
+    def test_garbled_input_does_not_silently_misread(self, templates, seed):
         # Görev kriteri: "Bozuk/gurultulu girdide dusuk guven skoru + '?'
         # davranisini dogrula (sessiz yanlis tahmin yok)." Tam renkli rastgele
-        # gurultu (sabit tohum -- deterministik) hicbir karaktere benzemez --
-        # ya "?" iceren bir metin ya da genel olarak dusuk guven donmeli,
-        # YUKSEK guvenle temiz bir rakam dizisi donmemeli.
-        rng = np.random.default_rng(0)
+        # gurultu hicbir karaktere benzemez -- ya "?" iceren bir metin ya da
+        # genel olarak dusuk guven donmeli, YUKSEK guvenle temiz bir rakam
+        # dizisi donmemeli. Tek sabit tohum (eski hali) kirilgandi -- 01-10-2026'da
+        # DejaVu fontuyla uretilen sablonlarla 30/30 tohumda bu assertion FAIL
+        # veriyordu (bkz. CONFIDENCE_THRESHOLD yorumu + INSA_GUNLUGU), coklu
+        # tohuma gecis bu sinifta regresyonu guvenilir yakalamak icin.
+        rng = np.random.default_rng(seed)
         garbage = rng.integers(0, 256, (32, 60, 3), dtype=np.uint8)
         text, confidence = read_digits(garbage, templates)
         assert confidence < CONFIDENCE_THRESHOLD or "?" in text

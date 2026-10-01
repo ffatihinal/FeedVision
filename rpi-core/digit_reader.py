@@ -49,7 +49,13 @@ TEMPLATE_SIZE: tuple[int, int] = (20, 32)
 # match_character/read_digits güven skoru [0,1] aralığında (1 = piksel piksel
 # aynı ikili görüntü). Bu eşiğin ALTINDA kalan eşleşme "?" ile işaretlenir —
 # CONFIDENCE_THRESHOLD sözleşmesi için yukarıdaki modül docstring'ine bakın.
-CONFIDENCE_THRESHOLD = 0.55
+# 0.70 (01-10-2026'da 0.55'ten yükseltildi): "." ve "-" şablonları basit/blok
+# şekilli olduğu icin rastgele gurultu bile MSE skorunu yukseklere tasiyor —
+# 30 farkli rastgele tohumla olcumde gurultunun maksimum skoru ~0.68, gercek/
+# net bir okumanin skoru ise ~0.89 cikti (bkz. INSA_GUNLUGU 01-10 girdisi).
+# 0.70 bu bosluga guvenli bir sekilde oturuyor: gercek okumalari etkilemeden
+# gurultunun sessizce rakam gibi okunmasini buyuk olcude engelliyor.
+CONFIDENCE_THRESHOLD = 0.70
 
 # Desteklenen karakter etiketleri — HMI sayısal göstergelerinde beklenen
 # tüm karakterler (rakam + ondalık nokta + eksi işareti).
