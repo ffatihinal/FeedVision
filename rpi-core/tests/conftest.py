@@ -95,3 +95,17 @@ def isolated_vision_settings_config(tmp_path, monkeypatch):
     path = tmp_path / "vision_settings.json"
     monkeypatch.setattr(vision_settings_store, "CONFIG_PATH", path)
     return path
+
+
+@pytest.fixture(autouse=True)
+def _reset_roi_read_cache():
+    """main._roi_read_cache (01-10-2026, ROI okuma CPU önbelleği) modül
+    seviyesinde, test'ler arasında sızabilir — ör. iki test aynı boş/sabit
+    kareyi kullanırsa ikinci test yanlışlıkla birincinin önbelleğinden sonuç
+    alabilir. Her testten önce VE sonra temizlenir (otomatik, her test
+    dosyasına ayrı ayrı eklemeye gerek kalmasın diye)."""
+    import main
+
+    main.reset_roi_read_cache()
+    yield
+    main.reset_roi_read_cache()

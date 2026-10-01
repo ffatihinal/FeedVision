@@ -142,6 +142,66 @@ _last_known_corners: dict[str, "np.ndarray"] = {}
 # bilinen eşleşmeye düşülür — _last_known_corners ile birebir aynı gerekçe.
 _last_known_anchors: dict[str, tuple[list, list]] = {}
 
+# ROI okuma CPU optimizasyonu (01-10-2026): kamera başına son işlenen HAM kare
+# (CLAHE/drift-düzeltme ÖNCESİ, bkz. _read_all_rois'ta raw_frame) + o karenin
+# ürettiği sonuçlar burada tutulur. Yeni kare bir öncekiyle "pratik olarak
+# aynı" (bkz. _ROI_FRAME_DIFF_THRESHOLD) VE önceki okumaların HEPSİ başarılıysa
+# (bkz. _roi_result_is_ok) OCR tekrar çalıştırılmaz, önceki sonuç aynen
+# döndürülür. GÜVENLİK NOTU: bu SADECE CPU tasarrufu için — rule_engine'in
+# motor durdurma kararını ASLA geciktirmemeli, bu yüzden eşik kasıtlı olarak
+# agresif düşük tutuldu (şüpheli durumda "değişti" sonucuna düşsün). Süreç
+# yeniden başlarsa (servis restart) sıfırlanır — sorun değil, bir sonraki
+# karede yeniden dolar. Testler arası sızıntıyı önlemek için
+# tests/conftest.py'deki reset_roi_read_cache autouse fixture'ı kullanır.
+_roi_read_cache: dict[str, dict] = {}
+
+# Çok düşük/agresif eşik (0-255 gri tonlama ortalama fark) — amaç CPU
+# tasarrufundan çok güvenlik: sensör gürültüsü bile çoğu zaman bunu aşıp
+# "değişti" sonucuna düşürsün, böylece gerçek bir değişikliği "aynı" sanıp
+# bayat bir okumayı rule_engine'e döndürme riski en aza inmiş olur.
+_ROI_FRAME_DIFF_THRESHOLD = 1.0
+
+
+def _frames_practically_identical(prev_frame: "np.ndarray | None", curr_frame: "np.ndarray") -> bool:
+    """İki kare arasında (piksel-piksel birebir eşitlik DEĞİL — kamera sensör
+    gürültüsü yüzünden iki ardışık kare asla bit-bit aynı olmaz) pratik
+    olarak fark olup olmadığına bakar. Boyut uyuşmazlığında (ör. çözünürlük
+    ayarı değişti) güvenli taraf: "farklı" kabul edilir."""
+    if prev_frame is None or prev_frame.shape != curr_frame.shape:
+        return False
+    diff = cv2.absdiff(prev_frame, curr_frame)
+    return float(diff.mean()) < _ROI_FRAME_DIFF_THRESHOLD
+
+
+def _roi_result_is_ok(result: dict) -> bool:
+    """Bir ROI okuma sonucunun önbellekten tekrar kullanılabilecek kadar
+    "başarılı" olup olmadığını söyler. "boolean" ROI'lerde bool_state None
+    ise okunamamış demektir; "numeric" ROI'lerde ocr_error doluysa ya da
+    metinde digit_reader'ın UNKNOWN_LABEL'i ("?") GEÇİYORSA okunamamış
+    sayılır (bkz. digit_reader.py UNKNOWN_LABEL docstring'i) — tam eşitlik
+    DEĞİL substring kontrolü: digit_reader.read_digits çok karakterli
+    metinlerde HER karakteri ayrı ayrı "?" ile işaretleyebiliyor (ör. "1?4"),
+    tam string "?" olmasa bile bu kısmi başarısızlık "başarılı" sayılıp
+    cache'lenmemeli (tester bulgusu, 01-10-2026)."""
+    if result.get("kind") == "boolean":
+        return result.get("bool_state") is not None
+    if result.get("ocr_error") is not None:
+        return False
+    if digit_reader.UNKNOWN_LABEL in (result.get("text") or ""):
+        return False
+    return True
+
+
+def reset_roi_read_cache(cam_id: str | None = None) -> None:
+    """_roi_read_cache'i temizler — cam_id verilirse sadece o kamera, yoksa
+    hepsi. Üretimde kullanılmaz (servis restart zaten sıfırlıyor); testlerin
+    bu modül-seviyesi cache'i test'ler arası sızdırmadan temizleyebilmesi için
+    (bkz. tests/conftest.py)."""
+    if cam_id is None:
+        _roi_read_cache.clear()
+    else:
+        _roi_read_cache.pop(cam_id, None)
+
 
 class _PollingAccessLogFilter(logging.Filter):
     """/system/temp ve /system/resources icin uvicorn erisim log satirlarini bastirir.
@@ -656,10 +716,27 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
     vision_settings_store.py) ROI kirpmadan ONCE karenin tamamina uygulanir.
     Chamber Camera'ya kasitli olarak dokunulmuyor (18-09-2026 kapsam karari —
     bu tur sadece UI Screen Camera'nin ROI okuma pipeline'ini degistiriyor).
+
+    CPU önbelleği (01-10-2026): kare bir öncekiyle pratik olarak aynıysa VE
+    önceki okumaların hepsi başarılıysa OCR'ı atlayıp önbellekteki sonucu
+    aynen döndürür (bkz. _roi_read_cache docstring'i, modülün üstünde) —
+    rule_engine'in motor durdurma kararını GECİKTİRMEMESİ için eşik kasıtlı
+    agresif düşük.
     """
     rois = roi_store.get_rois(cam_id)
     if not rois:
         return [], False
+
+    cached = _roi_read_cache.get(cam_id)
+    if (
+        cached is not None
+        and cached["rois"] == rois
+        and _frames_practically_identical(cached["frame"], frame)
+        and all(_roi_result_is_ok(r) for r in cached["results"])
+    ):
+        return cached["results"], cached["uncertain"]
+
+    raw_frame = frame  # cache karşılaştırması HAM kareyle yapılır (CLAHE sonrası değil)
     if cam_id == "ui_screen" and vision_settings_store.get_settings(cam_id)["preprocess"]["clahe_enabled"]:
         frame = apply_clahe(frame)
     adjusted_rois, uncertain = _adjust_rois_for_drift(cam_id, frame, rois)
@@ -721,6 +798,12 @@ def _read_all_rois(cam_id: str, frame: np.ndarray) -> tuple[list[dict], bool]:
                 "engine_used": result.engine_used,
             }
         )
+    _roi_read_cache[cam_id] = {
+        "frame": raw_frame.copy(),
+        "rois": rois,
+        "results": results,
+        "uncertain": uncertain,
+    }
     return results, uncertain
 
 
