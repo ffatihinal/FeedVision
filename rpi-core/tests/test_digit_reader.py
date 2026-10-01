@@ -10,7 +10,7 @@ testler DE dolaylı olarak PIL'e bağımlı (requirements.txt: Pillow>=10.0).
 import cv2
 import numpy as np
 import pytest
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 import digit_reader
 from digit_reader import (
@@ -23,21 +23,21 @@ from digit_reader import (
 )
 
 # Sentetik test görüntüleri render etmek için — gerçek HMI fontuna bağımlı
-# olmadan, bu Mac'te de var olduğu doğrulanmış (Görev A prototiplemesi) bir
-# sistem fontu. generate_default_templates() KENDİ font arama zincirini
-# kullanır (bkz. digit_reader._DEFAULT_FONT_CANDIDATES) — burası sadece
-# "sahte ROI görüntüsü" üretmek için, template üretimiyle AYNI font olması
-# şart değil (aksine, farklı font/render yoluyla üretilmiş bir test girdisinin
-# yine de doğru okunması, eşleştirmenin küçük render farklarına dayanıklı
-# olduğunu daha iyi kanıtlar).
-_TEST_FONT_PATH = "/System/Library/Fonts/Supplemental/Arial.ttf"
+# olmadan bir sistem fontu kullanılıyor. digit_reader._load_default_font
+# zaten platformdan bağımsız bir arama zinciri + PIL gömülü fallback'i
+# içeriyor (bkz. orası) — burada hardcoded Mac-only bir yol (Arial.ttf)
+# kullanmak CI'daki Ubuntu runner'da "OSError: cannot open resource" ile
+# patlıyordu (01-10-2026, sahada bulundu). Aynı fonksiyonu burada da
+# kullanmak testi platformdan bağımsız hale getiriyor; template üretimiyle
+# AYNI font olması bir sorun değil (aksine, matching'in küçük render
+# farklarına dayanıklı olduğunu daha iyi kanıtlar).
 
 
 def _render_text_image(text: str, font_size: int = 28, pad: int = 6, invert: bool = False) -> np.ndarray:
     """Beyaz yazı/siyah zemin (invert=False) ya da siyah yazı/beyaz zemin
     (invert=True) sentetik bir ROI kırpıntısı üretir — BGR, screen_reader'ın
     read_roi'ye verdiği kırpıntılarla aynı format."""
-    font = ImageFont.truetype(_TEST_FONT_PATH, font_size)
+    font = digit_reader._load_default_font(font_size)
     probe = ImageDraw.Draw(Image.new("L", (10, 10), 0))
     bbox = probe.textbbox((0, 0), text, font=font)
     w = bbox[2] - bbox[0] + pad * 2
