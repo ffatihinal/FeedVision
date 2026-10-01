@@ -32,7 +32,11 @@ except ImportError:
     Picamera2 = None
     PICAMERA2_AVAILABLE = False
 
-STREAM_SIZE = (1280, 720)  # 720p hedefi — TV/tablet icin yeterli, Pi 5 CPU'yu bogmaz
+STREAM_SIZE = (1640, 1232)  # 4:3, IMX219 sensorunun 2x2-binned tam-FOV modu — 01-10-2026
+# sahada bulgu: 16:9 (1280x720) istemek picamera2/libcamera'nin sensorun
+# ust/alt kismini kirpmasina sebep oluyordu (IMX219'un dogal gorus alani
+# 4:3). 1640x1232, 3280x2464 tam sensorun 2'ye bolunmus hali — Picamera2'nin
+# "tam FOV, makul CPU/bant genisligi" icin onerdigi standart boyut.
 STREAM_FPS = 12.0  # 10-15fps hedef araligi (kamera_entegrasyon_onerisi.md Bolum 1)
 
 

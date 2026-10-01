@@ -15,7 +15,12 @@
        oldugu icin normal akista genislik katkisi vermiyor, kapsayici bos icerikle
        ~0 genislige cokup gorunmez oluyordu (29-09 saha bulgusu, DevTools ile
        genisligin 2px'e dustugu dogrulandi). width:min(...) responsive kaliyor. */
-    .roi-canvas-wrap { position: relative; width: min(640px, 100%); aspect-ratio: 1280 / 720; border: 1px solid #444; border-radius: 4px; background: #222; overflow: hidden; }
+    /* aspect-ratio burada sadece akis henuz yuklenmeden once gosterilecek
+       baslangic/placeholder degeri — gercek deger JS tarafindan img'in
+       naturalWidth/naturalHeight'inden okunup runtime'da override edilir
+       (bkz. syncRoiCanvasToStream, 01-10-2026 — STREAM_SIZE degisirse
+       burada hicbir sey guncellenmesi gerekmez). */
+    .roi-canvas-wrap { position: relative; width: min(640px, 100%); aspect-ratio: 4 / 3; border: 1px solid #444; border-radius: 4px; background: #222; overflow: hidden; }
     #roi-stream-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; }
     #roi-canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; background: transparent; }
     #roi-list { list-style: none; padding: 0; margin: 0; }
@@ -346,7 +351,9 @@
     <div style="display:flex; gap:24px; flex-wrap:wrap;">
       <div class="roi-canvas-wrap">
         <img id="roi-stream-img" alt="UI Screen Camera canlı akış">
-        <canvas id="roi-canvas" width="1280" height="720"></canvas>
+        <!-- width/height burada sadece baslangic/placeholder — img yuklenince
+             syncRoiCanvasToStream gercek akis boyutuyla override eder. -->
+        <canvas id="roi-canvas" width="1640" height="1232"></canvas>
       </div>
       <div style="min-width:220px; flex:1;">
         <div style="margin-bottom:10px;">
@@ -1873,7 +1880,7 @@
     //  eksene paralel — döndürme yok.
     // ==========================================================================
     const ROI_CAM_ID = "ui_screen";
-    let roiList = [];           // {name, x, y, w, h, kind} — orijinal kare (1280x720) koordinatlarında
+    let roiList = [];           // {name, x, y, w, h, kind} — orijinal kare (canvas.width x canvas.height, akışın gerçek boyutu) koordinatlarında
     let roiDrawing = null;      // aktif çizim: {startX, startY, curX, curY}
     let roiStreamActive = false;
 
@@ -1889,7 +1896,7 @@
     }
 
     // Ekranda CSS ile küçültülmüş canvas üzerindeki tıklama noktasını,
-    // canvas'ın gerçek çözünürlüğüne (1280x720) ölçekleyerek çevirir.
+    // canvas'ın gerçek çözünürlüğüne (akışın kendi boyutu, bkz. syncRoiCanvasToStream) ölçekleyerek çevirir.
     function roiPointFromEvent(evt) {
       const canvas = roiCanvasEl();
       const rect = canvas.getBoundingClientRect();
@@ -2195,8 +2202,26 @@
       }
     }
 
+    // Canvas boyutunu ve wrapper'ın aspect-ratio'sunu akışın GERÇEK boyutundan
+    // (img.naturalWidth/naturalHeight) okuyup uygular — STREAM_SIZE (rpi-core/
+    // vision.py) ileride tekrar değişirse burada hiçbir sabit sayı güncellenmesi
+    // gerekmesin diye (01-10-2026, 1280x720 → 1640x1232 geçişinde eklendi).
+    // ROI koordinat sistemi canvas.width/height'e göre çalıştığı için (roiList
+    // bu uzayda tutuluyor), canvas'ı img'in gerçek boyutuna eşitlemek ROI
+    // matematiğini otomatik doğru tutar — ayrı bir ölçekleme kodu gerekmez.
+    function syncRoiCanvasToStream() {
+      const img = document.getElementById("roi-stream-img");
+      const canvas = roiCanvasEl();
+      if (!img.naturalWidth || !img.naturalHeight) return;
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.parentElement.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+      drawRoiCanvas();
+    }
+
     function setupRoiCanvasEvents() {
       const canvas = roiCanvasEl();
+      document.getElementById("roi-stream-img").addEventListener("load", syncRoiCanvasToStream);
       canvas.addEventListener("mousedown", roiPointerDown);
       canvas.addEventListener("mousemove", roiPointerMove);
       window.addEventListener("mouseup", roiPointerUp);
