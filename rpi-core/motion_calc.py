@@ -2,8 +2,8 @@
 FeedVision — Fiziksel birim <-> ham firmware komutu dönüşümleri (23-09-2026)
 
 Ne yapar: operatörün girdiği mm/s, mm, mm/s², RPM gibi fiziksel değerleri,
-STM32 firmware'inin anladığı ham `delay`(µs)/`steps`/`accel`(adım) ve DC
-motor `speed`(0-100 PWM duty%) değerlerine çevirir — kullanıcı hiçbir zaman
+STM32 firmware'inin anladığı ham `delay`(µs)/`steps`/`accel`(adım), DC
+motor `speed`(0-100 PWM duty%) ve NEMA17 dönüş ekseni `delay`(µs) değerlerine çevirir — kullanıcı hiçbir zaman
 ham birim görmez/girmez (main.py /motor/feed-start bunu kullanır).
 
 Bilinçli olarak main.py'den (FastAPI/pydantic) ve serial_bridge.py'den
@@ -35,6 +35,12 @@ STEPS_PER_REV = 25600
 STEP_MIN_DELAY_US = 20  # main.c STEP_MIN_DELAY_US (tepe hız, DM556 200kHz limitine göre 4x güvenlik payı)
 STEP_MAX_DELAY_US = 60000  # main.c STEP_MAX_DELAY_US (timer'ın 16-bit sayıcı tavanı)
 STEP_RAMP_START_DELAY_US = 2000  # main.c STEP_RAMP_START_DELAY_US (rampa başlangıç/bitiş gecikmesi)
+
+# NEMA17 dönüş ekseni (TB6600) sınırları — firmware/Core/Src/main.c'deki
+# ROT_MIN_DELAY_US / ROT_MAX_DELAY_US ile BİREBİR EŞİT tutulmalı (protokol
+# sözleşmesi, 05-10-2026). main.c'de değişirse burası da elle güncellenmeli.
+ROT_MIN_DELAY_US = 100  # main.c ROT_MIN_DELAY_US (tepe hız, iki darbe arası en kısa süre)
+ROT_MAX_DELAY_US = 60000  # main.c ROT_MAX_DELAY_US (timer'ın 16-bit sayıcı tavanı)
 
 
 def mm_per_step(d_drive_mm: float) -> float:
@@ -159,3 +165,60 @@ def compute_dc_duty(rpm_rod: float, d_wheel_dc_mm: float, d_rod_mm: float, rpm_m
         )
 
     return {"duty": duty, "duty_exact": duty_exact}
+
+
+def compute_rot_command(rpm_rod: float, d_wheel_rot_mm: float, d_rod_mm: float, ppr: float) -> dict:
+    """İstenen besleme çubuğu RPM'i -> NEMA17 dönüş ekseni darbe gecikmesi
+    (µs, firmware `{"cmd":"rot","delay":...}`). Sürtünme tahriki, DC ile aynı
+    fizik (RPM_rod = RPM_tekerlek × D_tekerlek / D_çubuk):
+
+        wheel_rpm    = rpm_rod × D_rod / D_wheel_rot
+        pulses_per_s = wheel_rpm / 60 × ppr
+        delay_us     = round(1e6 / pulses_per_s)
+
+    `ppr` = TB6600 darbe/tur (DIP switch ile aynı, bkz. motion_params.ROT_PPR).
+
+    `delay_us` [ROT_MIN_DELAY_US, ROT_MAX_DELAY_US] dışına çıkarsa SESSİZCE
+    KIRPILMAZ (compute_step_command/compute_dc_duty ile aynı gerekçe) —
+    desteklenen min/max çubuk RPM'i ile açıklayıcı ValueError.
+
+    Dönen `speed_pct_of_max`: istenen darbe hızının ROT_MIN_DELAY_US'teki
+    (tepe) darbe hızına oranı, % (compute_step_command ile aynı mantık).
+    """
+    # `not x > 0` (x <= 0 yerine): NaN'ı da yakalar.
+    if not rpm_rod > 0:
+        raise ValueError("RPM 0'dan büyük olmalı")
+    if not d_wheel_rot_mm > 0:
+        raise ValueError("NEMA17 teker çapı (mm) 0'dan büyük olmalı")
+    if not d_rod_mm > 0:
+        raise ValueError("Besleme çubuğu çapı (mm) 0'dan büyük olmalı")
+    if not ppr > 0:
+        raise ValueError("ROT_PPR (darbe/tur) 0'dan büyük olmalı")
+
+    wheel_rpm = rpm_rod * d_rod_mm / d_wheel_rot_mm
+    pulses_per_s = wheel_rpm / 60 * ppr
+
+    # pulses_per_s alt taşmayla 0'a düşerse (aşırı küçük RPM) bölme hatası
+    # yerine aralık dışı hatasına düşsün.
+    delay_exact = 1_000_000 / pulses_per_s if pulses_per_s > 0 else math.inf
+    delay_us = round(delay_exact) if math.isfinite(delay_exact) else None
+
+    if delay_us is None or delay_us < ROT_MIN_DELAY_US or delay_us > ROT_MAX_DELAY_US:
+        # delay -> pulses_per_s -> çubuk RPM tersi: rpm_rod = pps × 60 / ppr × D_wheel / D_rod
+        rod_rpm_per_pps = 60 / ppr * d_wheel_rot_mm / d_rod_mm
+        min_rpm = (1_000_000 / ROT_MAX_DELAY_US) * rod_rpm_per_pps
+        max_rpm = (1_000_000 / ROT_MIN_DELAY_US) * rod_rpm_per_pps
+        raise ValueError(
+            f"İstenen RPM ({rpm_rod}) bu ayarlarla desteklenen aralığın dışında "
+            f"(min ~{min_rpm:.3f} RPM, max ~{max_rpm:.1f} RPM)"
+        )
+
+    max_pulses_per_s = 1_000_000 / ROT_MIN_DELAY_US
+    speed_pct_of_max = pulses_per_s / max_pulses_per_s * 100
+
+    return {
+        "delay_us": delay_us,
+        "wheel_rpm": wheel_rpm,
+        "pulses_per_s": pulses_per_s,
+        "speed_pct_of_max": speed_pct_of_max,
+    }

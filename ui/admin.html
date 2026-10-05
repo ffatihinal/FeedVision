@@ -597,16 +597,30 @@
         </label>
       </div>
       <div class="row-group">
-        <label>DC Yön:</label>
-        <select id="feed-dc-dir"><option value="forward">Saat Yönü</option><option value="backward">Saat Yönünün Tersi</option></select>
-        <label>DC Hız (RPM):</label>
+        <label>Dönüş Motoru:</label>
+        <select id="feed-rot-motor" onchange="onFeedRotMotorChange()">
+          <option value="nema17">NEMA17</option><option value="dc">DC</option><option value="both">İkisi birden</option>
+        </select>
+        <span id="feed-rot-nema-fields" style="display:contents">
+          <label>NEMA17 Yön:</label>
+          <select id="feed-rot-dir"><option value="cw">Saat Yönü</option><option value="ccw">Saat Yönünün Tersi</option></select>
+        </span>
+        <span id="feed-rot-dc-fields" style="display:none">
+          <label>DC Yön:</label>
+          <select id="feed-dc-dir"><option value="forward">Saat Yönü</option><option value="backward">Saat Yönünün Tersi</option></select>
+        </span>
+        <label id="feed-rpm-label">Çubuk Hızı (RPM):</label>
         <input id="feed-rpm" type="number" value="10" min="0.1" step="0.1">
+        <span id="feed-rot-dc-pct-fields" style="display:none">
+          <label>DC Güç (%):</label>
+          <input id="feed-dc-speed-pct" type="number" min="1" max="100" step="1" placeholder="1-100">
+        </span>
         <button id="feed-start-btn" onclick="sendFeedStart()">Besleme Başlat</button>
         <!-- 24-09-2026 eklendi (Madde 3, saha bulgusu): panelin yakınında
              kısayol — var olan step Durdur (/motor/stop) + DC Dur
              (/motor/dc dir=stop) fonksiyonlarını AYNEN tekrar kullanıyor,
              yeni bir endpoint/mantık yok. -->
-        <button id="feed-start-stop-btn" onclick="stopStep(); sendDc('stop', 'Dur');">Dur</button>
+        <button id="feed-start-stop-btn" onclick="stopStep(); sendDc('stop', 'Dur'); sendRot('stop', 'Dur', renderCmdReply);">Dur</button>
       </div>
       <div id="feed-start-result"></div>
     </div>
@@ -647,6 +661,17 @@
       <button onclick="resetEncoders()">Encoder Sıfırla</button>
     </div>
 
+    <!-- Dönüş Motoru (NEMA17) bağımsız kontrolü (05-10-2026) — DC motor
+         satırı gibi; canlı durum aşağıdaki durum tablosunda (s-rot). -->
+    <div class="row-group" id="rot-panel">
+      <label>NEMA17 dönüş motoru — Çubuk Hızı (RPM):</label>
+      <input id="rot-rpm" type="number" value="10" min="0.1" step="0.1">
+      <button onclick="sendRot('cw', 'Saat Yönü', renderCmdReply)">Saat Yönü</button>
+      <button onclick="sendRot('ccw', 'Saat Yönünün Tersi', renderCmdReply)">Saat Yönünün Tersi</button>
+      <button onclick="sendRot('stop', 'Dur', renderCmdReply)">Dur</button>
+    </div>
+    <div id="rot-speed-info" style="font-size:12.5px;color:#888;margin:-4px 0 10px"></div>
+
     <!-- Son gönderilen komut (ham JSON + Türkçe açıklama) / STM32'nin ok|err yanıtı -->
     <div class="io-grid">
       <div class="io-box" id="out-box">
@@ -669,6 +694,7 @@
         <div class="field">Step motor:</div><div class="value" id="s-run">—</div>
         <div class="field">Kalan darbe:</div><div class="value" id="s-rem">—</div>
         <div class="field">DC motor:</div><div class="value" id="s-dc">—</div>
+        <div class="field">NEMA17 dönüş:</div><div class="value" id="s-rot">—</div>
         <div class="field">Encoder 1:</div><div class="value" id="s-e1">—</div>
         <div class="field">Encoder 2:</div><div class="value" id="s-e2">—</div>
       </div>
@@ -699,8 +725,24 @@
       <label>DC Motor Boşta Max RPM:</label>
       <input id="mp-rpm-max-noload" type="number" min="0.1" step="0.1" oninput="saveMotionParam('RPM_MAX_NOLOAD', this.value)">
     </div>
+    <div class="row-group">
+      <label>NEMA17 Sürtünme Teker Çapı D_wheel_rot (mm):</label>
+      <input id="mp-d-wheel-rot" type="number" min="0.1" step="0.01" oninput="saveMotionParam('D_wheel_rot_mm', this.value)">
+      <label>ROT_PPR (TB6600 darbe/tur):</label>
+      <select id="mp-rot-ppr" onchange="saveMotionParam('ROT_PPR', this.value)">
+        <option value="200">200 (tam adım)</option>
+        <option value="400">400 (1/2)</option>
+        <option value="800">800 (1/4)</option>
+        <option value="1600">1600 (1/8)</option>
+        <option value="3200">3200 (1/16)</option>
+        <option value="6400">6400 (1/32)</option>
+      </select>
+    </div>
     <div class="row-group" style="margin-top:-8px">
-      <label style="font-size:12.5px;color:#e0a800">⚠ Varsayılanlar (52/52/10mm, 100 RPM) TAHMİN — D_drive/D_wheel_dc sahada teyit edilecek, RPM_MAX_NOLOAD %100 duty'de takometreyle ölçülüp güncellenecek.</label>
+      <label style="font-size:13px;color:#ffb300;font-weight:700">⚠ ROT_PPR, TB6600 üzerindeki S1-S3 DIP ayarıyla aynı olmalı (1/16 = 3200, 1/32 = 6400). Uyuşmazsa dönüş hızı kat kat yanlış olur.</label>
+    </div>
+    <div class="row-group" style="margin-top:-8px">
+      <label style="font-size:12.5px;color:#e0a800">⚠ Varsayılanlar (52/52/10mm, 100 RPM, NEMA17 teker 52mm) TAHMİN — D_drive/D_wheel_dc/D_wheel_rot sahada teyit edilecek, RPM_MAX_NOLOAD %100 duty'de takometreyle ölçülüp güncellenecek.</label>
     </div>
     <div id="motion-params-save-status"></div>
   </div>
@@ -2768,6 +2810,9 @@
           : `Step motorunu sür — yön ${cmd.dir}, darbe arası gecikme ${cmd.delay} µs, toplam ${cmd.steps} darbe (rampasız).`;
         case "stop": return "Step motoru anında durdur.";
         case "dc": return `DC motoru "${cmd.dir}" yönüne sür.`;
+        case "rot": return cmd.dir === "stop"
+          ? "NEMA17 dönüş motorunu durdur."
+          : `NEMA17 dönüş motorunu "${cmd.dir}" yönünde sürekli döndür — darbe arası ${cmd.delay} µs.`;
         case "reset": return "İki encoder sayacını da sıfırla.";
         case "ping": return "Bağlantı testi (ping).";
         default: return `Bilinmeyen komut: ${cmd.cmd}`;
@@ -2826,17 +2871,21 @@
       const accel_mms2 = document.getElementById("feed-accel-enable").checked
         ? Number(document.getElementById("feed-accel").value) || 0
         : 0;
-      const dc_dir = document.getElementById("feed-dc-dir").value;
       const rpm = Number(document.getElementById("feed-rpm").value);
       if (!(speed_mms > 0) || !(distance_mm > 0) || !(rpm > 0)) {
         renderFeedStartResult("Geçersiz değer — hız, mesafe ve RPM 0'dan büyük olmalı, gönderilmedi.", true);
+        return;
+      }
+      const rotFields = collectFeedRotFields();  // shared.js — rot_motor/rot_dir/dc_dir/dc_speed_pct
+      if (rotFields.error) {
+        renderFeedStartResult(rotFields.error, true);
         return;
       }
       let response;
       try {
         response = await fetch("/motor/feed-start", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dir, speed_mms, distance_mm, accel_mms2, dc_dir, rpm }),
+          body: JSON.stringify({ dir, speed_mms, distance_mm, accel_mms2, rpm, ...rotFields.fields }),
         });
       } catch (e) {
         renderFeedStartResult(`Ağ hatası: ${e.message}`, true);
@@ -2853,16 +2902,19 @@
         return;
       }
       if (!data.success) {
-        renderFeedStartResult(`Step motoru başlatılamadı (${data.stage}) — DC motoruna hiç dokunulmadı.`, true);
+        renderFeedStartResult(`Step motoru başlatılamadı (${data.stage}) — dönüş motoruna hiç dokunulmadı.`, true);
         return;
       }
-      const sc = data.step_calc, dc = data.dc_calc;
+      const sc = data.step_calc;
+      const rotFailure = describeRotFailure(data.rot_result);
       renderFeedStartResult(
         `Başlatıldı — step: ${sc.steps} adım, ${sc.delay_us}µs gecikme, ${sc.accel_steps} adım rampa | ` +
-        `DC: %${dc.duty} duty (${dc_dir === "forward" ? "saat yönü" : "saat yönünün tersi"}). Step bitince DC otomatik duracak.`,
-        false,
+        formatFeedStartRotSummary(data, rotFields.fields) +
+        (rotFailure ? `\n⚠ ${rotFailure}` : ""),
+        !!rotFailure,
       );
       renderFeedSpeedInfo("feed-speed-info", speed_mms, sc);
+      if (data.rot_calc) renderRotSpeedInfo("rot-speed-info", rpm, data.rot_calc);
       // Hareket Analizi grafiklerini de (aşağıdaki panel) gerçek gönderilen
       // step komutuyla güncelle — ham "Step At" panelinin yaptığı gibi. NOT:
       // grafik hâlâ "Motor Teker Çapı" (wheel-motor, localStorage) girişini
@@ -2893,6 +2945,8 @@
         document.getElementById("mp-d-wheel-dc").value = data.params.D_wheel_dc_mm;
         document.getElementById("mp-d-rod").value = data.params.D_rod_mm;
         document.getElementById("mp-rpm-max-noload").value = data.params.RPM_MAX_NOLOAD;
+        document.getElementById("mp-d-wheel-rot").value = data.params.D_wheel_rot_mm;
+        document.getElementById("mp-rot-ppr").value = String(data.params.ROT_PPR);
       } catch (e) {
         document.getElementById("motion-params-save-status").textContent = `Yüklenemedi: ${e.message}`;
       }
@@ -2999,6 +3053,7 @@
       document.getElementById("s-run").textContent = status.running ? "HAREKET HALİNDE" : "Durgun";
       document.getElementById("s-rem").textContent = `${status.remaining} darbe`;
       document.getElementById("s-dc").textContent = DC_LABELS[status.dc] ?? `bilinmeyen (${status.dc})`;
+      renderRotStatus(status, "s-rot");  // shared.js — rot (0/1/2) + rdelay (µs)
       // mm hesabı artık firmware'in um1/um2'sinden DEĞİL, istemcideki kendi teker
       // çapı girişlerinden yapılıyor (firmware ikisi için tek ortak çap varsayıyordu).
       const mm1PerCount = Math.PI * wheelMm("wheel-enc1") / ENC_COUNTS_PER_REV;
@@ -3334,6 +3389,7 @@
 
     // Sayfa açılır açılmaz: port listesini çek + canlı durum akışını başlat + teker çaplarını geri yükle + sıcaklık izlemeyi başlat.
     refreshPorts();
+    initFeedRotMotorSelect();
     startStatusWebSocket(onStatusMessage);
     loadWheelDiameters();
     loadMotionParams();

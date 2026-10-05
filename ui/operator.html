@@ -173,10 +173,24 @@
       </label>
     </div>
     <div class="row-group">
-      <label>DC Yön:</label>
-      <select id="feed-dc-dir"><option value="forward">Saat Yönü</option><option value="backward">Saat Yönünün Tersi</option></select>
-      <label>DC Hız (RPM):</label>
+      <label>Dönüş Motoru:</label>
+      <select id="feed-rot-motor" onchange="onFeedRotMotorChange()">
+        <option value="nema17">NEMA17</option><option value="dc">DC</option><option value="both">İkisi birden</option>
+      </select>
+      <span id="feed-rot-nema-fields" style="display:contents">
+        <label>NEMA17 Yön:</label>
+        <select id="feed-rot-dir"><option value="cw">Saat Yönü</option><option value="ccw">Saat Yönünün Tersi</option></select>
+      </span>
+      <span id="feed-rot-dc-fields" style="display:none">
+        <label>DC Yön:</label>
+        <select id="feed-dc-dir"><option value="forward">Saat Yönü</option><option value="backward">Saat Yönünün Tersi</option></select>
+      </span>
+      <label id="feed-rpm-label">Çubuk Hızı (RPM):</label>
       <input id="feed-rpm" type="number" value="10" min="0.1" step="0.1">
+      <span id="feed-rot-dc-pct-fields" style="display:none">
+        <label>DC Güç (%):</label>
+        <input id="feed-dc-speed-pct" type="number" min="1" max="100" step="1" placeholder="1-100">
+      </span>
       <button id="feed-start-btn" onclick="sendFeedStart()">Besleme Başlat</button>
       <!-- 24-09-2026 eklendi (Madde 3, saha bulgusu): panelin yakınında
            kısayol — aşağıdaki büyük DURDUR ile AYNI fonksiyonu (emergencyStop,
@@ -229,6 +243,21 @@
       <button onclick="sendDc('backward', 'Saat Yönünün Tersi')">Saat Yönünün Tersi</button>
       <button onclick="sendDc('stop', 'Dur')">Dur</button>
     </div>
+  </div>
+
+  <!-- Dönüş Motoru (NEMA17) bağımsız kontrolü (05-10-2026) — DC Motor
+       paneli gibi: RPM + yön butonları, hesaplanan µs/hız kapasitesi %. -->
+  <div class="panel" id="rot-panel">
+    <h2>Dönüş Motoru (NEMA17)</h2>
+    <div class="row-group">
+      <label>Çubuk Hızı (RPM):</label>
+      <input id="rot-rpm" type="number" value="10" min="0.1" step="0.1">
+      <button onclick="sendRot('cw', 'Saat Yönü', logCmdResult)">Saat Yönü</button>
+      <button onclick="sendRot('ccw', 'Saat Yönünün Tersi', logCmdResult)">Saat Yönünün Tersi</button>
+      <button onclick="sendRot('stop', 'Dur', logCmdResult)">Dur</button>
+    </div>
+    <div id="rot-speed-info" style="font-size:12.5px;color:#888;margin-top:6px"></div>
+    <div style="font-size:13px;color:#aaa;margin-top:6px">Durum: <span id="rot-live-status">—</span></div>
   </div>
 
   <!-- 7) Encoder bilgileri + sıfırlama -->
@@ -301,6 +330,7 @@
       if (stepBtn) stepBtn.disabled = !!status.running;
       const feedBtn = document.getElementById("feed-start-btn");
       if (feedBtn) feedBtn.disabled = !!status.running;
+      renderRotStatus(status, "rot-live-status");
     }
 
     let previousConnectionState = null;
@@ -327,8 +357,9 @@
     }
 
     async function emergencyStop() {
-      // Step + DC motoru BİRLİKTE, anında durdurur (bkz. /motor/stop +
-      // /motor/dc dir=stop) — bu davranış Kontrol Kriterleri/Step At
+      // Step + DC + NEMA17 BİRLİKTE, anında durdurur (bkz. /motor/stop +
+      // /motor/dc dir=stop + /motor/rot dir=stop; firmware stop zaten rot'u da
+      // durdurur, açık rot stop çağrısı ek güvence — 05-10-2026) — bu davranış Kontrol Kriterleri/Step At
       // değişikliklerinden BAĞIMSIZ, dokunulmadı (15-09-2026 regresyon testiyle
       // ayrıca doğrulandı).
       const statusEl = document.getElementById("stop-status");
@@ -340,11 +371,16 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ dir: "stop" }),
         });
+        await fetch("/motor/rot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dir: "stop" }),
+        });
         statusEl.textContent = "Durduruldu.";
-        logToConsole("DURDUR", "Step + DC motoru durdur", "Komutlar gönderildi.", false);
+        logToConsole("DURDUR", "Step + DC + NEMA17 motoru durdur", "Komutlar gönderildi.", false);
       } catch (e) {
         statusEl.textContent = `Durdurma komutu gönderilemedi: ${e.message}`;
-        logToConsole("DURDUR", "Step + DC motoru durdur", `Ağ hatası: ${e.message}`, true);
+        logToConsole("DURDUR", "Step + DC + NEMA17 motoru durdur", `Ağ hatası: ${e.message}`, true);
       }
     }
 
@@ -417,17 +453,21 @@
       const accel_mms2 = document.getElementById("feed-accel-enable").checked
         ? Number(document.getElementById("feed-accel").value) || 0
         : 0;
-      const dc_dir = document.getElementById("feed-dc-dir").value;
       const rpm = Number(document.getElementById("feed-rpm").value);
       if (!(speed_mms > 0) || !(distance_mm > 0) || !(rpm > 0)) {
         renderFeedStartResult("Geçersiz değer — hız, mesafe ve RPM 0'dan büyük olmalı, gönderilmedi.", true);
+        return;
+      }
+      const rotFields = collectFeedRotFields();  // shared.js — rot_motor/rot_dir/dc_dir/dc_speed_pct
+      if (rotFields.error) {
+        renderFeedStartResult(rotFields.error, true);
         return;
       }
       let response;
       try {
         response = await fetch("/motor/feed-start", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dir, speed_mms, distance_mm, accel_mms2, dc_dir, rpm }),
+          body: JSON.stringify({ dir, speed_mms, distance_mm, accel_mms2, rpm, ...rotFields.fields }),
         });
       } catch (e) {
         renderFeedStartResult(`Ağ hatası: ${e.message}`, true);
@@ -447,19 +487,24 @@
         return;
       }
       if (!data.success) {
-        renderFeedStartResult(`Step motoru başlatılamadı (${data.stage}) — DC motoruna hiç dokunulmadı.`, true);
-        logToConsole("Besleme Başlat", "POST /motor/feed-start", "Step başarısız, DC gönderilmedi.", true);
+        renderFeedStartResult(`Step motoru başlatılamadı (${data.stage}) — dönüş motoruna hiç dokunulmadı.`, true);
+        logToConsole("Besleme Başlat", "POST /motor/feed-start", "Step başarısız, dönüş motoru gönderilmedi.", true);
         return;
       }
-      const sc = data.step_calc, dc = data.dc_calc;
+      const sc = data.step_calc;
+      const rotFailure = describeRotFailure(data.rot_result);
       renderFeedStartResult(
         `Başlatıldı — step: ${sc.steps} adım, ${sc.delay_us}µs gecikme, ${sc.accel_steps} adım rampa | ` +
-        `DC: %${dc.duty} duty (${dc_dir === "forward" ? "saat yönü" : "saat yönünün tersi"}). Step bitince DC otomatik duracak.`,
-        false,
+        formatFeedStartRotSummary(data, rotFields.fields) +
+        (rotFailure ? `\n⚠ ${rotFailure}` : ""),
+        !!rotFailure,
       );
       renderFeedSpeedInfo("feed-speed-info", speed_mms, sc);
+      if (data.rot_calc) renderRotSpeedInfo("rot-speed-info", rpm, data.rot_calc);
       logToConsole("Besleme Başlat", "POST /motor/feed-start",
-        `steps=${sc.steps} delay_us=${sc.delay_us} accel_steps=${sc.accel_steps} duty=${dc.duty}`, false);
+        `steps=${sc.steps} delay_us=${sc.delay_us} accel_steps=${sc.accel_steps}` +
+        (data.dc_calc ? ` duty=${data.dc_calc.duty}` : "") +
+        (data.rot_calc ? ` rot_delay_us=${data.rot_calc.delay_us}` : ""), !!rotFailure);
     }
 
     function renderFeedStartResult(text, isError) {
@@ -575,6 +620,7 @@
     }
 
     loadWheelDiameters();
+    initFeedRotMotorSelect();
     refreshPorts();
     startStatusWebSocket(onStatusMessage);
   </script>

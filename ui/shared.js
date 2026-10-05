@@ -245,3 +245,180 @@ function toggleFeedAccelEnabled() {
   const input = document.getElementById("feed-accel");
   if (input) input.disabled = !enabled;
 }
+
+// ==========================================================================
+//  DÖNÜŞ MOTORU (NEMA17 / DC / İkisi birden) — 05-10-2026 eklendi.
+//  Besleme Başlat paneli + bağımsız "Dönüş Motoru (NEMA17)" paneli Operatör
+//  ve Admin'de aynı id'leri kullanıyor, ortak mantık burada. Fiziksel birim
+//  -> ham komut dönüşümü SUNUCUDA (motion_calc.compute_rot_command), burada
+//  sadece alan toplama/gösterim var.
+// ==========================================================================
+
+const ROT_LABELS = { 0: "Duruyor", 1: "Saat Yönü", 2: "Saat Yönünün Tersi" };
+const FEED_ROT_MOTOR_STORAGE_KEY = "feedvision_feed-rot-motor";
+const FEED_ROT_MOTOR_VALUES = ["nema17", "dc", "both"];
+const FEED_ROT_MOTOR_DEFAULT = "nema17";
+
+function loadFeedRotMotor() {
+  try {
+    const stored = localStorage.getItem(FEED_ROT_MOTOR_STORAGE_KEY);
+    if (FEED_ROT_MOTOR_VALUES.includes(stored)) return stored;
+  } catch (e) {
+    // localStorage kapalı/erişilemez (gizli mod vb.) — varsayılana düş.
+  }
+  return FEED_ROT_MOTOR_DEFAULT;
+}
+
+// Seçime göre ilgili alanları gösterir/gizler + RPM etiketini ayarlar.
+// "display: contents": span'ler .row-group flex düzenine doğrudan katılsın.
+function updateFeedRotMotorFields() {
+  const mode = document.getElementById("feed-rot-motor").value;
+  const show = (id, visible) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = visible ? "contents" : "none";
+  };
+  show("feed-rot-nema-fields", mode === "nema17" || mode === "both");
+  show("feed-rot-dc-fields", mode === "dc" || mode === "both");
+  show("feed-rot-dc-pct-fields", mode === "both");
+  const label = document.getElementById("feed-rpm-label");
+  if (label) {
+    label.textContent = mode === "dc" ? "DC Hız (RPM):"
+      : mode === "both" ? "NEMA17 Çubuk Hızı (RPM):"
+      : "Çubuk Hızı (RPM):";
+  }
+}
+
+function onFeedRotMotorChange() {
+  const mode = document.getElementById("feed-rot-motor").value;
+  try {
+    localStorage.setItem(FEED_ROT_MOTOR_STORAGE_KEY, mode);
+  } catch (e) {
+    // Kaydedilemezse sadece bu oturumda geçerli — sessizce geç.
+  }
+  updateFeedRotMotorFields();
+}
+
+// Sayfa açılışında çağrılır: son seçimi geri yükler, alanları ayarlar.
+function initFeedRotMotorSelect() {
+  const select = document.getElementById("feed-rot-motor");
+  if (!select) return;
+  select.value = loadFeedRotMotor();
+  updateFeedRotMotorFields();
+}
+
+// Besleme Başlat gövdesine eklenecek dönüş motoru alanlarını toplar.
+// { fields } ya da { error } döner. "dc" modunda yalnızca rot_motor:"dc"
+// gönderilir (eski davranışla birebir aynı gövde + rot_motor).
+function collectFeedRotFields() {
+  const rot_motor = document.getElementById("feed-rot-motor").value;
+  const fields = { rot_motor };
+  if (rot_motor === "dc" || rot_motor === "both") {
+    fields.dc_dir = document.getElementById("feed-dc-dir").value;
+  }
+  if (rot_motor === "nema17" || rot_motor === "both") {
+    fields.rot_dir = document.getElementById("feed-rot-dir").value;
+  }
+  if (rot_motor === "both") {
+    const pct = Number(document.getElementById("feed-dc-speed-pct").value);
+    if (!(pct > 0 && pct <= 100)) {
+      return { error: "Geçersiz değer — DC güç % 0'dan büyük, en fazla 100 olmalı, gönderilmedi." };
+    }
+    fields.dc_speed_pct = pct;
+  }
+  return { fields };
+}
+
+const ROT_DIR_LABELS = { cw: "saat yönü", ccw: "saat yönünün tersi" };
+
+// NEMA17 başlatma komutunun reddedildiğini/yanıtsız kaldığını anlatır; sorun
+// yoksa null. (Sunucu step ok ise success:true döner, dönüş motoru yanıtını
+// ayrıca rot_result'ta iletir — operatör sessiz başarısızlık görmesin.)
+function describeRotFailure(rotResult) {
+  if (!rotResult) return null;
+  if (!rotResult.sent) return "NEMA17 komutu gönderilemedi";
+  if (rotResult.timed_out) return "NEMA17 komutu gönderildi ama yanıt gelmedi (timeout)";
+  if (rotResult.reply && rotResult.reply.err) return `NEMA17 komutu reddedildi (${rotResult.reply.err})`;
+  return null;
+}
+
+// Besleme Başlat başarı metni (dönüş motoru kısmı).
+function formatFeedStartRotSummary(data, fields) {
+  const parts = [];
+  if (data.rot_calc) {
+    parts.push(
+      `NEMA17: ${data.rot_calc.delay_us}µs gecikme, tekerlek ${data.rot_calc.wheel_rpm.toFixed(1)} RPM ` +
+      `(${ROT_DIR_LABELS[fields.rot_dir]})`
+    );
+  }
+  if (data.dc_calc) {
+    const dcDir = fields.dc_dir === "forward" ? "saat yönü" : "saat yönünün tersi";
+    parts.push(`DC: %${data.dc_calc.duty} duty (${dcDir})`);
+  }
+  const used = fields.rot_motor === "nema17" ? "NEMA17"
+    : fields.rot_motor === "both" ? "NEMA17 ve DC"
+    : "DC";
+  return `${parts.join(" | ")}. Step bitince ${used} otomatik duracak.`;
+}
+
+// Bağımsız NEMA17 paneli / feed-start sonrası: girilen çubuk RPM'inin µs
+// gecikme + hız kapasitesi %'sine karşılığı (renderFeedSpeedInfo'nun rot'u).
+function renderRotSpeedInfo(elementId, rpmRod, rotCalc) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  el.textContent = `Son girilen çubuk hızı → ${rpmRod} RPM → ${rotCalc.delay_us} µs gecikmeli darbe → NEMA17 hız kapasitesinin %${rotCalc.speed_pct_of_max.toFixed(1)}'i`;
+}
+
+// Canlı durum: periyodik durumdaki rot (0/1/2) + rdelay (µs). Firmware henüz
+// bu alanları göndermiyorsa "—" gösterir.
+function renderRotStatus(status, elementId) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  if (status.rot === undefined) {
+    el.textContent = "—";
+    return;
+  }
+  const label = ROT_LABELS[status.rot] ?? `bilinmeyen (${status.rot})`;
+  el.textContent = status.rot ? `${label} — ${status.rdelay} µs` : label;
+}
+
+// Bağımsız NEMA17 komutu (Saat Yönü / Saat Yönünün Tersi / Dur). reportFn:
+// sayfaya özgü sonuç gösterici (Operatör: logCmdResult, Admin: renderCmdReply)
+// — ikisi de (etiket, data) alıyor. dir "stop" ise rpm okunmaz. Sunucu
+// reddederse (ör. RPM aralık dışı) "Reddedildi: ..." konsola düşer.
+async function sendRot(dir, label, reportFn) {
+  const body = { dir };
+  if (dir !== "stop") {
+    const rpm = Number(document.getElementById("rot-rpm").value);
+    if (!(rpm > 0)) {
+      logToConsole(label, "NEMA17 komutu hazırla", "Geçersiz değer — RPM 0'dan büyük olmalı, gönderilmedi.", true);
+      return null;
+    }
+    body.rpm = rpm;
+  }
+  let response;
+  try {
+    response = await fetch("/motor/rot", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    logToConsole(label, "POST /motor/rot", `Ağ hatası: ${e.message}`, true);
+    return null;
+  }
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    const detail = data?.detail ?? `sunucu ${response.status}`;
+    logToConsole(label, "POST /motor/rot", `Reddedildi: ${detail}`, true);
+    const infoEl = document.getElementById("rot-speed-info");
+    if (infoEl && dir !== "stop") infoEl.textContent = `Reddedildi: ${detail}`;
+    return null;
+  }
+  if (data.rot_calc) renderRotSpeedInfo("rot-speed-info", body.rpm, data.rot_calc);
+  reportFn(label, data);
+  return data;
+}
