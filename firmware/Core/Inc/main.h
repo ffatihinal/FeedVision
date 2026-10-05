@@ -52,11 +52,17 @@ extern "C" {
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+
 /* USER CODE BEGIN EFP */
 
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define ROT_PUL_Pin GPIO_PIN_0
+#define ROT_PUL_GPIO_Port GPIOA
+#define ROT_DIR_Pin GPIO_PIN_1
+#define ROT_DIR_GPIO_Port GPIOA
 #define DC_IB1_Pin GPIO_PIN_9
 #define DC_IB1_GPIO_Port GPIOB
 #define T_NRST_Pin GPIO_PIN_2

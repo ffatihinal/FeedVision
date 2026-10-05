@@ -56,6 +56,15 @@
   #define DC_IB1_Pin          GPIO_PIN_9
   #define DC_IB1_GPIO_Port    GPIOB
 #endif
+/* Dönüş ekseni (NEMA17 + TB6600): PUL = PA0 (D/A0, TIM2_CH1 PWM), DIR = PA1 (A1, GPIO) */
+#ifndef ROT_PUL_Pin
+  #define ROT_PUL_Pin         GPIO_PIN_0
+  #define ROT_PUL_GPIO_Port   GPIOA
+#endif
+#ifndef ROT_DIR_Pin
+  #define ROT_DIR_Pin         GPIO_PIN_1
+  #define ROT_DIR_GPIO_Port   GPIOA
+#endif
 
 /* --- Step motor sınırları ------------------------------------------------
  * delay = iki darbe arasındaki toplam süre (mikrosaniye).
@@ -98,6 +107,41 @@
 #define DC_PWM_PERIOD_TICKS    999U    /* 1000 tık = 1 ms periyot -> 1 kHz PWM */
 #define DC_SPEED_DEFAULT_PCT   100U    /* "speed" alanı yoksa eski davranış: tam hız */
 
+/* --- Dönüş ekseni (rot): NEMA17 + TB6600, TIM2_CH1 donanım PWM -------------
+ * TIM2 de 1 MHz tick (Prescaler=63), ama burada periyot = delay_us: ARR=delay-1,
+ * CCR=delay/2 (%50 doluluk). Dönüş sürekli ve mesafesiz olduğu için darbe SAYMAYA
+ * gerek yok -> darbeyi donanım üretir (kesmesiz, jitter'sız). Durdurmak = CCR=0
+ * (PWM1'de CCR=0 çıkışı sürekli LOW tutar).
+ * delay_us = iki darbe arası süre (step komutundaki delay ile aynı anlam).
+ * Alt sınır 100 us = 10 kHz: %50 doluluk -> darbe genişliği 50 us. TB6600 satıcı
+ * beyanı üst frekans 50 kHz (Joy-IT SBC-MD-TB6600 datasheet) -> 5 kat pay.
+ * Üst sınır 60000 us: RPi ile sabit sözleşme (TIM2 32 bit, teknik olarak daha
+ * yavaşı mümkün ama iki taraf senkron kalsın diye YÜKSELTİLMEDİ).
+ * Sınırların dışı step komutundaki gibi sessizce kırpılır. */
+#define ROT_MIN_DELAY_US        100U
+#define ROT_MAX_DELAY_US        60000U
+#define ROT_PWM_PRESCALER       63U    /* 64 MHz / 64 = 1 MHz tick (1 us) */
+#define ROT_PWM_INIT_PERIOD_TICKS 999U /* sadece başlangıç; çalışırken delay_us'den yazılır */
+
+/* "cw" = motorun MİL UCUNA bakınca saat yönü. DIR pininin hangi seviyesinin cw
+ * olduğu kablolamaya (motor bobin polaritesi) bağlı, SAHADA DOĞRULA: ters
+ * dönüyorsa SADECE bu satırı GPIO_PIN_RESET yap. */
+#define ROT_CW_DIR_LEVEL        GPIO_PIN_SET
+#define ROT_CCW_DIR_LEVEL       ((ROT_CW_DIR_LEVEL == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET)
+
+/* Yazılımsal rampa (yumuşak kalkış). Sebep: 100 us (10 kHz = 3.125 tur/s, 1/16
+ * mikroadımda) sıfırdan ani başlangıçta NEMA17 senkronu kaybedip dönmeyebilir.
+ * Frekans domaininde sabit ivme: START_DELAY'den (1000 us = 1 kHz = ~19 dev/dk)
+ * başlar, ACCEL kadar darbe/s^2 ile hedefe çıkar. Hedef START'tan yavaşsa
+ * rampa yok, doğrudan hedefte başlar. Hız değişimi ve yön değişimi de aynı
+ * rampayı kullanır (yön değişiminde önce START'a iner, DIR çevrilir, tekrar
+ * çıkar). stop/reset/bye ise ANINDA keser (güvenlik; konum takibi yok, adım
+ * kaybı bir sorun değil). Yük bilinmiyor: SAHADA ayarla - motor kalkışta
+ * takılıyorsa ACCEL'i düşür / START_DELAY'i büyüt. */
+#define ROT_RAMP_START_DELAY_US     1000U
+#define ROT_RAMP_ACCEL_HZ_PER_S     10000U   /* 1 kHz -> 10 kHz yaklaşık 0.9 s */
+#define ROT_RAMP_TICK_MS            10U      /* rampa en sık bu aralıkla güncellenir */
+
 
 /* USER CODE END PD */
 
@@ -108,6 +152,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;    /* dönüş ekseni PUL (donanım PWM) - PA0/TIM2_CH1 */
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim14;   /* step darbe üreteci (base/kesme modu) - eskiden TIM16'daydı */
 TIM_HandleTypeDef htim16;   /* DC motor PWM - IA1/PB8 */
@@ -156,6 +201,21 @@ static encoder_t g_enc2;        /* TIM3 - boşta tekerlek */
 static uint8_t g_dc_state = 0;
 static uint8_t g_dc_speed = 0;
 
+/* --- Dönüş ekseni (rot) durumu -------------------------------------------
+ * Hepsi ana döngü bağlamında (process_command + rot_service) değişir, kesme
+ * dokunmaz -> volatile gerekmez. */
+typedef struct {
+  uint8_t  state;            /* komut edilen yön: 0=dur, 1=cw, 2=ccw (durumdaki "rot") */
+  uint8_t  phys_state;       /* DIR pininin şu an gerçekten ayarlı olduğu yön (0=henüz ayarlanmadı) */
+  uint8_t  pulsing;          /* 1 = PUL çıkışı darbe üretiyor */
+  uint8_t  reversing;        /* 1 = yön değişimi için START hızına yavaşlıyor */
+  uint32_t target_delay_us;  /* komut edilen (kırpılmış) hedef delay (durumdaki "rdelay") */
+  uint32_t cur_delay_us;     /* o anki gerçek darbe periyodu (rampa ortasında hedeften yavaş) */
+  uint32_t last_ramp_ms;     /* rampanın son güncellendiği HAL_GetTick */
+} rot_axis_t;
+
+static rot_axis_t g_rot = {0, 0, 0, 0, 0, 0, 0};
+
 /* --- Seri port alım tamponları ------------------------------------------ */
 static uint8_t           g_rx_byte;                    /* kesmede tek tek gelen karakter */
 static char               g_rx_line[RX_LINE_MAX];      /* birikmekte olan satır */
@@ -183,6 +243,7 @@ static uint16_t          g_led_tick = 0;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
+static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM14_Init(void);
 static void MX_TIM16_Init(void);
@@ -204,6 +265,15 @@ static void     step_stop(void);                                              //
 /* --- DC motor fonksiyonu --- */
 static uint16_t dc_duty_ticks(uint8_t speed_pct);       // 0-100 yüzdeyi timer CCR tık değerine çevirir
 static void     dc_set(uint8_t state, uint8_t speed_pct);  // DC motoru ileri/geri/dur + hız (PWM duty %) durumuna sokar
+
+/* --- Dönüş ekseni (NEMA17 + TB6600) fonksiyonları --- */
+static uint32_t rot_next_delay(uint32_t cur_us, uint32_t goal_us, uint32_t dt_ms);  // rampada bir sonraki darbe periyodunu hesaplar (saf fonksiyon)
+static void     rot_apply_delay(uint32_t delay_us);                                 // TIM2 periyodunu/dolulugunu delay_us'e ayarlar
+static void     rot_begin(uint8_t dir_state);                                       // DIR'i ayarlayıp darbeyi rampa başlangıç hızıyla başlatır
+static void     rot_halt_pulses(void);                                              // PUL çıkışını anında LOW'a çeker (durum alanlarına dokunmaz)
+static void     rot_stop(void);                                                     // dönüş eksenini anında durdurur (stop/reset/bye de bunu çağırır)
+static void     rot_command(uint8_t dir_state, uint32_t delay_us);                  // "rot" komutu: başlat / hız değiştir / yön değiştir
+static void     rot_service(void);                                                  // ana döngüden periyodik çağrılır: rampayı ilerletir
 
 /* --- Seri port (UART) fonksiyonları --- */
 static void     uart_send(const char *s);              // bir metni Mac'e (seri port üzerinden) gönderir
@@ -429,6 +499,155 @@ static void dc_set(uint8_t state, uint8_t speed_pct)
 
 
 /* ==========================================================================
+ *  DÖNÜŞ EKSENİ  —  NEMA17 + TB6600, PUL = TIM2_CH1 donanım PWM (PA0)
+ *  DIR = PA1 (GPIO). ENA bağlanmaz (TB6600'de ENA aktifse motor serbest kalır,
+ *  boş bırakınca sürücü hep aktif = duruşta tutma torku var).
+ * ========================================================================== */
+
+/* Rampada bir sonraki darbe periyodu. Sabit İVME frekans domaininde: f = 1e6/delay,
+ * f += ACCEL * dt, yeni delay = 1e6/f. goal'a asla taşmaz. Saf fonksiyon (donanıma
+ * dokunmaz). Her çağrıda en az 1 us ilerler, yani sonlu adımda goal'a ulaşır. */
+static uint32_t rot_next_delay(uint32_t cur_us, uint32_t goal_us, uint32_t dt_ms)
+{
+  uint32_t inc;
+  uint32_t freq;
+  uint32_t next;
+
+  if (cur_us == 0U || cur_us == goal_us) {
+    return goal_us;
+  }
+
+  inc  = (ROT_RAMP_ACCEL_HZ_PER_S * dt_ms) / 1000U;   /* bu aralıkta eklenecek frekans (Hz) */
+  freq = 1000000U / cur_us;
+
+  if (goal_us < cur_us) {
+    /* Hızlan (delay küçülür, frekans artar) */
+    next = 1000000U / (freq + inc);
+    if (next >= cur_us)  next = cur_us - 1U;           /* tamsayı bölme yüzünden takılmasın */
+    if (next < goal_us)  next = goal_us;
+  } else {
+    /* Yavaşla (delay büyür, frekans azalır) */
+    if (inc >= freq) {
+      next = goal_us;
+    } else {
+      next = 1000000U / (freq - inc);
+      if (next <= cur_us)  next = cur_us + 1U;
+      if (next > goal_us)  next = goal_us;
+    }
+  }
+  return next;
+}
+
+/* Darbe periyodunu delay_us yapar: ARR=delay-1, CCR=delay/2 (%50). ARR preload
+ * açık (MX_TIM2_Init) ve CCR preload HAL'da açık -> yeni değerler bir sonraki
+ * periyot sınırında birlikte devreye girer, yarım darbe/glitch oluşmaz. */
+static void rot_apply_delay(uint32_t delay_us)
+{
+  __HAL_TIM_SET_AUTORELOAD(&htim2, delay_us - 1U);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, delay_us / 2U);
+}
+
+/* PUL'u anında LOW'a çeker: CCR=0 (PWM1'de çıkış sürekli LOW) + UG olayı ile
+ * preload'u hemen yükler ve sayacı sıfırlar (yoksa CCR=0 bir sonraki periyot
+ * sınırına kadar, 60 ms'ye kadar gecikebilir). */
+static void rot_halt_pulses(void)
+{
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0U);
+  htim2.Instance->EGR = TIM_EGR_UG;
+  g_rot.pulsing   = 0U;
+  g_rot.reversing = 0U;
+}
+
+static void rot_stop(void)
+{
+  rot_halt_pulses();
+  g_rot.state           = 0U;
+  g_rot.target_delay_us = 0U;
+  g_rot.cur_delay_us    = 0U;
+}
+
+/* Darbeleri durmuş halden başlatır. Önce gerekiyorsa DIR'i çevirir ve TB6600'ün
+ * yönü okuması için 1 ms bekler (step_start ile aynı pratik; TB6600 için gereken
+ * DIR kurulma süresi µs mertebesinde, 1 ms fazlasıyla yeterli). Sonra hedeften
+ * yavaş olan rampa başlangıç hızıyla ilk darbeyi hemen üretir (UG: sayaç 0,
+ * CCR>0 -> çıkış HIGH ile başlar, tam genişlikte ilk darbe). */
+static void rot_begin(uint8_t dir_state)
+{
+  uint32_t start_us = (g_rot.target_delay_us > ROT_RAMP_START_DELAY_US)
+                      ? g_rot.target_delay_us : ROT_RAMP_START_DELAY_US;
+
+  if (g_rot.phys_state != dir_state) {
+    HAL_GPIO_WritePin(ROT_DIR_GPIO_Port, ROT_DIR_Pin,
+                      (dir_state == 1U) ? ROT_CW_DIR_LEVEL : ROT_CCW_DIR_LEVEL);
+    HAL_Delay(1);
+    g_rot.phys_state = dir_state;
+  }
+
+  g_rot.cur_delay_us = start_us;
+  g_rot.reversing    = 0U;
+  g_rot.pulsing      = 1U;
+  g_rot.last_ramp_ms = HAL_GetTick();
+  rot_apply_delay(start_us);
+  htim2.Instance->EGR = TIM_EGR_UG;
+}
+
+/* "rot" komutunun çekirdeği. dir_state: 0=dur, 1=cw, 2=ccw. delay_us hedef hız
+ * (kırpma burada). Çalışırken tekrar gelen komut = hız/yön güncellemesi. */
+static void rot_command(uint8_t dir_state, uint32_t delay_us)
+{
+  if (dir_state == 0U) {
+    rot_stop();
+    return;
+  }
+
+  if (delay_us < ROT_MIN_DELAY_US) delay_us = ROT_MIN_DELAY_US;
+  if (delay_us > ROT_MAX_DELAY_US) delay_us = ROT_MAX_DELAY_US;
+
+  g_rot.state           = dir_state;
+  g_rot.target_delay_us = delay_us;
+
+  if (!g_rot.pulsing) {
+    rot_begin(dir_state);                    /* duruyordu: rampa başlangıcından kalk */
+  } else if (dir_state == g_rot.phys_state) {
+    g_rot.reversing = 0U;                    /* aynı yön: sadece yeni hedefe rampa */
+  } else if (g_rot.cur_delay_us >= ROT_RAMP_START_DELAY_US) {
+    rot_halt_pulses();                       /* zaten START'tan yavaş: beklemeden çevir */
+    rot_begin(dir_state);
+  } else {
+    g_rot.reversing = 1U;                    /* hızlı dönüyor: önce START'a yavaşla */
+  }
+}
+
+/* Ana döngüden her turda çağrılır; ROT_RAMP_TICK_MS'de bir rampayı ilerletir.
+ * Gerçek geçen süreyi (dt) kullanır: ana döngü UART gönderirken ~13 ms
+ * bloklanabiliyor, sabit adım varsaysak rampa o kadar yavaşlardı. */
+static void rot_service(void)
+{
+  uint32_t now = HAL_GetTick();
+  uint32_t dt  = now - g_rot.last_ramp_ms;
+  uint32_t goal;
+
+  if (!g_rot.pulsing || dt < ROT_RAMP_TICK_MS) {
+    return;
+  }
+  g_rot.last_ramp_ms = now;
+  if (dt > 100U) dt = 100U;                  /* uzun duraksamada tek seferde büyük sıçrama olmasın */
+
+  goal = g_rot.reversing ? ROT_RAMP_START_DELAY_US : g_rot.target_delay_us;
+
+  if (g_rot.cur_delay_us != goal) {
+    g_rot.cur_delay_us = rot_next_delay(g_rot.cur_delay_us, goal, dt);
+    rot_apply_delay(g_rot.cur_delay_us);
+  }
+
+  if (g_rot.reversing && g_rot.cur_delay_us >= ROT_RAMP_START_DELAY_US) {
+    rot_halt_pulses();                       /* START hızına indi: DIR'i çevir, yeniden kalk */
+    rot_begin(g_rot.state);
+  }
+}
+
+
+/* ==========================================================================
  *  JSON  —  kütüphanesiz, sadece ihtiyacımız olan kadar basit ayrıştırıcı
  * ========================================================================== */
 
@@ -486,11 +705,12 @@ static void uart_send(const char *s)
 
 static void send_status(void)
 {
-  char buf[160];
+  char buf[200];   /* en kötü durum (tüm sayılar maksimum basamak) 167 karakter */
 
   snprintf(buf, sizeof(buf),
            "{\"t\":%lu,\"e1\":%ld,\"e2\":%ld,\"um1\":%ld,\"um2\":%ld,"
-           "\"remaining\":%lu,\"running\":%u,\"dc\":%u,\"dcSpeed\":%u}\r\n",
+           "\"remaining\":%lu,\"running\":%u,\"dc\":%u,\"dcSpeed\":%u,"
+           "\"rot\":%u,\"rdelay\":%lu}\r\n",
            (unsigned long)HAL_GetTick(),
            (long)g_enc1.total,
            (long)g_enc2.total,
@@ -499,7 +719,9 @@ static void send_status(void)
            (unsigned long)g_step.remaining,
            (unsigned)g_step.running,
            (unsigned)g_dc_state,
-           (unsigned)g_dc_speed);
+           (unsigned)g_dc_speed,
+           (unsigned)g_rot.state,
+           (unsigned long)((g_rot.state == 0U) ? 0U : g_rot.target_delay_us));
 
   uart_send(buf);
 }
@@ -541,6 +763,7 @@ static void process_command(const char *line)
   /* ---- Step motoru anında durdur ---- */
   else if (strcmp(cmd, "stop") == 0) {
     step_stop();
+    rot_stop();      /* dönüş ekseni de durur (sözleşme: stop/reset/bye rot'u keser) */
     uart_send("{\"ok\":\"stop\"}\r\n");
   }
 
@@ -564,8 +787,37 @@ static void process_command(const char *line)
     uart_send("{\"ok\":\"dc\"}\r\n");
   }
 
+  /* ---- Dönüş ekseni (NEMA17 + TB6600): sürekli döndür / hız-yön güncelle / durdur ----
+   * {"cmd":"rot","dir":"cw"|"ccw","delay":<us>} ve {"cmd":"rot","dir":"stop"}.
+   * delay aralık dışıysa rot_command() sessizce kırpar (step ile aynı). Bilinmeyen
+   * dir değeri hata döner VE ekseni durdurur (fail-safe). */
+  else if (strcmp(cmd, "rot") == 0) {
+    if (!json_read_str(line, "dir", dir_str, sizeof(dir_str))) {
+      uart_send("{\"err\":\"missing dir field\"}\r\n");
+      return;
+    }
+
+    if (strcmp(dir_str, "stop") == 0) {
+      rot_stop();
+    } else if (strcmp(dir_str, "cw") == 0 || strcmp(dir_str, "ccw") == 0) {
+      if (!json_read_int(line, "delay", &delay_i)) {
+        uart_send("{\"err\":\"missing delay field\"}\r\n");
+        return;
+      }
+      /* uint32_t'ye çevirmeden ÖNCE kırp: negatif delay sarıp dev bir sayıya dönmesin */
+      if (delay_i < (int32_t)ROT_MIN_DELAY_US) delay_i = (int32_t)ROT_MIN_DELAY_US;
+      rot_command((strcmp(dir_str, "cw") == 0) ? 1U : 2U, (uint32_t)delay_i);
+    } else {
+      rot_stop();
+      uart_send("{\"err\":\"invalid dir\"}\r\n");
+      return;
+    }
+    uart_send("{\"ok\":\"rot\"}\r\n");
+  }
+
   /* ---- Encoder sayaçlarını sıfırla ---- */
   else if (strcmp(cmd, "reset") == 0) {
+    rot_stop();      /* sözleşme: reset de dönüş eksenini durdurur */
     encoder_reset(&g_enc1);
     encoder_reset(&g_enc2);
     uart_send("{\"ok\":\"reset\"}\r\n");
@@ -581,6 +833,7 @@ static void process_command(const char *line)
    * verince bunu gönderir. stop/reset/ping gibi hiçbir gate'e bağlı değil,
    * her zaman işlenir. */
   else if (strcmp(cmd, "bye") == 0) {
+    rot_stop();      /* host koptu: dönüş ekseni kontrolsüz dönmesin */
     g_host_confirmed = 0;
     uart_send("{\"ok\":\"bye\"}\r\n");
   }
@@ -622,6 +875,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM1_Init();
+  MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM14_Init();
   MX_TIM16_Init();
@@ -632,6 +886,7 @@ int main(void)
   /* Motor çıkışlarını güvenli başlangıç durumuna al */
   HAL_GPIO_WritePin(STEP_GPIO_Port,   STEP_Pin,   GPIO_PIN_RESET);
   HAL_GPIO_WritePin(DIR_GPIO_Port,    DIR_Pin,    GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(ROT_DIR_GPIO_Port, ROT_DIR_Pin, GPIO_PIN_RESET);
 
   /* DC motor PWM kanallarını 0% duty (dur) ile başlat - PB8/PB9 artık plain
    * GPIO değil, TIM16_CH1/TIM17_CH1 AF-PWM modunda (bkz. MX_TIM16/17_Init). */
@@ -639,6 +894,11 @@ int main(void)
   HAL_TIM_PWM_Start(&htim17, TIM_CHANNEL_1);
   __HAL_TIM_SET_COMPARE(&htim16, TIM_CHANNEL_1, 0U);
   __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 0U);
+
+  /* Dönüş ekseni PUL (TIM2_CH1/PA0): 0 duty (CCR=0 -> sürekli LOW) ile başlat,
+   * darbe ancak "rot" komutuyla çıkar. Sayaç sürekli çalışır, durdurma = CCR=0. */
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0U);
 
   /* İki encoder'ın donanım sayacını başlat */
   encoder_init(&g_enc1, &htim1);   /* Encoder 1 - motorlu tekerlek  (PA8 / PA9) */
@@ -669,6 +929,9 @@ int main(void)
       g_command_ready = 0;              /* kopyaladıktan SONRA temizle */
       process_command(copy);
     }
+
+    /* --- 1b) Dönüş ekseni rampasını ilerlet (çalışmıyorsa hemen döner) --- */
+    rot_service();
 
     /* --- 2) Her 50 ms'de bir encoder'ları oku ve durumu PC'ye gönder --- */
     if ((HAL_GetTick() - g_last_status_ms) >= STATUS_PERIOD_MS) {
@@ -795,6 +1058,55 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 2 */
 
+}
+
+/**
+  * @brief TIM2 Initialization Function - dönüş ekseni PUL, PA0 (TIM2_CH1).
+  *        05-10-2026 eklendi (NEMA17 + TB6600). 1 MHz tick, ARR preload açık,
+  *        periyot/duty çalışırken rot_apply_delay() ile yazılır.
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = ROT_PWM_PRESCALER;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = ROT_PWM_INIT_PERIOD_TICKS;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;                       /* başlangıç duty = 0 (dur) */
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  HAL_TIM_MspPostInit(&htim2);   /* PA0 -> TIM2_CH1 AF2 (stm32g0xx_hal_msp.c) */
 }
 
 /**
@@ -995,6 +1307,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOB, DIR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(ROT_DIR_GPIO_Port, ROT_DIR_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
@@ -1009,6 +1324,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : ROT_DIR_Pin (dönüş ekseni DIR, 05-10-2026; PUL=PA0 TIM2_CH1 AF-PWM, bkz. HAL_TIM_PWM_MspInit) */
+  GPIO_InitStruct.Pin = ROT_DIR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(ROT_DIR_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : T_NRST_Pin */
   GPIO_InitStruct.Pin = T_NRST_Pin;

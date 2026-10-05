@@ -1,7 +1,7 @@
 # FeedVision Test Firmware — Adım Adım CubeMX Kurulumu
 
 Kart: **NUCLEO-G031K8 (STM32G031K8T6, LQFP32)**
-Amaç: Nema23 (DM556) + 6V DC motor (L9110) + 2× encoder test firmware'i.
+Amaç: Nema23 (DM556) + 6V DC motor (L9110) + NEMA17 dönüş ekseni (TB6600) + 2× encoder test firmware'i.
 
 ---
 
@@ -22,6 +22,8 @@ konumları ve o pinin destekediği fonksiyonlar:
 | PB1 | 16 | GPIO Output (DIR+) | XML'de GPIO |
 | PB8 | 32 | TIM16_CH1 PWM (L9110 IA1, hız kontrolü) | XML: PB8 → `TIM16_CH1`; 22-09-2026'da GPIO Output'tan PWM'e geçildi (backlog #109) |
 | PB9 | 1 | TIM17_CH1 PWM (L9110 IB1, hız kontrolü) | XML: PB9 → `TIM17_CH1`; aynı değişiklik |
+| PA0 | 7 | TIM2_CH1 PWM (dönüş ekseni PUL+, TB6600) | CubeMX db (`STM32G031K(4-6-8)Tx.xml` + `GPIO-STM32G03x_gpio_v1_0_Modes.xml`): PA0 → `TIM2_CH1`, `GPIO_AF2_TIM2`; 05-10-2026'da eklendi, bkz. §13 |
+| PA1 | 8 | GPIO Output (dönüş ekseni DIR+, TB6600) | XML'de GPIO (TIM2_CH2 de olabilir, kullanılmıyor); 05-10-2026 |
 | PA/PB (yok, dahili) | - | TIM14 (step darbe üreteci, base/kesme modu) | TIM16 PWM'e ayrılınca step üreteci TIM14'e taşındı - hiçbir fiziksel pin gerektirmiyor (sadece dahili kesme) |
 
 **Neden PA10 (eskiden PA15):** STEP donanımsal bir timer/AF'ye bağlı değil, düz bit-banged
@@ -257,3 +259,38 @@ Tek kaynak: **`docs/protocol.md`** (kök dizinde) — komut/durum tablosu + `acc
 ikinci bir kopyasını tutmuyoruz — encoder pull-up notunun az önce yaşadığı gibi, iki
 yerde aynı bilginin durması bir gün ikisi de birbirinden habersiz güncellenip
 çelişmeye başlıyor.
+
+---
+
+## 13. Dönüş ekseni — TIM2 + PA0/PA1 (05-10-2026 eklendi)
+
+NEMA17 + TB6600 ek eksen. DC (PB8/PB9, TIM16/17) ve NEMA23 (PA10/PB1, TIM14) **aynen kalır**.
+CubeMX'te sıfırdan kuruyorsan:
+
+| Ayar | Değer |
+|---|---|
+| PA0 | `TIM2_CH1`, User Label `ROT_PUL`, speed High |
+| PA1 | `GPIO_Output`, User Label `ROT_DIR`, level Low, push-pull, no pull, speed High |
+| TIM2 → Clock Source | Internal Clock |
+| TIM2 → Channel1 | PWM Generation CH1 |
+| Prescaler / Counter Period | **63** / **999** (sadece başlangıç; çalışırken kod yazar) |
+| auto-reload preload | **Enable** (glitch'siz periyot güncellemesi için şart) |
+| PWM Mode / Pulse / Polarity | PWM mode 1 / **0** / High |
+| NVIC | TIM2 için kesme **gerekmez** (kapalı bırak) |
+
+**Mantık nerede:** `rot_*` fonksiyonları ve sabitleri (`ROT_MIN_DELAY_US`, `ROT_CW_DIR_LEVEL`, rampa) `main.c`
+`USER CODE 0`/`PD` bloklarında; yeniden üretimde silinmez. Üretimden sonra `main.c`'de
+`strcmp(cmd, "rot") == 0` aratıp yerinde olduğunu kontrol et.
+
+**Yeniden üretim doğrulaması (05-10-2026, headless CubeMX, repo kopyası üzerinde):** `.ioc`'a
+`VP_TIM16_VS_ClockSourceINT` ve `VP_TIM17_VS_ClockSourceINT` (`Mode=Enable_Timer`) eklendi; bunlar yokken
+CubeMX `MX_TIM16_Init`/`MX_TIM17_Init`'i hiç üretmiyor, DC PWM kodu silinirdi. Eklendikten sonra yeniden üretim:
+- `main.h` tanımları aynı (sadece sıra farklı); `MX_TIM2_Init` ve `MX_TIM14_Init` eldekiyle aynı (sadece sabit adları yerine sayılar).
+- `MX_TIM16/17_Init` + `HAL_TIM_MspPostInit` işlevsel olarak eşdeğer (aynı prescaler 63, periyot 999, PWM1, PB8/PB9 AF2 itme-çekme, pull yok), ama yapı farklı:
+  CubeMX `HAL_TIM_Base_Init` + `HAL_TIMEx_ConfigBreakDeadTime` ekliyor, GPIO'yu `HAL_TIM_MspPostInit`'te kuruyor
+  (elle yazılan `HAL_TIM_PWM_MspInit/MspDeInit` düşüyor). Davranış değişmez; flash ~+390 B.
+- `rot_*`, `dc_set`, `step_start`, `process_command` ve diğer USER CODE blokları dokunulmadan kaldı; üretilen proje 0 hata/0 uyarı derleniyor.
+Repodaki kod bilerek el yazımı haliyle bırakıldı; CubeIDE'den üretince yukarıdaki fark beklenen ve zararsızdır.
+
+**Kablolama, switch ayarları ve pin gerekçesi:** vault'ta `pinout_referans.md` (TB6600 bölümü). Komut/durum
+formatı: `docs/protocol.md` "Dönüş ekseni" bölümü.

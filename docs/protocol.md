@@ -10,19 +10,22 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 |---|---|
 | `{"cmd":"step","dir":1,"delay":500,"steps":2000}` | 2000 step at, darbe periyodu 500 µs, yön 1 |
 | `{"cmd":"step","dir":1,"delay":500,"steps":2000,"accel":300}` | Aynısı ama ilk 300 ve son 300 adımda hızlanıp yavaşlıyor (rampa) — bkz. aşağıda |
-| `{"cmd":"stop"}` | Step motoru anında durdur |
+| `{"cmd":"stop"}` | Step motoru ve dönüş eksenini (rot) anında durdur |
 | `{"cmd":"dc","dir":"forward"}` | DC motor ileri, tam hız (speed verilmezse varsayılan %100) |
 | `{"cmd":"dc","dir":"forward","speed":30}` | DC motor ileri, %30 hız (PWM duty) |
 | `{"cmd":"dc","dir":"backward","speed":30}` | DC motor geri, %30 hız |
 | `{"cmd":"dc","dir":"stop"}` | DC motor dur |
-| `{"cmd":"reset"}` | İki encoder sayacını da sıfırla |
+| `{"cmd":"rot","dir":"cw","delay":500}` | Dönüş ekseni (NEMA17 + TB6600) saat yönünde SÜREKLİ döner, darbe periyodu 500 µs (bkz. aşağıda) |
+| `{"cmd":"rot","dir":"ccw","delay":500}` | Aynısı saat yönünün tersine |
+| `{"cmd":"rot","dir":"stop"}` | Dönüş eksenini durdur |
+| `{"cmd":"reset"}` | İki encoder sayacını sıfırla + dönüş eksenini durdur |
 | `{"cmd":"ping"}` | Bağlantı testi |
-| `{"cmd":"bye"}` | Host bağlantıyı kapattı (bkz. aşağıda) |
+| `{"cmd":"bye"}` | Host bağlantıyı kapattı: dönüş eksenini durdurur, LED yavaş moda döner (bkz. aşağıda) |
 
 ## STM32 → Pi/PC (durum, saniyede ~20 kez)
 
 ```json
-{"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"remaining":0,"running":0,"dc":0,"dcSpeed":0}
+{"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"remaining":0,"running":0,"dc":0,"dcSpeed":0,"rot":0,"rdelay":0}
 ```
 
 | Alan          | Anlamı                                                     |
@@ -34,6 +37,8 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 | `running`     | 1 = step motor hareket halinde                             |
 | `dc`          | 0 = dur, 1 = ileri, 2 = geri                               |
 | `dcSpeed`     | DC motorun o anki PWM duty'si, 0-100 (dur ise 0)           |
+| `rot`         | Dönüş ekseni, KOMUT EDİLEN yön: 0 = dur, 1 = cw, 2 = ccw   |
+| `rdelay`      | Komut edilen (kırpılmış) hedef delay µs (dur ise 0). Rampa sırasındaki anlık hız burada görünmez |
 
 ## DC motor PWM (22-09-2026 eklendi, backlog #109)
 
@@ -54,6 +59,39 @@ sürekli değişen 20-60000 us periyoduyla PWM'in sabit periyodu çakışır) st
 darbe üreteci **TIM14'e taşındı** (main.c/stm32g0xx_hal_msp.c/stm32g0xx_it.c,
 fonksiyonel olarak birebir aynı, sadece hangi timer'ın kullanıldığı değişti -
 yeni pin/kablo YOK). TIM17 zaten boştaydı, doğrudan kullanıldı.
+
+## Dönüş ekseni `rot` (05-10-2026 eklendi)
+
+Çubuğu eksenel döndüren **NEMA17 + TB6600** (microstep DIP: 1/16 = 3200 darbe/tur). DC motorun
+(`dc`) ve NEMA23 step ekseninin (`step`) yanına eklenen ek eksendir; onlara dokunmaz. Dönüş
+sürekli ve mesafesizdir: darbe SAYISI yok, firmware darbe sayısını/mikroadımı bilmez, sadece
+verilen `delay` periyodunda darbe üretir (TIM2_CH1 donanım PWM, %50 doluluk).
+
+- `delay` = iki darbe arası süre (µs), `step` komutundaki ile aynı anlam. `dir` = `cw` | `ccw` | `stop`.
+- `cw` = motorun mil ucuna bakınca saat yönü (DIR pin seviyesi eşlemesi `ROT_CW_DIR_LEVEL`, main.c).
+- Yanıt: `{"ok":"rot"}`; `dir` yoksa `{"err":"missing dir field"}`, `cw`/`ccw`'de `delay` yoksa
+  `{"err":"missing delay field"}`, bilinmeyen `dir` değeri `{"err":"invalid dir"}` (eksen güvenlik için durdurulur).
+- Çalışırken tekrar gönderilen `rot` = hız/yön güncellemesi (yeni hedefe rampa ile geçer).
+- **Limitler (firmware sabiti, RPi ile aynı):** `ROT_MIN_DELAY_US = 100` (10 kHz), `ROT_MAX_DELAY_US = 60000`.
+  Aralık dışı `delay` sessizce kırpılır (`step` ile aynı davranış), hata dönmez.
+- **Rampa:** kalkışta, hız değişiminde ve yön değişiminde yazılımsal sabit ivme (`ROT_RAMP_START_DELAY_US = 1000`,
+  `ROT_RAMP_ACCEL_HZ_PER_S = 10000`; 1 kHz'ten 10 kHz'e ~0.9 s). Yön değişiminde önce 1 kHz'e yavaşlar, DIR çevrilir,
+  tekrar hedefe çıkar. Hedef 1000 µs'den yavaşsa rampa yok. RPi bunu bilmeden sadece hedef `delay` gönderir.
+- **Durdurma ANINDA:** `rot` `dir:stop`, `stop`, `reset`, `bye` rampasız keser (güvenlik; konum takibi olmadığı için adım kaybı sorun değil).
+- Status `rot` / `rdelay` alanları komut edilen değerleri gösterir (`dc`/`dcSpeed` mantığıyla aynı).
+
+**RPM → delay çevrimi** (RPi tarafında hesaplanır):
+
+```
+tekerlek_rpm = rod_rpm * D_rod / D_tekerlek
+delay_us     = 1e6 / ((tekerlek_rpm / 60) * darbe_per_tur)
+darbe_per_tur = 200 * mikroadım_çarpanı      (1/16 -> 3200, 1/32 -> 6400)
+```
+
+Ör: tekerlek 60 dev/dk, 1/16 -> 3200 darbe/s -> delay ≈ 312 µs. Sınırlar 1/16'da motor mili için
+~187 dev/dk (100 µs) ile ~0.31 dev/dk (60000 µs) arasıdır; 1/32'de hepsi yarıya iner. Motorun GERÇEKTEN takip
+edebildiği tepe hız (yük, 24 V besleme, TB6600 akım ayarı) bundan düşüktür, sahada ampirik doğrulanmalı.
+`darbe_per_tur` TB6600 üzerindeki S1-S3 DIP ayarıyla birebir aynı olmalı, yoksa hız yanlış çıkar.
 
 Gerçek üretim protokolü (Pi tarafı `feedvision-core`) bu test protokolünü temel alacak, komut seti büyüyecek (SE ekibinin ICD'siyle uyumlu hale gelecek).
 
