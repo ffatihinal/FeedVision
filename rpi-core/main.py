@@ -1943,6 +1943,13 @@ def shared_js():
     return Response(content=_read_ui_file("shared.js"), media_type="application/javascript")
 
 
+@app.get("/touch_scroll.js")
+def touch_scroll_js():
+    """Dokunmatik ekran Chromium'a 'mouse' olarak geldiğinde sürüklemeyi kaydırmaya
+    çeviren yedek JS (bkz. ui/touch_scroll.js). shared.js ile aynı basit desen."""
+    return Response(content=_read_ui_file("touch_scroll.js"), media_type="application/javascript")
+
+
 @app.get("/wall", response_class=HTMLResponse)
 def wall():
     """Canlı yayın duvarı: 2x2 grid (Chamber Camera, UI Screen Camera, FeedVision UI, custom alan) —
