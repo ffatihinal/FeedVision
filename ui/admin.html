@@ -20,7 +20,25 @@
        naturalWidth/naturalHeight'inden okunup runtime'da override edilir
        (bkz. syncRoiCanvasToStream, 01-10-2026 — STREAM_SIZE degisirse
        burada hicbir sey guncellenmesi gerekmez). */
-    .roi-canvas-wrap { position: relative; width: min(640px, 100%); aspect-ratio: 4 / 3; border: 1px solid #444; border-radius: 4px; background: #222; overflow: hidden; }
+    /* Görüntü İşleme görünümü (07-10-2026): yayın ekrana sığan en geniş boyutta.
+       --stream-ar TEK doğruluk kaynağı: syncRoiCanvasToStream akışın doğal
+       oranını (naturalWidth/naturalHeight) buraya yazar; kutunun hem genişlik
+       hesabı hem aspect-ratio'su bunu kullanır, böylece oran bozulmaz.
+       --vision-chrome = araç çubuğu (46px) + panel boşlukları + pay. */
+    :root { --stream-ar: 1.3333; --vision-toolbar-h: 46px; --vision-chrome: 60px; }
+    .roi-canvas-wrap { position: relative; width: min(100%, calc((100vh - var(--vision-chrome)) * var(--stream-ar))); aspect-ratio: var(--stream-ar); margin: 0 auto; border: 1px solid #444; border-radius: 4px; background: #222; overflow: hidden; }
+    body.vision-mode { padding: 0 8px 8px; }
+    #vision-toolbar {
+      position: sticky; top: 0; z-index: 50; height: var(--vision-toolbar-h); box-sizing: border-box;
+      display: flex; align-items: center; gap: 6px; margin: 0 -8px; padding: 0 8px;
+      background: #0c0c0c; border-bottom: 1px solid #333;
+    }
+    #vision-toolbar button { font-size: 14px; padding: 8px 12px; margin: 0; white-space: nowrap; }
+    #vision-toolbar .nav-btn, #vision-open-btn { background: #446; }
+    #vision-toolbar .nav-btn:active, #vision-open-btn:active { background: #335; }
+    #view-vision .panel { margin-top: 8px; padding: 12px; }
+    #view-vision #ui-screen-roi-panel { margin-top: 4px; padding: 4px 8px 12px; }
+    #vision-settings-anchor { scroll-margin-top: calc(var(--vision-toolbar-h) + 4px); padding-top: 8px; }
     #roi-stream-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; }
     #roi-canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; background: transparent; }
     #roi-list { list-style: none; padding: 0; margin: 0; }
@@ -287,14 +305,14 @@
     }
     #feed-start-stop-btn:active { background: #922b21; }
     #motion-params-save-status { font-size: 12.5px; color: #888; }
+    /* Dokunmatik ekranda kaydırma metin seçmesin (parmak = sürüklenen fare gibi
+       geliyordu). Kopyalanması mantıklı çıktı alanları aşağıda hariç tutulur.
+       Canvas'ın kendi touch-action:none kuralı korunur (ROI çizimi). */
+    body { touch-action: manipulation; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
+    input, textarea, select, pre, code, [contenteditable], .selectable, #console, #status-display, #status-raw, #ui-screen-read-test-result, .io-box .raw, #guide-body { -webkit-user-select: text; user-select: text; }
   </style>
 </head>
 <body>
-  <button id="back-btn" onclick="location.href='/'">← Ana Ekran</button>
-  <h1>FeedVision — Admin</h1>
-
-  <button id="logs-open-btn" onclick="openLogsDialog()">Sistem Logları</button>
-
   <!-- Kontrol Kriterleri alarm banner'i — /ws/status uzerinden gelen rule_violations
        ile canli guncellenir. Sayfanin en ustunde, hangi panelde olursa olsun
        gorunur olmasi icin - guvenlik-kritik bir uyari gozden kacmamali. -->
@@ -316,6 +334,14 @@
     <pre id="logs-body">Yükleniyor…</pre>
   </dialog>
 
+  <!-- Ana görünüm: kamera aç/kapat, motor, besleme, hareket analizi, sıcaklık/CPU/RAM -->
+  <div id="view-main">
+  <button id="vision-open-btn" onclick="showView('vision')">Görüntü İşleme Paneli →</button>
+  <button id="back-btn" onclick="location.href='/'">← Ana Ekran</button>
+  <h1>FeedVision — Admin</h1>
+
+  <button id="logs-open-btn" onclick="openLogsDialog()">Sistem Logları</button>
+
   <div class="cameras">
     <div class="camera-block">
       <button onclick="toggleCamera('chamber')">Chamber Camera Aç/Kapat</button>
@@ -329,198 +355,6 @@
       <span id="scan-save-status" style="color:#888; font-size:12.5px; margin-left:6px;"></span>
       <br>
       <img id="camera-ui_screen">
-    </div>
-  </div>
-
-  <!-- UI Screen Camera ROI yonetimi — operator kamera goruntusu uzerinde fare/parmakla
-       dikdortgen (ROI) cizer, her birine isim verir; kayitli ROI'ler
-       roi_config.json'da (rpi-core/roi_store.py) kalici tutulur. Bu nihai
-       operator UI'i degil, calisma/kurulum araci — dikdortgenler eksene
-       paralel, dondurulemez; kamera acisi degisirse yeniden cizilmeli. -->
-  <div class="panel" id="ui-screen-roi-panel">
-    <h2>UI Screen Camera — ROI Yönetimi</h2>
-    <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
-      Görüntü canlı akıyor — üzerinde tıkla-sürükle ile dikdörtgen çiz, isim ver ve tip seç. "Kaydet" ile kalıcı yapılır.
-    </div>
-    <!-- Görev (30-09-2026): arka planda hangi OCR motorunun aktif olduğu
-         her zaman görünsün diye küçük, sabit bilgi satırı — GET
-         /vision/{cam}/settings çağrısındaki ocr_engine alanından doldurulur
-         (bkz. loadVisionSettings). tesserocr kuruluysa hızlı yol, değilse
-         pytesseract'a (yavaş, subprocess bazlı) düşülmüş demektir. -->
-    <div id="ocr-engine-info" style="color:#888; font-size:12.5px; margin-bottom:12px;">OCR motoru: yükleniyor…</div>
-    <div style="display:flex; gap:24px; flex-wrap:wrap;">
-      <div class="roi-canvas-wrap">
-        <img id="roi-stream-img" alt="UI Screen Camera canlı akış">
-        <!-- width/height burada sadece baslangic/placeholder — img yuklenince
-             syncRoiCanvasToStream gercek akis boyutuyla override eder. -->
-        <canvas id="roi-canvas" width="1640" height="1232"></canvas>
-      </div>
-      <div style="min-width:220px; flex:1;">
-        <div style="margin-bottom:10px;">
-          <button onclick="toggleRoiStream()" id="roi-stream-toggle-btn">Canlı Yayını Başlat</button>
-          <button onclick="saveRois()">Kaydet</button>
-        </div>
-        <!-- Görev (01-10-2026, saha bulgusu): ekranda tek bir ton turkuaz olduğu
-             için tüm Durum ROI'leri aynı eşiği kullanıyor — tek tek açıp
-             ayarlamak yerine TEK global slider tüm bool_threshold alanlarını
-             aynı anda günceller (client-side, roiList toplu güncelleme).
-             Sadece bu kamerada en az bir Durum ROI'si varsa görünür. -->
-        <div id="global-bool-threshold-group" style="display:none; margin-bottom:14px; padding:10px; border:1px solid #333; border-radius:6px;">
-          <span style="display:block; margin-bottom:4px; font-size:13px; color:#aaa;">Durum ROI'leri İçin Ortak Eşik (match_ratio) — <span id="global-bool-threshold-value">%28</span> turkuaz</span>
-          <input type="range" id="global-bool-threshold-input" min="0" max="1" step="0.01" value="0.28" oninput="onGlobalBoolThresholdInput(this.value)">
-          <span style="display:block; font-size:12px; color:#888; margin-top:4px;">Tüm Durum ROI'lerini aynı anda ayarlar — her birini tek tek açmaya gerek yok. "Kaydet" ile kalıcı yapılır.</span>
-        </div>
-        <h3 style="margin-top:0; font-size:15px;">Tanımlı ROI'ler</h3>
-        <ul id="roi-list"><li style="border:none; color:#888;">Henüz ROI yok.</li></ul>
-      </div>
-    </div>
-    <hr style="border-color:#292929; margin:16px 0;">
-    <!-- ROI drift düzeltme (2026-09-30, Görev A+B): BİRİNCİL referans kaynağı
-         artık sabit bir UI şablonu (ör. dişli ikonu) — operatör ROI çizim
-         mekanizmasının AYNISIYLA canvas üzerinde bir dikdörtgen çizer, o
-         bölge referans olarak kaydedilir. Şablon hiç seçilmemişse eski
-         "Ekranı Kalibre Et" (bezel köşe) yöntemine geriye uyumlu düşülür —
-         bu yüzden o buton da hâlâ burada duruyor (yedek yol). -->
-    <h3 style="font-size:15px; margin-bottom:6px;">Kalibrasyon (ROI Drift Düzeltme)</h3>
-    <div class="row-group">
-      <label style="font-size:13px;">
-        <input type="checkbox" id="calibration-enabled-toggle" checked onchange="onCalibrationEnabledToggle()">
-        Kalibrasyon açık (drift düzeltme uygulansın)
-      </label>
-    </div>
-    <div class="row-group">
-      <button onclick="toggleCalibrationTemplateMode()" id="calib-template-mode-btn">Referans Şablonu Seç</button>
-      <button onclick="calibrateScreen()">Ekranı Kalibre Et (yedek: bezel köşesi)</button>
-      <span id="calibration-status" style="color:#888; font-size:13px;">Kalibrasyon durumu yükleniyor…</span>
-    </div>
-    <div style="color:#888; font-size:12px; margin:4px 0;">
-      "Referans Şablonu Seç" AÇIKKEN canvas üzerinde dişli ikonu gibi sabit bir
-      UI öğesinin üzerine dikdörtgen çizin (ROI çizimiyle aynı tıkla-sürükle) —
-      en az 1, tercihen birbirinden uzak 2 şablon önerilir. Bitirince butona
-      tekrar basıp modu kapatın.
-    </div>
-    <ul id="calibration-template-list" style="list-style:none; padding:0; margin:0 0 8px 0; font-size:13px;">
-      <li style="color:#888;">Henüz referans şablonu yok (bezel yöntemine düşülür).</li>
-    </ul>
-    <!-- Görev B (29-09-2026): canlı overlay'de referans/şimdiki köşe rengi lejantı. -->
-    <div style="color:#888; font-size:12px; margin-top:4px;">
-      Overlay: <span style="color:#f4d03f;">●</span> referans köşe (kalibrasyon anı) &nbsp;
-      <span style="color:#2ecc71;">●</span> şimdiki tespit edilen köşe (canlı)
-    </div>
-    <hr style="border-color:#292929; margin:16px 0;">
-    <!-- Görev B (30-09-2026): Tesseract'a alternatif, DENEYSEL rakam okuma
-         (digit_reader.py) için gerçek karakter şablonu yakalama akışı.
-         Operatör ROI çizim mekanizmasının AYNISIYLA canvas üzerinde bir
-         karakterin (ör. gerçekten "1" gösteren bölge) üzerine küçük bir
-         dikdörtgen çizer, hangi karakter olduğunu seçer — 0-9/./- için ayrı
-         ayrı yakalanır. Hiç yakalanmamış karakterler PIL ile üretilmiş
-         sentetik (düşük doğruluklu) yedekle okunmaya devam eder (bkz.
-         main._load_digit_template_set). -->
-    <h3 style="font-size:15px; margin-bottom:6px;">Rakam Şablonları (Özel Şablon okuma — deneysel)</h3>
-    <div class="row-group">
-      <button onclick="toggleDigitTemplateMode()" id="digit-template-mode-btn">Rakam Şablonlarını Yakala</button>
-      <span id="digit-template-status" style="color:#888; font-size:13px;">Rakam şablonu durumu yükleniyor…</span>
-    </div>
-    <div style="color:#888; font-size:12px; margin:4px 0;">
-      "Rakam Şablonlarını Yakala" AÇIKKEN canvas üzerinde TEK BİR karakterin
-      (ör. bir ROI içindeki "1" rakamının) üzerine dikdörtgen çizin, hangi
-      karakter olduğunu (0-9, "." veya "-") sorulduğunda girin. Her karakter
-      için AYRI AYRI yapılması gerekir — aynı karakteri tekrar yakalarsanız
-      eskisinin üzerine yazılır. Bitirince butona tekrar basıp modu kapatın.
-    </div>
-    <ul id="digit-template-list" style="list-style:none; padding:0; margin:0 0 8px 0; font-size:13px;">
-      <li style="color:#888;">Henüz hiç rakam şablonu yakalanmadı (sentetik yedek kullanılıyor).</li>
-    </ul>
-    <hr style="border-color:#292929; margin:16px 0;">
-    <!-- Gorev D (23-09-2026): manuel pozlama + CLAHE kontrast artirma -
-         SADECE UI Screen Camera icin, Chamber Camera'ya dokunmuyor. -->
-    <h3 style="font-size:15px; margin-bottom:6px; display:flex; align-items:center; gap:8px;">
-      Kamera Ayarları (Pozlama / Kontrast)
-      <button id="camera-settings-info-btn" onclick="openCameraSettingsGuideDialog()" title="Bu ayarlar ne işe yarar?">ℹ️</button>
-    </h3>
-    <div class="row-group" style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
-      <label style="font-size:13px;">
-        <input type="checkbox" id="exposure-auto-toggle" checked onchange="onExposureAutoToggle()">
-        Otomatik pozlama
-      </label>
-      <label style="font-size:13px;">
-        Exposure Time (µs):
-        <input type="number" id="exposure-time-input" min="1" step="100" style="width:90px;" disabled>
-      </label>
-      <label style="font-size:13px;">
-        Gain:
-        <input type="number" id="exposure-gain-input" min="0.1" step="0.1" style="width:70px;" disabled>
-      </label>
-      <button onclick="applyExposure()">Pozlamayı Uygula</button>
-      <label style="font-size:13px;">
-        <input type="checkbox" id="clahe-toggle" onchange="applyPreprocess()">
-        Kontrast artırma (CLAHE)
-      </label>
-    </div>
-    <div id="vision-settings-status" style="color:#888; font-size:13px; margin-top:6px;">Ayarlar yükleniyor…</div>
-    <hr style="border-color:#292929; margin:16px 0;">
-    <div class="row-group">
-      <button onclick="toggleContinuousRead()" id="roi-continuous-read-btn">Sürekli Okumayı Durdur</button>
-      <span style="color:#888; font-size:12.5px;">(sayfa açıldığında otomatik başlar — Pi'yi zorlamamak için en az 300ms aralıkla okur)</span>
-    </div>
-    <div id="ui-screen-read-test-result">Henüz okunmadı.</div>
-  </div>
-
-  <!-- Kontrol Kriterleri — madde 1 (ROI kriter mantığı) + madde 2 (güvenlik
-       interlock) + madde 7 (aralık dışı alarm) TEK panel. Bir kriter
-       kaynağını (ROI adı ya da STM bağlantı durumu) min/max aralığına ya da
-       (STM için) zaman aşımına bağlar; "Motoru Durdur" işaretliyse ihlalde
-       motor otomatik durur (bkz. rpi-core/rule_engine.py + main.py döngüsü).
-       STM kaynağı KASITLI OLARAK sadece "bağlantı koptu/timeout" ile
-       sınırlı — protokolde ayrı bir hata/fault alanı yok (15-09-2026 karar). -->
-  <div class="panel" id="rules-panel">
-    <h2>Kontrol Kriterleri — İzleme &amp; Güvenlik</h2>
-    <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
-      Bir değer (ROI okuması) aralık dışına çıkarsa ya da STM bağlantısı sessiz kalırsa: alarm + istenirse motor durdurma.
-    </div>
-    <table id="rules-table" style="width:100%; border-collapse:collapse; margin-bottom:10px;">
-      <thead>
-        <tr style="text-align:left; color:#888; font-size:12.5px;">
-          <th>Ad</th><th>Kaynak</th><th>Kamera</th><th>ROI adı / Timeout (sn)</th><th>Min</th><th>Max</th><th>Motoru Durdur</th><th>Alarm Sesi</th><th>Aktif</th><th></th>
-        </tr>
-      </thead>
-      <tbody id="rules-tbody"></tbody>
-    </table>
-    <button onclick="addRuleRow()">+ Kriter Ekle</button>
-    <button onclick="saveRules()">Kaydet</button>
-    <div id="rules-save-status" style="color:#888; font-size:13px; margin-top:6px;"></div>
-    <hr style="border-color:#292929; margin:16px 0;">
-    <div id="rules-skipped-info" style="color:#888; font-size:13px;">Okunamayan kriter yok.</div>
-    <hr style="border-color:#292929; margin:16px 0;">
-    <!-- Sesli alarm (madde 9): donanım (USB hoparlör) sahada bağlanacak,
-         burada SADECE hangi durumda hangi ses çalınacağının mantığı var.
-         Web Audio API ile üretiliyor (dosya gerekmez) - kiosk tarayıcısı
-         Pi üzerinde çalıştığı için ses, Pi'nin sistem ses çıkışından
-         (USB hoparlöre yönlendirilmiş) gelir. -->
-    <label style="font-size:13px;">
-      <input type="checkbox" id="alarm-sound-mute" onchange="alarmMuted = this.checked">
-      Sesli alarmı sustur
-    </label>
-  </div>
-
-  <!-- Görüntü İşleme Ham Veri Kaydı (15-09-2026) — journal.py'den AYRI,
-       sadece ROI-kaynaklı Kontrol Kriterlerinin ham OCR okumasını sabit
-       genişlikli bir .txt'ye periyodik yazar (bkz. rpi-core/vision_raw_log.py). -->
-  <div class="panel" id="vision-raw-log-panel">
-    <h2>Görüntü İşleme Ham Veri Kaydı</h2>
-    <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
-      Kontrol Kriterlerinin ham (OCR) okumaları, gün başına bir .txt dosyasına, aşağıdaki periyotla yazılır.
-    </div>
-    <div class="row-group">
-      <label>Yazım periyodu:</label>
-      <select id="vision-raw-log-interval">
-        <option value="5">5 saniye</option>
-        <option value="10">10 saniye</option>
-        <option value="30">30 saniye</option>
-        <option value="60">1 dakika</option>
-      </select>
-      <button onclick="saveVisionRawLogInterval()">Uygula</button>
-      <span id="vision-raw-log-status" style="color:#888; font-size:13px;"></span>
     </div>
   </div>
 
@@ -797,6 +631,205 @@
   <!-- Sunucu sureci ne zaman basladi + ne kadardir calisiyor — restart'i
        gozle fark edebilmek icin (bkz. main.py /system/uptime). -->
   <div id="uptime-line">Sunucu çalışma süresi yükleniyor…</div>
+  </div><!-- /view-main -->
+
+  <!-- Görüntü İşleme görünümü: ROI + kalibrasyon + kamera ayarları + Kontrol Kriterleri + Ham Veri Kaydı.
+       Element id'leri aynen korundu, sadece konum değişti (#vision hash'i ile derin bağlantı). -->
+  <div id="view-vision" style="display:none;">
+  <div id="vision-toolbar">
+    <button class="nav-btn" onclick="showView('main')" title="Admin Ana Panel">← Admin</button>
+    <button onclick="toggleRoiStream()" id="roi-stream-toggle-btn">Canlı Yayını Başlat</button>
+    <button onclick="saveRois()">Kaydet</button>
+    <button class="nav-btn" onclick="scrollToVisionSettings()">Ayarlar ↓</button>
+    <button class="nav-btn" onclick="scrollToVisionStream()">Yayın ↑</button>
+  </div>
+  <!-- UI Screen Camera ROI yonetimi — operator kamera goruntusu uzerinde fare/parmakla
+       dikdortgen (ROI) cizer, her birine isim verir; kayitli ROI'ler
+       roi_config.json'da (rpi-core/roi_store.py) kalici tutulur. Bu nihai
+       operator UI'i degil, calisma/kurulum araci — dikdortgenler eksene
+       paralel, dondurulemez; kamera acisi degisirse yeniden cizilmeli. -->
+  <div class="panel" id="ui-screen-roi-panel">
+    <!-- Canlı yayın: araç çubuğunun hemen altında, ekrana sığan en geniş boyut (CSS: --stream-ar) -->
+      <div class="roi-canvas-wrap">
+        <img id="roi-stream-img" alt="UI Screen Camera canlı akış">
+        <!-- width/height burada sadece baslangic/placeholder — img yuklenince
+             syncRoiCanvasToStream gercek akis boyutuyla override eder. -->
+        <canvas id="roi-canvas" width="1640" height="1232"></canvas>
+      </div>
+    <div id="vision-settings-anchor">
+    <h2>UI Screen Camera — ROI Yönetimi</h2>
+    <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
+      Görüntü canlı akıyor — üzerinde tıkla-sürükle ile dikdörtgen çiz, isim ver ve tip seç. "Kaydet" ile kalıcı yapılır.
+    </div>
+    <!-- Görev (30-09-2026): arka planda hangi OCR motorunun aktif olduğu
+         her zaman görünsün diye küçük, sabit bilgi satırı — GET
+         /vision/{cam}/settings çağrısındaki ocr_engine alanından doldurulur
+         (bkz. loadVisionSettings). tesserocr kuruluysa hızlı yol, değilse
+         pytesseract'a (yavaş, subprocess bazlı) düşülmüş demektir. -->
+    <div id="ocr-engine-info" style="color:#888; font-size:12.5px; margin-bottom:12px;">OCR motoru: yükleniyor…</div>
+        <!-- Görev (01-10-2026, saha bulgusu): ekranda tek bir ton turkuaz olduğu
+             için tüm Durum ROI'leri aynı eşiği kullanıyor — tek tek açıp
+             ayarlamak yerine TEK global slider tüm bool_threshold alanlarını
+             aynı anda günceller (client-side, roiList toplu güncelleme).
+             Sadece bu kamerada en az bir Durum ROI'si varsa görünür. -->
+        <div id="global-bool-threshold-group" style="display:none; margin-bottom:14px; padding:10px; border:1px solid #333; border-radius:6px;">
+          <span style="display:block; margin-bottom:4px; font-size:13px; color:#aaa;">Durum ROI'leri İçin Ortak Eşik (match_ratio) — <span id="global-bool-threshold-value">%28</span> turkuaz</span>
+          <input type="range" id="global-bool-threshold-input" min="0" max="1" step="0.01" value="0.28" oninput="onGlobalBoolThresholdInput(this.value)">
+          <span style="display:block; font-size:12px; color:#888; margin-top:4px;">Tüm Durum ROI'lerini aynı anda ayarlar — her birini tek tek açmaya gerek yok. "Kaydet" ile kalıcı yapılır.</span>
+        </div>
+        <h3 style="margin-top:0; font-size:15px;">Tanımlı ROI'ler</h3>
+        <ul id="roi-list"><li style="border:none; color:#888;">Henüz ROI yok.</li></ul>
+    </div>
+    <hr style="border-color:#292929; margin:16px 0;">
+    <!-- ROI drift düzeltme (2026-09-30, Görev A+B): BİRİNCİL referans kaynağı
+         artık sabit bir UI şablonu (ör. dişli ikonu) — operatör ROI çizim
+         mekanizmasının AYNISIYLA canvas üzerinde bir dikdörtgen çizer, o
+         bölge referans olarak kaydedilir. Şablon hiç seçilmemişse eski
+         "Ekranı Kalibre Et" (bezel köşe) yöntemine geriye uyumlu düşülür —
+         bu yüzden o buton da hâlâ burada duruyor (yedek yol). -->
+    <h3 style="font-size:15px; margin-bottom:6px;">Kalibrasyon (ROI Drift Düzeltme)</h3>
+    <div class="row-group">
+      <label style="font-size:13px;">
+        <input type="checkbox" id="calibration-enabled-toggle" checked onchange="onCalibrationEnabledToggle()">
+        Kalibrasyon açık (drift düzeltme uygulansın)
+      </label>
+    </div>
+    <div class="row-group">
+      <button onclick="toggleCalibrationTemplateMode()" id="calib-template-mode-btn">Referans Şablonu Seç</button>
+      <button onclick="calibrateScreen()">Ekranı Kalibre Et (yedek: bezel köşesi)</button>
+      <span id="calibration-status" style="color:#888; font-size:13px;">Kalibrasyon durumu yükleniyor…</span>
+    </div>
+    <div style="color:#888; font-size:12px; margin:4px 0;">
+      "Referans Şablonu Seç" AÇIKKEN canvas üzerinde dişli ikonu gibi sabit bir
+      UI öğesinin üzerine dikdörtgen çizin (ROI çizimiyle aynı tıkla-sürükle) —
+      en az 1, tercihen birbirinden uzak 2 şablon önerilir. Bitirince butona
+      tekrar basıp modu kapatın.
+    </div>
+    <ul id="calibration-template-list" style="list-style:none; padding:0; margin:0 0 8px 0; font-size:13px;">
+      <li style="color:#888;">Henüz referans şablonu yok (bezel yöntemine düşülür).</li>
+    </ul>
+    <!-- Görev B (29-09-2026): canlı overlay'de referans/şimdiki köşe rengi lejantı. -->
+    <div style="color:#888; font-size:12px; margin-top:4px;">
+      Overlay: <span style="color:#f4d03f;">●</span> referans köşe (kalibrasyon anı) &nbsp;
+      <span style="color:#2ecc71;">●</span> şimdiki tespit edilen köşe (canlı)
+    </div>
+    <hr style="border-color:#292929; margin:16px 0;">
+    <!-- Görev B (30-09-2026): Tesseract'a alternatif, DENEYSEL rakam okuma
+         (digit_reader.py) için gerçek karakter şablonu yakalama akışı.
+         Operatör ROI çizim mekanizmasının AYNISIYLA canvas üzerinde bir
+         karakterin (ör. gerçekten "1" gösteren bölge) üzerine küçük bir
+         dikdörtgen çizer, hangi karakter olduğunu seçer — 0-9/./- için ayrı
+         ayrı yakalanır. Hiç yakalanmamış karakterler PIL ile üretilmiş
+         sentetik (düşük doğruluklu) yedekle okunmaya devam eder (bkz.
+         main._load_digit_template_set). -->
+    <h3 style="font-size:15px; margin-bottom:6px;">Rakam Şablonları (Özel Şablon okuma — deneysel)</h3>
+    <div class="row-group">
+      <button onclick="toggleDigitTemplateMode()" id="digit-template-mode-btn">Rakam Şablonlarını Yakala</button>
+      <span id="digit-template-status" style="color:#888; font-size:13px;">Rakam şablonu durumu yükleniyor…</span>
+    </div>
+    <div style="color:#888; font-size:12px; margin:4px 0;">
+      "Rakam Şablonlarını Yakala" AÇIKKEN canvas üzerinde TEK BİR karakterin
+      (ör. bir ROI içindeki "1" rakamının) üzerine dikdörtgen çizin, hangi
+      karakter olduğunu (0-9, "." veya "-") sorulduğunda girin. Her karakter
+      için AYRI AYRI yapılması gerekir — aynı karakteri tekrar yakalarsanız
+      eskisinin üzerine yazılır. Bitirince butona tekrar basıp modu kapatın.
+    </div>
+    <ul id="digit-template-list" style="list-style:none; padding:0; margin:0 0 8px 0; font-size:13px;">
+      <li style="color:#888;">Henüz hiç rakam şablonu yakalanmadı (sentetik yedek kullanılıyor).</li>
+    </ul>
+    <hr style="border-color:#292929; margin:16px 0;">
+    <!-- Gorev D (23-09-2026): manuel pozlama + CLAHE kontrast artirma -
+         SADECE UI Screen Camera icin, Chamber Camera'ya dokunmuyor. -->
+    <h3 style="font-size:15px; margin-bottom:6px; display:flex; align-items:center; gap:8px;">
+      Kamera Ayarları (Pozlama / Kontrast)
+      <button id="camera-settings-info-btn" onclick="openCameraSettingsGuideDialog()" title="Bu ayarlar ne işe yarar?">ℹ️</button>
+    </h3>
+    <div class="row-group" style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+      <label style="font-size:13px;">
+        <input type="checkbox" id="exposure-auto-toggle" checked onchange="onExposureAutoToggle()">
+        Otomatik pozlama
+      </label>
+      <label style="font-size:13px;">
+        Exposure Time (µs):
+        <input type="number" id="exposure-time-input" min="1" step="100" style="width:90px;" disabled>
+      </label>
+      <label style="font-size:13px;">
+        Gain:
+        <input type="number" id="exposure-gain-input" min="0.1" step="0.1" style="width:70px;" disabled>
+      </label>
+      <button onclick="applyExposure()">Pozlamayı Uygula</button>
+      <label style="font-size:13px;">
+        <input type="checkbox" id="clahe-toggle" onchange="applyPreprocess()">
+        Kontrast artırma (CLAHE)
+      </label>
+    </div>
+    <div id="vision-settings-status" style="color:#888; font-size:13px; margin-top:6px;">Ayarlar yükleniyor…</div>
+    <hr style="border-color:#292929; margin:16px 0;">
+    <div class="row-group">
+      <button onclick="toggleContinuousRead()" id="roi-continuous-read-btn">Sürekli Okumayı Durdur</button>
+      <span style="color:#888; font-size:12.5px;">(sayfa açıldığında otomatik başlar — Pi'yi zorlamamak için en az 300ms aralıkla okur)</span>
+    </div>
+    <div id="ui-screen-read-test-result">Henüz okunmadı.</div>
+  </div>
+
+  <!-- Kontrol Kriterleri — madde 1 (ROI kriter mantığı) + madde 2 (güvenlik
+       interlock) + madde 7 (aralık dışı alarm) TEK panel. Bir kriter
+       kaynağını (ROI adı ya da STM bağlantı durumu) min/max aralığına ya da
+       (STM için) zaman aşımına bağlar; "Motoru Durdur" işaretliyse ihlalde
+       motor otomatik durur (bkz. rpi-core/rule_engine.py + main.py döngüsü).
+       STM kaynağı KASITLI OLARAK sadece "bağlantı koptu/timeout" ile
+       sınırlı — protokolde ayrı bir hata/fault alanı yok (15-09-2026 karar). -->
+  <div class="panel" id="rules-panel">
+    <h2>Kontrol Kriterleri — İzleme &amp; Güvenlik</h2>
+    <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
+      Bir değer (ROI okuması) aralık dışına çıkarsa ya da STM bağlantısı sessiz kalırsa: alarm + istenirse motor durdurma.
+    </div>
+    <table id="rules-table" style="width:100%; border-collapse:collapse; margin-bottom:10px;">
+      <thead>
+        <tr style="text-align:left; color:#888; font-size:12.5px;">
+          <th>Ad</th><th>Kaynak</th><th>Kamera</th><th>ROI adı / Timeout (sn)</th><th>Min</th><th>Max</th><th>Motoru Durdur</th><th>Alarm Sesi</th><th>Aktif</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="rules-tbody"></tbody>
+    </table>
+    <button onclick="addRuleRow()">+ Kriter Ekle</button>
+    <button onclick="saveRules()">Kaydet</button>
+    <div id="rules-save-status" style="color:#888; font-size:13px; margin-top:6px;"></div>
+    <hr style="border-color:#292929; margin:16px 0;">
+    <div id="rules-skipped-info" style="color:#888; font-size:13px;">Okunamayan kriter yok.</div>
+    <hr style="border-color:#292929; margin:16px 0;">
+    <!-- Sesli alarm (madde 9): donanım (USB hoparlör) sahada bağlanacak,
+         burada SADECE hangi durumda hangi ses çalınacağının mantığı var.
+         Web Audio API ile üretiliyor (dosya gerekmez) - kiosk tarayıcısı
+         Pi üzerinde çalıştığı için ses, Pi'nin sistem ses çıkışından
+         (USB hoparlöre yönlendirilmiş) gelir. -->
+    <label style="font-size:13px;">
+      <input type="checkbox" id="alarm-sound-mute" onchange="alarmMuted = this.checked">
+      Sesli alarmı sustur
+    </label>
+  </div>
+
+  <!-- Görüntü İşleme Ham Veri Kaydı (15-09-2026) — journal.py'den AYRI,
+       sadece ROI-kaynaklı Kontrol Kriterlerinin ham OCR okumasını sabit
+       genişlikli bir .txt'ye periyodik yazar (bkz. rpi-core/vision_raw_log.py). -->
+  <div class="panel" id="vision-raw-log-panel">
+    <h2>Görüntü İşleme Ham Veri Kaydı</h2>
+    <div class="sub" style="color:#aaa; font-size:13px; margin-bottom:12px;">
+      Kontrol Kriterlerinin ham (OCR) okumaları, gün başına bir .txt dosyasına, aşağıdaki periyotla yazılır.
+    </div>
+    <div class="row-group">
+      <label>Yazım periyodu:</label>
+      <select id="vision-raw-log-interval">
+        <option value="5">5 saniye</option>
+        <option value="10">10 saniye</option>
+        <option value="30">30 saniye</option>
+        <option value="60">1 dakika</option>
+      </select>
+      <button onclick="saveVisionRawLogInterval()">Uygula</button>
+      <span id="vision-raw-log-status" style="color:#888; font-size:13px;"></span>
+    </div>
+  </div>
+  </div><!-- /view-vision -->
 
   <!-- Konsol'daki her mesaj kategorisinin kaynağını/nedenini açıklayan rehber pop-up. -->
   <dialog id="guide-dialog">
@@ -2257,7 +2290,8 @@
       if (!img.naturalWidth || !img.naturalHeight) return;
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
-      canvas.parentElement.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+      // Kutu oranı CSS değişkeninden gelir (tek kaynak); inline aspectRatio set edilmez.
+      document.documentElement.style.setProperty('--stream-ar', String(img.naturalWidth / img.naturalHeight));
       drawRoiCanvas();
     }
 
@@ -2289,6 +2323,47 @@
       roiStreamActive = false;
       document.getElementById("roi-stream-toggle-btn").textContent = "Canlı Yayını Başlat";
     }
+
+    // --- Görünüm (view) yönetimi: #view-main / #view-vision, hash ile derin bağlantı ---
+    // ROI canlı akışı (3280x2464 MJPEG, ağır) SADECE vision görünümü açıkken çalışır.
+    let currentView = null;
+
+    function viewFromHash() {
+      return location.hash === '#vision' ? 'vision' : 'main';
+    }
+
+    function showView(name) {
+      if (name !== 'vision') name = 'main';
+      // URL'i görünümle eşitle (yenilenince aynı görünümde kal); hashchange tekrar çağırsa da idempotent.
+      if (name === 'vision' && location.hash !== '#vision') {
+        location.hash = '#vision';
+      } else if (name === 'main' && location.hash) {
+        history.pushState(null, '', location.pathname + location.search);
+      }
+      if (name === currentView) return;
+      currentView = name;
+      document.getElementById('view-main').style.display = name === 'main' ? '' : 'none';
+      document.getElementById('view-vision').style.display = name === 'vision' ? '' : 'none';
+      document.body.classList.toggle('vision-mode', name === 'vision');
+      window.scrollTo(0, 0);
+      if (name === 'vision') {
+        startRoiStream();
+        // Görünüm artık görünür: akış zaten yüklüyse (naturalWidth > 0) oranı hemen senkronla.
+        requestAnimationFrame(syncRoiCanvasToStream);
+      } else if (roiStreamActive) {
+        stopRoiStream();
+      }
+    }
+
+    function scrollToVisionSettings() {
+      document.getElementById('vision-settings-anchor').scrollIntoView({ behavior: 'smooth' });
+    }
+
+    function scrollToVisionStream() {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    window.addEventListener('hashchange', () => showView(viewFromHash()));
 
     function toggleRoiStream() {
       if (roiStreamActive) {
@@ -3409,9 +3484,10 @@
     // otomatik başlat (Görev C — "Kameradan Oku" butonuna basmaya gerek yok).
     setupRoiCanvasEvents();
     loadRois();
-    startRoiStream();
     loadVisionSettings();
     startContinuousRead();
+    // İlk açılış: hash'e göre görünüm (yayın sadece #vision ise başlar).
+    showView(viewFromHash());
     // Görev B — referans/şimdiki köşe overlay'i; sürekli okuma döngüsünden
     // bağımsız, daha seyrek (CORNERS_POLL_MS) çalışır.
     setInterval(refreshCurrentCorners, CORNERS_POLL_MS);

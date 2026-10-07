@@ -45,6 +45,11 @@
     #journal-table th { text-align: left; color: #888; padding: 4px 8px; border-bottom: 1px solid #333; }
     #journal-table td { padding: 4px 8px; border-bottom: 1px solid #222; color: #ccc; font-family: "SF Mono", Menlo, monospace; }
     #journal-empty { color: #888; font-size: 13px; }
+    /* Dokunmatik ekranda kaydırma metin seçmesin (parmak = sürüklenen fare gibi
+       geliyordu). Kopyalanması mantıklı çıktı alanları aşağıda hariç tutulur.
+       Canvas'ın kendi touch-action:none kuralı korunur (ROI çizimi). */
+    body { touch-action: manipulation; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
+    input, textarea, select, pre, code, [contenteditable], .selectable, #journal-table td { -webkit-user-select: text; user-select: text; }
   </style>
 </head>
 <body>

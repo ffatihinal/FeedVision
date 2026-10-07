@@ -120,6 +120,11 @@
       background: #c0392b; color: #fff;
     }
     #feed-start-stop-btn:active { background: #922b21; }
+    /* Dokunmatik ekranda kaydırma metin seçmesin (parmak = sürüklenen fare gibi
+       geliyordu). Kopyalanması mantıklı çıktı alanları aşağıda hariç tutulur.
+       Canvas'ın kendi touch-action:none kuralı korunur (ROI çizimi). */
+    body { touch-action: manipulation; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
+    input, textarea, select, pre, code, [contenteditable], .selectable, #console, #feed-start-result, #stop-status { -webkit-user-select: text; user-select: text; }
   </style>
 </head>
 <body>
