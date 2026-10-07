@@ -60,6 +60,8 @@
 
   function onMouseMove(e) {
     if (!state) return;
+    // mouseup kaçırıldıysa (ör. pencere dışında bırakma) fare gezinmesi sayfayı kaydırmaya devam etmesin
+    if (e.buttons === 0) { reset(); return; }
     if (!state.dragging) {
       if (Math.abs(e.clientX - state.x) < DRAG_THRESHOLD_PX && Math.abs(e.clientY - state.y) < DRAG_THRESHOLD_PX) return;
       state.dragging = true;

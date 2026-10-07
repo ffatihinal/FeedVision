@@ -200,7 +200,7 @@
       <!-- 24-09-2026 eklendi (Madde 3, saha bulgusu): panelin yakınında
            kısayol — aşağıdaki büyük DURDUR ile AYNI fonksiyonu (emergencyStop,
            step+DC birlikte) çağırıyor, yeni bir endpoint/mantık yok. -->
-      <button id="feed-start-stop-btn" onclick="emergencyStop()">Dur</button>
+      <button data-no-drag-scroll id="feed-start-stop-btn" onclick="emergencyStop()">Dur</button>
     </div>
     <div id="feed-start-result"></div>
   </div>
@@ -218,7 +218,7 @@
       <label>İvme (adım):</label>
       <input id="step-accel" type="number" value="0" min="0">
       <button id="step-at-btn" onclick="sendStep()">Step At</button>
-      <button onclick="stopStep()">Durdur</button>
+      <button data-no-drag-scroll onclick="stopStep()">Durdur</button>
     </div>
     <!-- 15-09-2026: "yeni komut önceki hareketin üzerine yazacak" gibi bir
          kuyruğa alma mekanizması YOK — sadece durum bilgisi, buton zaten
@@ -229,7 +229,7 @@
   <!-- 5) Büyük DURDUR + küçük Alarm Sustur -->
   <div class="panel">
     <div id="stop-row">
-      <button id="stop-btn" onclick="emergencyStop()">DURDUR</button>
+      <button data-no-drag-scroll id="stop-btn" onclick="emergencyStop()">DURDUR</button>
       <button id="mute-btn" onclick="toggleAlarmMute()">🔇 Alarm Sustur</button>
     </div>
     <div id="stop-status"></div>
@@ -246,7 +246,7 @@
     <div class="row-group">
       <button onclick="sendDc('forward', 'Saat Yönü')">Saat Yönü</button>
       <button onclick="sendDc('backward', 'Saat Yönünün Tersi')">Saat Yönünün Tersi</button>
-      <button onclick="sendDc('stop', 'Dur')">Dur</button>
+      <button data-no-drag-scroll onclick="sendDc('stop', 'Dur')">Dur</button>
     </div>
   </div>
 
@@ -259,7 +259,7 @@
       <input id="rot-rpm" type="number" value="10" min="0.1" step="0.1">
       <button onclick="sendRot('cw', 'Saat Yönü', logCmdResult)">Saat Yönü</button>
       <button onclick="sendRot('ccw', 'Saat Yönünün Tersi', logCmdResult)">Saat Yönünün Tersi</button>
-      <button onclick="sendRot('stop', 'Dur', logCmdResult)">Dur</button>
+      <button data-no-drag-scroll onclick="sendRot('stop', 'Dur', logCmdResult)">Dur</button>
     </div>
     <div id="rot-speed-info" style="font-size:12.5px;color:#888;margin-top:6px"></div>
     <div style="font-size:13px;color:#aaa;margin-top:6px">Durum: <span id="rot-live-status">—</span></div>
