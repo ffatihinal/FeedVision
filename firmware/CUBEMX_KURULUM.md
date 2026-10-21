@@ -1,7 +1,7 @@
 # FeedVision Test Firmware — Adım Adım CubeMX Kurulumu
 
 Kart: **NUCLEO-G031K8 (STM32G031K8T6, LQFP32)**
-Amaç: Nema23 (DM556) + 6V DC motor (L9110) + NEMA17 dönüş ekseni (TB6600) + 2× encoder test firmware'i.
+Amaç: Nema23 (DM556) + 6V DC motor (L9110) + NEMA17 dönüş ekseni (TB6600) + yardımcı çift 2× NEMA17 (2. TB6600) + 2× encoder test firmware'i.
 
 ---
 
@@ -24,6 +24,8 @@ konumları ve o pinin destekediği fonksiyonlar:
 | PB9 | 1 | TIM17_CH1 PWM (L9110 IB1, hız kontrolü) | XML: PB9 → `TIM17_CH1`; aynı değişiklik |
 | PA0 | 7 | TIM2_CH1 PWM (dönüş ekseni PUL+, TB6600) | CubeMX db (`STM32G031K(4-6-8)Tx.xml` + `GPIO-STM32G03x_gpio_v1_0_Modes.xml`): PA0 → `TIM2_CH1`, `GPIO_AF2_TIM2`; 05-10-2026'da eklendi, bkz. §13 |
 | PA1 | 8 | GPIO Output (dönüş ekseni DIR+, TB6600) | XML'de GPIO (TIM2_CH2 de olabilir, kullanılmıyor); 05-10-2026 |
+| PB0 | 15 | LPTIM1_OUT, AF5 (yardımcı çift PUL+, 2. TB6600) | CubeMX db (`STM32G031K(4-6-8)Tx.xml` + `GPIO-STM32G03x_gpio_v1_0_Modes.xml`): PB0 → `LPTIM1_OUT`, `GPIO_AF5_LPTIM1`; 21-10-2026'da eklendi, bkz. §14 |
+| PB2 | 17 | GPIO Output (yardımcı çift DIR+, 2. TB6600) | XML'de GPIO (LPTIM1_OUT da olabilir, kullanılmıyor); 21-10-2026 |
 | PA/PB (yok, dahili) | - | TIM14 (step darbe üreteci, base/kesme modu) | TIM16 PWM'e ayrılınca step üreteci TIM14'e taşındı - hiçbir fiziksel pin gerektirmiyor (sadece dahili kesme) |
 
 **Neden PA10 (eskiden PA15):** STEP donanımsal bir timer/AF'ye bağlı değil, düz bit-banged
@@ -294,3 +296,56 @@ Repodaki kod bilerek el yazımı haliyle bırakıldı; CubeIDE'den üretince yuk
 
 **Kablolama, switch ayarları ve pin gerekçesi:** vault'ta `pinout_referans.md` (TB6600 bölümü). Komut/durum
 formatı: `docs/protocol.md` "Dönüş ekseni" bölümü.
+
+---
+
+## 14. Yardımcı çift — LPTIM1 + PB0/PB2 (21-10-2026 eklendi)
+
+Besleme ekseninde NEMA23'ün yanında çubuğa yardım eden 2× NEMA17 (paralel, ortak yön), 2. TB6600. PUL = **PB0 (D6)**,
+DIR = **PB2 (D7)**. DC (PB8/PB9), NEMA23 (PA10/PB1, TIM14) ve dönüş ekseni (PA0/PA1, TIM2) **aynen kalır**.
+Darbeyi donanım üretir (LPTIM1), kesme yok; TIM14/encoder/USART2 zamanlaması etkilenmez.
+
+**Neden LPTIM1:** TIM1/3 encoder, TIM2 rot, TIM14 step, TIM16/17 DC PWM ile dolu (çipte başka genel amaçlı timer yok).
+PB0'a bağlanabilen tek boş sayaç LPTIM1 (PB0 → `LPTIM1_OUT`, AF5).
+
+**Kodu derleyip yüklemek için CubeMX gerekmez** (kod repoda hazır):
+1. CubeIDE'de projeyi aç, `Cmd+S` ile kaydet, **Project → Build All** (0 hata).
+2. Kartı bağla, **Run → Run As → STM32 C/C++ Application**.
+
+CubeMX'te sıfırdan kuruyorsan:
+
+| Ayar | Değer |
+|---|---|
+| PB0 | `LPTIM1_OUT`, User Label `ASSIST_PUL`, speed High |
+| PB2 | `GPIO_Output`, User Label `ASSIST_DIR`, level Low, push-pull, no pull, speed High |
+| LPTIM1 → Mode | Counts internal clock events (`VP_LPTIM1_VS_LPTIM_counterModeInternalClock`) |
+| LPTIM1 → Clock Prescaler | **/64** (PCLK1 64 MHz → 1 MHz, 1 tık = 1 µs) |
+| LPTIM1 → Trigger Source | Software |
+| LPTIM1 → Update Mode | **Update at the end of the current period** (glitch'siz periyot güncellemesi için şart) |
+| RCC → LPTIM1 Clock Selection | **PCLK1** (Clock Configuration sekmesi) |
+| NVIC | LPTIM1 için kesme **gerekmez** (kapalı bırak) |
+
+**Mantık nerede:** `assist_*` fonksiyonları ve sabitleri (`ASSIST_MIN_DELAY_US`, `ASSIST_CW_DIR_LEVEL`, rampa) `main.c`
+`USER CODE 0`/`PD` bloklarında; yeniden üretimde silinmez. LPTIM1 yazmaçları (CFGR/ARR/CMP) `assist_*` içinde doğrudan
+yazılır, HAL LPTIM modülü gerekmez. PB0 açılışta ve durdurmada düz GPIO LOW, `assist` komutunda LPTIM1_OUT'a (AF5)
+geçer; durdurma LPTIM1'i RCC reset ile sıfırlar. Üretimden sonra `main.c`'de `strcmp(cmd, "assist") == 0` aratıp
+yerinde olduğunu kontrol et.
+
+**Generate Code dikkat:** CubeMX `.ioc`'tan üretince `MX_LPTIM1_Init` HAL sürümüne döner (`HAL_LPTIM_Init`, PB0 `HAL_LPTIM_MspInit`'te AF5)
+ve `stm32g0xx_hal_lptim.c/.h` projeye eklenir; bu zararsızdır, `assist_*` kodu her başlatmada CFGR/ARR/CMP'yi baştan yazar
+ve açılışta `assist_halt_pulses()` PB0'ı GPIO LOW'a çeker. Üretimden sonra yeni dosyalar için Project Explorer'da
+**F5 (Refresh)** yap. `.ioc` bu ayarlarla tutarlı (headless CubeMX ile 21-10-2026'da yeniden üretim denendi: `MX_LPTIM1_Init`
+DIV64 + ENDOFPERIOD + PCLK1, PB0 `ASSIST_PUL` AF5, PB2 `ASSIST_DIR` çıktı olarak üretildi).
+
+**Kablolama, switch ayarları ve pin gerekçesi:** vault'ta `pinout_referans.md` (TB6600 bölümü, 2. sürücü). Komut/durum
+formatı: `docs/protocol.md` "Yardımcı çift" bölümü.
+
+**Osiloskopsuz saha doğrulaması (ilk güç verme):**
+1. 2. TB6600'ü ve **tek** NEMA17'yi bağla (ikincisini sonra ekle). `{"cmd":"assist","dir":"cw","delay":2000}` gönder → yanıt `{"ok":"assist"}`,
+   durum satırında `"assist":1,"adelay":2000`, motor yavaş (1/16'da ~9 dev/dk) ve sorunsuz dönmeli.
+2. Hız değiştir: `delay` 1000 → 500 → 2000 (çalışırken tekrar gönder). Motor takılmadan, ses/titreşim sıçraması olmadan geçmeli.
+3. Yön değiştir: `cw` ↔ `ccw` (çalışırken). Önce yavaşlayıp dönmeli; dönmüyor/ters ise `ASSIST_CW_DIR_LEVEL` tek satırını çevir.
+4. `{"cmd":"assist","dir":"stop"}` ve `{"cmd":"stop"}`: motor anında durmalı; durum satırında `"assist":0,"adelay":0`.
+5. Durmuşken PB0 LOW'da kalmalı (motor kaymıyor/adım atmıyor). Ayrıca `step` ve `rot` komutlarını AYNI ANDA çalıştır: NEMA23 ve dönüş ekseni
+   hız/sesinde değişiklik olmamalı, durum satırı akmaya devam etmeli.
+6. İkinci NEMA17'yi paralel ekle, 1-5'i tekrarla. `{"err":"assist timer fault"}` görürsen donanım bayrağı gelmemiştir; bu raporlanacak.

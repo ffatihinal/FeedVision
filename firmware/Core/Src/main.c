@@ -65,6 +65,15 @@
   #define ROT_DIR_Pin         GPIO_PIN_1
   #define ROT_DIR_GPIO_Port   GPIOA
 #endif
+/* Yardımcı çift (2x NEMA17 paralel + 2. TB6600): PUL = PB0 (D6, LPTIM1_OUT AF5), DIR = PB2 (D7, GPIO) */
+#ifndef ASSIST_PUL_Pin
+  #define ASSIST_PUL_Pin       GPIO_PIN_0
+  #define ASSIST_PUL_GPIO_Port GPIOB
+#endif
+#ifndef ASSIST_DIR_Pin
+  #define ASSIST_DIR_Pin       GPIO_PIN_2
+  #define ASSIST_DIR_GPIO_Port GPIOB
+#endif
 
 /* --- Step motor sınırları ------------------------------------------------
  * delay = iki darbe arasındaki toplam süre (mikrosaniye).
@@ -142,6 +151,34 @@
 #define ROT_RAMP_ACCEL_HZ_PER_S     10000U   /* 1 kHz -> 10 kHz yaklaşık 0.9 s */
 #define ROT_RAMP_TICK_MS            10U      /* rampa en sık bu aralıkla güncellenir */
 
+/* --- Yardımcı çift (assist): 2x NEMA17 paralel + 2. TB6600, LPTIM1_OUT donanım PWM ---
+ * Besleme ekseninde NEMA23'e (step) çubuğa yardım eden iki NEMA17. İki motor aynı
+ * yönde döner, tek bir PUL/DIR çifti ikisini birden sürer. Hızı step'ten BAĞIMSIZ,
+ * kendi delay'i vardır (oran/çarpan hesabı yok).
+ * Darbeyi LPTIM1 donanımı üretir (kesmesiz, jitter'sız; TIM14/encoder/USART2'ye etkisi
+ * yok). TIM1/2/3/14/16/17 dolu; PB0'a bağlanabilen tek boş sayaç LPTIM1
+ * (PB0 = LPTIM1_OUT, AF5).
+ * LPTIM1 çekirdek saati PCLK1 = 64 MHz, önbölücü /64 -> 1 MHz (1 tık = 1 us).
+ * ARR = delay-1, çıkış periyodun SONUNDA yüksek: CMP = ARR - delay/2 -> %50 doluluk,
+ * darbe genişliği delay/2 (alt sınırda 50 us; TB6600 için >=10 us güvenli minimum).
+ * Alt/üst sınır rot ile aynı; ARR 16 bit olduğu için 65536 us'nin altında kalmak şart.
+ * Sınırların dışı step/rot komutundaki gibi sessizce kırpılır. */
+#define ASSIST_MIN_DELAY_US     100U
+#define ASSIST_MAX_DELAY_US     60000U
+#define ASSIST_LPTIM_CFGR       (LPTIM_CFGR_PRESC_1 | LPTIM_CFGR_PRESC_2 | LPTIM_CFGR_PRELOAD)  /* /64, değerler periyot sonunda devreye girer */
+#define ASSIST_HW_WAIT_LOOPS    20000U   /* ARROK/CMPOK bayrağı için sınırlı bekleme (başlatmada) */
+#define ASSIST_HW_TIMEOUT_MS    250U     /* bayrak/periyot sonu bu sürede gelmezse eksen durdurulur (en uzun periyot 60 ms) */
+
+/* "cw" = ortak dönüş yönü. DIR seviyesi kablolamaya bağlı, SAHADA DOĞRULA:
+ * ters dönüyorsa SADECE bu satırı GPIO_PIN_RESET yap. */
+#define ASSIST_CW_DIR_LEVEL     GPIO_PIN_SET
+#define ASSIST_CCW_DIR_LEVEL    ((ASSIST_CW_DIR_LEVEL == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET)
+
+/* Rampa rot ile aynı (ayrı ayarlanabilsin diye ayrı tanım). */
+#define ASSIST_RAMP_START_DELAY_US  1000U
+#define ASSIST_RAMP_ACCEL_HZ_PER_S  10000U
+#define ASSIST_RAMP_TICK_MS         10U
+
 
 /* USER CODE END PD */
 
@@ -216,6 +253,23 @@ typedef struct {
 
 static rot_axis_t g_rot = {0, 0, 0, 0, 0, 0, 0};
 
+/* --- Yardımcı çift (assist) durumu ----------------------------------------
+ * rot ile aynı alanlar + LPTIM yazma bayrağı beklemesi. Kesme dokunmaz (LPTIM
+ * kesmesi kapalı) -> volatile gerekmez. */
+typedef struct {
+  uint8_t  state;            /* komut edilen yön: 0=dur, 1=cw, 2=ccw (durumdaki "assist") */
+  uint8_t  phys_state;       /* DIR pininin şu an gerçekten ayarlı olduğu yön (0=henüz ayarlanmadı) */
+  uint8_t  pulsing;          /* 1 = LPTIM1 çalışıyor, PB0 darbe üretiyor */
+  uint8_t  reversing;        /* 1 = yön değişimi için START hızına yavaşlıyor */
+  uint8_t  reg_pending;      /* 1 = ARR/CMP yazıldı, ARROK+CMPOK bayrakları bekleniyor */
+  uint32_t target_delay_us;  /* komut edilen (kırpılmış) hedef delay (durumdaki "adelay") */
+  uint32_t cur_delay_us;     /* o anki gerçek darbe periyodu */
+  uint32_t last_ramp_ms;     /* rampanın son güncellendiği HAL_GetTick */
+  uint32_t reg_write_ms;     /* ARR/CMP son yazıldığı HAL_GetTick (zaman aşımı için) */
+} assist_axis_t;
+
+static assist_axis_t g_assist = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+
 /* --- Seri port alım tamponları ------------------------------------------ */
 static uint8_t           g_rx_byte;                    /* kesmede tek tek gelen karakter */
 static char               g_rx_line[RX_LINE_MAX];      /* birikmekte olan satır */
@@ -243,6 +297,7 @@ static uint16_t          g_led_tick = 0;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
+static void MX_LPTIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM14_Init(void);
@@ -274,6 +329,18 @@ static void     rot_halt_pulses(void);                                          
 static void     rot_stop(void);                                                     // dönüş eksenini anında durdurur (stop/reset/bye de bunu çağırır)
 static void     rot_command(uint8_t dir_state, uint32_t delay_us);                  // "rot" komutu: başlat / hız değiştir / yön değiştir
 static void     rot_service(void);                                                  // ana döngüden periyodik çağrılır: rampayı ilerletir
+
+/* --- Yardımcı çift (2x NEMA17 + 2. TB6600, LPTIM1) fonksiyonları --- */
+static uint32_t ramp_next_delay(uint32_t cur_us, uint32_t goal_us, uint32_t dt_ms, uint32_t accel_hz_per_s);  // rampada bir sonraki darbe periyodu (saf fonksiyon, rot ve assist ortak)
+static void     assist_pul_gpio_low(void);                                          // PB0'ı GPIO çıkışı yapıp anında LOW'a çeker
+static void     assist_pul_af(void);                                                // PB0'ı LPTIM1_OUT (AF5) yapar
+static void     assist_write_delay(uint32_t delay_us);                              // LPTIM1 ARR/CMP'yi delay_us'e göre yazar
+static uint8_t  assist_wait_flags(uint32_t mask);                                   // ISR bayraklarını sınırlı süre bekler (1=geldi)
+static void     assist_halt_pulses(void);                                           // PB0 LOW + LPTIM1 reset (durum alanlarına dokunmaz)
+static void     assist_stop(void);                                                  // yardımcı çifti anında durdurur (stop/reset/bye de bunu çağırır)
+static uint8_t  assist_begin(uint8_t dir_state);                                    // DIR'i ayarlayıp darbeyi rampa başlangıç hızıyla başlatır (0=donanım hatası)
+static uint8_t  assist_command(uint8_t dir_state, uint32_t delay_us);               // "assist" komutu: başlat / hız değiştir / yön değiştir (0=donanım hatası)
+static void     assist_service(void);                                               // ana döngüden periyodik çağrılır: rampayı ilerletir
 
 /* --- Seri port (UART) fonksiyonları --- */
 static void     uart_send(const char *s);              // bir metni Mac'e (seri port üzerinden) gönderir
@@ -507,7 +574,7 @@ static void dc_set(uint8_t state, uint8_t speed_pct)
 /* Rampada bir sonraki darbe periyodu. Sabit İVME frekans domaininde: f = 1e6/delay,
  * f += ACCEL * dt, yeni delay = 1e6/f. goal'a asla taşmaz. Saf fonksiyon (donanıma
  * dokunmaz). Her çağrıda en az 1 us ilerler, yani sonlu adımda goal'a ulaşır. */
-static uint32_t rot_next_delay(uint32_t cur_us, uint32_t goal_us, uint32_t dt_ms)
+static uint32_t ramp_next_delay(uint32_t cur_us, uint32_t goal_us, uint32_t dt_ms, uint32_t accel_hz_per_s)
 {
   uint32_t inc;
   uint32_t freq;
@@ -517,7 +584,7 @@ static uint32_t rot_next_delay(uint32_t cur_us, uint32_t goal_us, uint32_t dt_ms
     return goal_us;
   }
 
-  inc  = (ROT_RAMP_ACCEL_HZ_PER_S * dt_ms) / 1000U;   /* bu aralıkta eklenecek frekans (Hz) */
+  inc  = (accel_hz_per_s * dt_ms) / 1000U;            /* bu aralıkta eklenecek frekans (Hz) */
   freq = 1000000U / cur_us;
 
   if (goal_us < cur_us) {
@@ -536,6 +603,11 @@ static uint32_t rot_next_delay(uint32_t cur_us, uint32_t goal_us, uint32_t dt_ms
     }
   }
   return next;
+}
+
+static uint32_t rot_next_delay(uint32_t cur_us, uint32_t goal_us, uint32_t dt_ms)
+{
+  return ramp_next_delay(cur_us, goal_us, dt_ms, ROT_RAMP_ACCEL_HZ_PER_S);
 }
 
 /* Darbe periyodunu delay_us yapar: ARR=delay-1, CCR=delay/2 (%50). ARR preload
@@ -648,6 +720,221 @@ static void rot_service(void)
 
 
 /* ==========================================================================
+ *  YARDIMCI ÇİFT (assist)  —  2x NEMA17 paralel + 2. TB6600, PUL = LPTIM1_OUT (PB0)
+ *  DIR = PB2 (GPIO). ENA bağlanmaz (rot ile aynı).
+ *  Mantık rot ile aynı; fark: PWM TIM2 yerine LPTIM1, durdurma "CCR=0" yerine
+ *  "PB0'ı GPIO LOW yap + LPTIM1'i RCC reset ile sıfırla" (LPTIM'de %0 doluluk yok).
+ * ========================================================================== */
+
+/* PB0'ı düz GPIO çıkışı yapıp LOW'a çeker. ODR önce 0 yapılır, sonra mod değişir:
+ * AF -> GPIO geçişinde pin hiç yükselmez (stop anında LOW garantisi LPTIM'in boştaki
+ * çıkış seviyesine bağlı değil). */
+static void assist_pul_gpio_low(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+
+  HAL_GPIO_WritePin(ASSIST_PUL_GPIO_Port, ASSIST_PUL_Pin, GPIO_PIN_RESET);
+  gpio.Pin   = ASSIST_PUL_Pin;
+  gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+  gpio.Pull  = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(ASSIST_PUL_GPIO_Port, &gpio);
+}
+
+/* PB0'ı LPTIM1_OUT'a (AF5) verir. Yalnızca LPTIM1 periyot başında (çıkış LOW) iken çağrılır. */
+static void assist_pul_af(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+
+  gpio.Pin       = ASSIST_PUL_Pin;
+  gpio.Mode      = GPIO_MODE_AF_PP;
+  gpio.Pull      = GPIO_NOPULL;
+  gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
+  gpio.Alternate = GPIO_AF5_LPTIM1;
+  HAL_GPIO_Init(ASSIST_PUL_GPIO_Port, &gpio);
+}
+
+/* Periyodu delay_us yapar: ARR=delay-1, CMP=ARR-delay/2 (çıkış CMP'den ARR'a kadar
+ * yüksek = delay/2 tık). CMP < ARR her zaman sağlanır (delay >= 2). Hem ARR hem CMP
+ * PRELOAD ile periyot sonunda birlikte devreye girer, yarım darbe/glitch oluşmaz.
+ * Aynı yazmacı ARROK/CMPOK gelmeden tekrar yazmak "unpredictable" (ST LL notu). */
+static void assist_write_delay(uint32_t delay_us)
+{
+  uint32_t arr = delay_us - 1U;
+
+  LPTIM1->ARR = arr;
+  LPTIM1->CMP = arr - (delay_us / 2U);
+}
+
+/* ISR'daki bayrakların (mask'in hepsi) gelmesini sınırlı bekler. 1 = geldi, 0 = zaman aşımı. */
+static uint8_t assist_wait_flags(uint32_t mask)
+{
+  uint32_t loops = ASSIST_HW_WAIT_LOOPS;
+
+  while ((LPTIM1->ISR & mask) != mask) {
+    if (loops-- == 0U) {
+      return 0U;
+    }
+  }
+  return 1U;
+}
+
+/* Darbeyi anında keser: önce PB0 GPIO LOW, sonra LPTIM1 RCC reset (tüm yazmaçlar
+ * varsayılana, sayaç durur). Yeniden başlatmada CFGR/ARR/CMP baştan yazılır. */
+static void assist_halt_pulses(void)
+{
+  assist_pul_gpio_low();
+  __HAL_RCC_LPTIM1_FORCE_RESET();
+  __HAL_RCC_LPTIM1_RELEASE_RESET();
+  g_assist.pulsing     = 0U;
+  g_assist.reversing   = 0U;
+  g_assist.reg_pending = 0U;
+}
+
+static void assist_stop(void)
+{
+  assist_halt_pulses();
+  g_assist.state           = 0U;
+  g_assist.target_delay_us = 0U;
+  g_assist.cur_delay_us    = 0U;
+}
+
+/* Darbeleri durmuş halden başlatır. Önce gerekiyorsa DIR'i çevirir (1 ms bekler, rot
+ * ile aynı). Sonra LPTIM1'i kurar: CFGR (devre dışıyken) -> ENABLE -> ARR/CMP (ENABLE'dan
+ * SONRA yazılır) -> ARROK/CMPOK -> sürekli sayım başlat. PB0 ilk periyot sonuna kadar
+ * GPIO LOW kalır; ARRM (periyot sonu) görülünce sayaç ~0'dadır ve çıkış LOW'dur, bu
+ * anda AF'e geçmek glitch'siz (yarım darbe yok). Hedef START'tan yavaşsa doğrudan hedefte
+ * başlar. Dönüş 0 = donanım bayrağı gelmedi (eksen durdurulmuş halde bırakılır). */
+static uint8_t assist_begin(uint8_t dir_state)
+{
+  uint32_t start_us = (g_assist.target_delay_us > ASSIST_RAMP_START_DELAY_US)
+                      ? g_assist.target_delay_us : ASSIST_RAMP_START_DELAY_US;
+  uint32_t t0;
+
+  if (g_assist.phys_state != dir_state) {
+    HAL_GPIO_WritePin(ASSIST_DIR_GPIO_Port, ASSIST_DIR_Pin,
+                      (dir_state == 1U) ? ASSIST_CW_DIR_LEVEL : ASSIST_CCW_DIR_LEVEL);
+    HAL_Delay(1);
+    g_assist.phys_state = dir_state;
+  }
+
+  assist_halt_pulses();                      /* temiz başlangıç: PB0 LOW, LPTIM1 varsayılan */
+
+  LPTIM1->CFGR = ASSIST_LPTIM_CFGR;
+  LPTIM1->CR   = LPTIM_CR_ENABLE;
+  LPTIM1->ICR  = LPTIM_ICR_ARROKCF | LPTIM_ICR_CMPOKCF | LPTIM_ICR_ARRMCF;
+  assist_write_delay(start_us);
+  if (!assist_wait_flags(LPTIM_ISR_ARROK | LPTIM_ISR_CMPOK)) {
+    assist_halt_pulses();
+    return 0U;
+  }
+  LPTIM1->ICR = LPTIM_ICR_ARROKCF | LPTIM_ICR_CMPOKCF | LPTIM_ICR_ARRMCF;
+  LPTIM1->CR |= LPTIM_CR_CNTSTRT;
+
+  /* İlk periyot sonunu bekle (sıkı döngü: gecikme birkaç us, CMP en az 49 tık sonra) */
+  t0 = HAL_GetTick();
+  while ((LPTIM1->ISR & LPTIM_ISR_ARRM) == 0U) {
+    if ((HAL_GetTick() - t0) > ASSIST_HW_TIMEOUT_MS) {
+      assist_halt_pulses();
+      return 0U;
+    }
+  }
+  LPTIM1->ICR = LPTIM_ICR_ARRMCF;
+  assist_pul_af();
+
+  g_assist.cur_delay_us = start_us;
+  g_assist.reversing    = 0U;
+  g_assist.pulsing      = 1U;
+  g_assist.last_ramp_ms = HAL_GetTick();
+  return 1U;
+}
+
+/* "assist" komutunun çekirdeği. dir_state: 0=dur, 1=cw, 2=ccw. delay_us hedef hız
+ * (kırpma burada). Çalışırken tekrar gelen komut = hız/yön güncellemesi (rot ile aynı). */
+static uint8_t assist_command(uint8_t dir_state, uint32_t delay_us)
+{
+  if (dir_state == 0U) {
+    assist_stop();
+    return 1U;
+  }
+
+  if (delay_us < ASSIST_MIN_DELAY_US) delay_us = ASSIST_MIN_DELAY_US;
+  if (delay_us > ASSIST_MAX_DELAY_US) delay_us = ASSIST_MAX_DELAY_US;
+
+  g_assist.state           = dir_state;
+  g_assist.target_delay_us = delay_us;
+
+  if (!g_assist.pulsing) {
+    if (!assist_begin(dir_state)) {          /* duruyordu: rampa başlangıcından kalk */
+      assist_stop();
+      return 0U;
+    }
+  } else if (dir_state == g_assist.phys_state) {
+    g_assist.reversing = 0U;                 /* aynı yön: sadece yeni hedefe rampa */
+  } else if (g_assist.cur_delay_us >= ASSIST_RAMP_START_DELAY_US) {
+    assist_halt_pulses();                    /* zaten START'tan yavaş: beklemeden çevir */
+    if (!assist_begin(dir_state)) {
+      assist_stop();
+      return 0U;
+    }
+  } else {
+    g_assist.reversing = 1U;                 /* hızlı dönüyor: önce START'a yavaşla */
+  }
+  return 1U;
+}
+
+/* Ana döngüden her turda çağrılır; ASSIST_RAMP_TICK_MS'de bir rampayı ilerletir (rot_service
+ * ile aynı mantık). Fark: önceki ARR/CMP yazımının ARROK+CMPOK bayrakları gelmeden yeni yazım
+ * yapılmaz (o tur atlanır); bayraklar ASSIST_HW_TIMEOUT_MS içinde gelmezse eksen durdurulur. */
+static void assist_service(void)
+{
+  uint32_t now = HAL_GetTick();
+  uint32_t dt;
+  uint32_t goal;
+  const uint32_t both = LPTIM_ISR_ARROK | LPTIM_ISR_CMPOK;
+
+  if (!g_assist.pulsing) {
+    return;
+  }
+
+  if (g_assist.reg_pending) {
+    if ((LPTIM1->ISR & both) == both) {
+      LPTIM1->ICR = LPTIM_ICR_ARROKCF | LPTIM_ICR_CMPOKCF;
+      g_assist.reg_pending = 0U;
+    } else {
+      if ((now - g_assist.reg_write_ms) > ASSIST_HW_TIMEOUT_MS) {
+        assist_stop();                       /* donanım yanıt vermiyor: güvenli tarafa */
+      }
+      return;
+    }
+  }
+
+  dt = now - g_assist.last_ramp_ms;
+  if (dt < ASSIST_RAMP_TICK_MS) {
+    return;
+  }
+  g_assist.last_ramp_ms = now;
+  if (dt > 100U) dt = 100U;                  /* uzun duraksamada tek seferde büyük sıçrama olmasın */
+
+  goal = g_assist.reversing ? ASSIST_RAMP_START_DELAY_US : g_assist.target_delay_us;
+
+  if (g_assist.cur_delay_us != goal) {
+    g_assist.cur_delay_us = ramp_next_delay(g_assist.cur_delay_us, goal, dt, ASSIST_RAMP_ACCEL_HZ_PER_S);
+    assist_write_delay(g_assist.cur_delay_us);
+    g_assist.reg_pending  = 1U;
+    g_assist.reg_write_ms = now;
+  }
+
+  if (g_assist.reversing && g_assist.cur_delay_us >= ASSIST_RAMP_START_DELAY_US) {
+    assist_halt_pulses();                    /* START hızına indi: DIR'i çevir, yeniden kalk */
+    if (!assist_begin(g_assist.state)) {
+      assist_stop();
+    }
+  }
+}
+
+
+/* ==========================================================================
  *  JSON  —  kütüphanesiz, sadece ihtiyacımız olan kadar basit ayrıştırıcı
  * ========================================================================== */
 
@@ -705,12 +992,12 @@ static void uart_send(const char *s)
 
 static void send_status(void)
 {
-  char buf[200];   /* en kötü durum (tüm sayılar maksimum basamak) 167 karakter */
+  char buf[240];   /* en kötü durum (tüm sayılar maksimum basamak) 193 karakter */
 
   snprintf(buf, sizeof(buf),
            "{\"t\":%lu,\"e1\":%ld,\"e2\":%ld,\"um1\":%ld,\"um2\":%ld,"
            "\"remaining\":%lu,\"running\":%u,\"dc\":%u,\"dcSpeed\":%u,"
-           "\"rot\":%u,\"rdelay\":%lu}\r\n",
+           "\"rot\":%u,\"rdelay\":%lu,\"assist\":%u,\"adelay\":%lu}\r\n",
            (unsigned long)HAL_GetTick(),
            (long)g_enc1.total,
            (long)g_enc2.total,
@@ -721,7 +1008,9 @@ static void send_status(void)
            (unsigned)g_dc_state,
            (unsigned)g_dc_speed,
            (unsigned)g_rot.state,
-           (unsigned long)((g_rot.state == 0U) ? 0U : g_rot.target_delay_us));
+           (unsigned long)((g_rot.state == 0U) ? 0U : g_rot.target_delay_us),
+           (unsigned)g_assist.state,
+           (unsigned long)((g_assist.state == 0U) ? 0U : g_assist.target_delay_us));
 
   uart_send(buf);
 }
@@ -764,6 +1053,7 @@ static void process_command(const char *line)
   else if (strcmp(cmd, "stop") == 0) {
     step_stop();
     rot_stop();      /* dönüş ekseni de durur (sözleşme: stop/reset/bye rot'u keser) */
+    assist_stop();   /* yardımcı çift de durur (aynı sözleşme) */
     uart_send("{\"ok\":\"stop\"}\r\n");
   }
 
@@ -815,9 +1105,41 @@ static void process_command(const char *line)
     uart_send("{\"ok\":\"rot\"}\r\n");
   }
 
+  /* ---- Yardımcı çift (2x NEMA17 + 2. TB6600): sürekli döndür / hız-yön güncelle / durdur ----
+   * {"cmd":"assist","dir":"cw"|"ccw","delay":<us>} ve {"cmd":"assist","dir":"stop"}.
+   * rot ile birebir aynı sözleşme (delay kırpma, invalid dir = durdur + hata). Ek hata:
+   * LPTIM1 yazma bayrağı gelmezse eksen durdurulur ve "assist timer fault" döner. */
+  else if (strcmp(cmd, "assist") == 0) {
+    if (!json_read_str(line, "dir", dir_str, sizeof(dir_str))) {
+      uart_send("{\"err\":\"missing dir field\"}\r\n");
+      return;
+    }
+
+    if (strcmp(dir_str, "stop") == 0) {
+      assist_stop();
+    } else if (strcmp(dir_str, "cw") == 0 || strcmp(dir_str, "ccw") == 0) {
+      if (!json_read_int(line, "delay", &delay_i)) {
+        uart_send("{\"err\":\"missing delay field\"}\r\n");
+        return;
+      }
+      /* uint32_t'ye çevirmeden ÖNCE kırp: negatif delay sarıp dev bir sayıya dönmesin */
+      if (delay_i < (int32_t)ASSIST_MIN_DELAY_US) delay_i = (int32_t)ASSIST_MIN_DELAY_US;
+      if (!assist_command((strcmp(dir_str, "cw") == 0) ? 1U : 2U, (uint32_t)delay_i)) {
+        uart_send("{\"err\":\"assist timer fault\"}\r\n");
+        return;
+      }
+    } else {
+      assist_stop();
+      uart_send("{\"err\":\"invalid dir\"}\r\n");
+      return;
+    }
+    uart_send("{\"ok\":\"assist\"}\r\n");
+  }
+
   /* ---- Encoder sayaçlarını sıfırla ---- */
   else if (strcmp(cmd, "reset") == 0) {
     rot_stop();      /* sözleşme: reset de dönüş eksenini durdurur */
+    assist_stop();   /* ... ve yardımcı çifti */
     encoder_reset(&g_enc1);
     encoder_reset(&g_enc2);
     uart_send("{\"ok\":\"reset\"}\r\n");
@@ -834,6 +1156,7 @@ static void process_command(const char *line)
    * her zaman işlenir. */
   else if (strcmp(cmd, "bye") == 0) {
     rot_stop();      /* host koptu: dönüş ekseni kontrolsüz dönmesin */
+    assist_stop();   /* ... yardımcı çift de */
     g_host_confirmed = 0;
     uart_send("{\"ok\":\"bye\"}\r\n");
   }
@@ -875,6 +1198,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM1_Init();
+  MX_LPTIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM14_Init();
@@ -887,6 +1211,7 @@ int main(void)
   HAL_GPIO_WritePin(STEP_GPIO_Port,   STEP_Pin,   GPIO_PIN_RESET);
   HAL_GPIO_WritePin(DIR_GPIO_Port,    DIR_Pin,    GPIO_PIN_RESET);
   HAL_GPIO_WritePin(ROT_DIR_GPIO_Port, ROT_DIR_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(ASSIST_DIR_GPIO_Port, ASSIST_DIR_Pin, GPIO_PIN_RESET);
 
   /* DC motor PWM kanallarını 0% duty (dur) ile başlat - PB8/PB9 artık plain
    * GPIO değil, TIM16_CH1/TIM17_CH1 AF-PWM modunda (bkz. MX_TIM16/17_Init). */
@@ -899,6 +1224,10 @@ int main(void)
    * darbe ancak "rot" komutuyla çıkar. Sayaç sürekli çalışır, durdurma = CCR=0. */
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0U);
+
+  /* Yardımcı çift PUL (LPTIM1_OUT/PB0): açılışta PB0 GPIO LOW, LPTIM1 sıfır (kapalı);
+   * darbe ancak "assist" komutuyla çıkar. */
+  assist_halt_pulses();
 
   /* İki encoder'ın donanım sayacını başlat */
   encoder_init(&g_enc1, &htim1);   /* Encoder 1 - motorlu tekerlek  (PA8 / PA9) */
@@ -932,6 +1261,9 @@ int main(void)
 
     /* --- 1b) Dönüş ekseni rampasını ilerlet (çalışmıyorsa hemen döner) --- */
     rot_service();
+
+    /* --- 1c) Yardımcı çift rampasını ilerlet (çalışmıyorsa hemen döner) --- */
+    assist_service();
 
     /* --- 2) Her 50 ms'de bir encoder'ları oku ve durumu PC'ye gönder --- */
     if ((HAL_GetTick() - g_last_status_ms) >= STATUS_PERIOD_MS) {
@@ -1058,6 +1390,19 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 2 */
 
+}
+
+/**
+  * @brief LPTIM1 Initialization Function - yardımcı çift PUL, PB0 (LPTIM1_OUT, AF5).
+  *        Sadece saat kaynağını (PCLK1 = 64 MHz) seçer ve saati açar. CFGR/ARR/CMP ve
+  *        PB0 modu her başlatmada assist_begin() içinde yazılır (durdurma = RCC reset).
+  * @param None
+  * @retval None
+  */
+static void MX_LPTIM1_Init(void)
+{
+  __HAL_RCC_LPTIM1_CONFIG(RCC_LPTIM1CLKSOURCE_PCLK1);
+  __HAL_RCC_LPTIM1_CLK_ENABLE();
 }
 
 /**
@@ -1310,6 +1655,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(ROT_DIR_GPIO_Port, ROT_DIR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, ASSIST_PUL_Pin|ASSIST_DIR_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
@@ -1331,6 +1679,15 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(ROT_DIR_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : ASSIST_PUL_Pin ASSIST_DIR_Pin (yardımcı çift, 2. TB6600).
+   * PB0 açılışta düz GPIO LOW; "assist" komutunda assist_pul_af() ile LPTIM1_OUT'a (AF5)
+   * geçer, durdurmada tekrar GPIO LOW. */
+  GPIO_InitStruct.Pin = ASSIST_PUL_Pin|ASSIST_DIR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pin : T_NRST_Pin */
   GPIO_InitStruct.Pin = T_NRST_Pin;

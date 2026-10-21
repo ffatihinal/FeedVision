@@ -10,7 +10,7 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 |---|---|
 | `{"cmd":"step","dir":1,"delay":500,"steps":2000}` | 2000 step at, darbe periyodu 500 µs, yön 1 |
 | `{"cmd":"step","dir":1,"delay":500,"steps":2000,"accel":300}` | Aynısı ama ilk 300 ve son 300 adımda hızlanıp yavaşlıyor (rampa) — bkz. aşağıda |
-| `{"cmd":"stop"}` | Step motoru ve dönüş eksenini (rot) anında durdur |
+| `{"cmd":"stop"}` | Step motoru, dönüş eksenini (rot) ve yardımcı çifti (assist) anında durdur |
 | `{"cmd":"dc","dir":"forward"}` | DC motor ileri, tam hız (speed verilmezse varsayılan %100) |
 | `{"cmd":"dc","dir":"forward","speed":30}` | DC motor ileri, %30 hız (PWM duty) |
 | `{"cmd":"dc","dir":"backward","speed":30}` | DC motor geri, %30 hız |
@@ -18,14 +18,17 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 | `{"cmd":"rot","dir":"cw","delay":500}` | Dönüş ekseni (NEMA17 + TB6600) saat yönünde SÜREKLİ döner, darbe periyodu 500 µs (bkz. aşağıda) |
 | `{"cmd":"rot","dir":"ccw","delay":500}` | Aynısı saat yönünün tersine |
 | `{"cmd":"rot","dir":"stop"}` | Dönüş eksenini durdur |
-| `{"cmd":"reset"}` | İki encoder sayacını sıfırla + dönüş eksenini durdur |
+| `{"cmd":"assist","dir":"cw","delay":2000}` | Yardımcı çift (2× NEMA17 paralel + 2. TB6600) ortak yönde SÜREKLİ döner, darbe periyodu 2000 µs (bkz. aşağıda) |
+| `{"cmd":"assist","dir":"ccw","delay":2000}` | Aynısı ters yönde |
+| `{"cmd":"assist","dir":"stop"}` | Yardımcı çifti durdur |
+| `{"cmd":"reset"}` | İki encoder sayacını sıfırla + dönüş eksenini ve yardımcı çifti durdur |
 | `{"cmd":"ping"}` | Bağlantı testi |
-| `{"cmd":"bye"}` | Host bağlantıyı kapattı: dönüş eksenini durdurur, LED yavaş moda döner (bkz. aşağıda) |
+| `{"cmd":"bye"}` | Host bağlantıyı kapattı: dönüş eksenini ve yardımcı çifti durdurur, LED yavaş moda döner (bkz. aşağıda) |
 
 ## STM32 → Pi/PC (durum, saniyede ~20 kez)
 
 ```json
-{"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"remaining":0,"running":0,"dc":0,"dcSpeed":0,"rot":0,"rdelay":0}
+{"t":12345,"e1":1834,"e2":1801,"um1":96031,"um2":94303,"remaining":0,"running":0,"dc":0,"dcSpeed":0,"rot":0,"rdelay":0,"assist":0,"adelay":0}
 ```
 
 | Alan          | Anlamı                                                     |
@@ -39,6 +42,8 @@ Kaynak karar: `yazilim_mimarisi.md` Bölüm 3 (Azobex WP1 vault) + `firmware/CUB
 | `dcSpeed`     | DC motorun o anki PWM duty'si, 0-100 (dur ise 0)           |
 | `rot`         | Dönüş ekseni, KOMUT EDİLEN yön: 0 = dur, 1 = cw, 2 = ccw   |
 | `rdelay`      | Komut edilen (kırpılmış) hedef delay µs (dur ise 0). Rampa sırasındaki anlık hız burada görünmez |
+| `assist`      | Yardımcı çift, KOMUT EDİLEN yön: 0 = dur, 1 = cw, 2 = ccw  |
+| `adelay`      | Yardımcı çiftin komut edilen (kırpılmış) hedef delay µs'si (dur ise 0), `rdelay` ile aynı mantık |
 
 ## DC motor PWM (22-09-2026 eklendi, backlog #109)
 
@@ -94,6 +99,32 @@ edebildiği tepe hız (yük, 24 V besleme, TB6600 akım ayarı) bundan düşükt
 `darbe_per_tur` TB6600 üzerindeki S1-S3 DIP ayarıyla birebir aynı olmalı, yoksa hız yanlış çıkar.
 
 Gerçek üretim protokolü (Pi tarafı `feedvision-core`) bu test protokolünü temel alacak, komut seti büyüyecek (SE ekibinin ICD'siyle uyumlu hale gelecek).
+
+## Yardımcı çift `assist` (21-10-2026 eklendi)
+
+Besleme ekseninde NEMA23'ün (`step`) yanında çubuğa yardım eden **2× NEMA17**. İki motor paralel
+bağlı, **2. TB6600**'ya tek PUL/DIR çiftiyle gider ve **aynı yönde** döner; firmware yalnızca tek
+PUL/DIR üretir. Hızı `step`'ten **bağımsızdır**: kendi `delay`'i vardır, oran/çarpan hesabı yoktur.
+`rot` ile aynı sözleşme (sürekli, mesafesiz, darbe sayılmaz); `step`/`dc`/`rot`'a dokunmaz.
+Darbeyi LPTIM1 donanımı üretir (PB0 = PUL, %50 doluluk), DIR = PB2.
+
+- `delay` = iki darbe arası süre (µs). `dir` = `cw` | `ccw` | `stop`. `cw` = iki motorun ortak dönüş yönü
+  (DIR pin seviyesi eşlemesi `ASSIST_CW_DIR_LEVEL`, main.c; sahada doğrulanır).
+- Yanıt: `{"ok":"assist"}`; `dir` yoksa `{"err":"missing dir field"}`, `cw`/`ccw`'de `delay` yoksa
+  `{"err":"missing delay field"}`, bilinmeyen `dir` `{"err":"invalid dir"}` (eksen durdurulur).
+  Ek: LPTIM1 yazma bayrağı gelmezse `{"err":"assist timer fault"}` (eksen durdurulur, `assist:0`).
+- Çalışırken tekrar gönderilen `assist` = hız/yön güncellemesi (yeni hedefe rampa ile geçer).
+- **Limitler (firmware sabiti, `rot` ile aynı):** `ASSIST_MIN_DELAY_US = 100` (10 kHz), `ASSIST_MAX_DELAY_US = 60000`.
+  Aralık dışı `delay` sessizce kırpılır, hata dönmez. Darbe genişliği `delay/2` (alt sınırda 50 µs).
+- **Rampa:** `rot` ile aynı (`ASSIST_RAMP_START_DELAY_US = 1000`, `ASSIST_RAMP_ACCEL_HZ_PER_S = 10000`;
+  1 kHz'ten 10 kHz'e ~0.76 s). Yön değişiminde önce 1 kHz'e yavaşlar, DIR çevrilir, tekrar hedefe çıkar.
+  Hedef 1000 µs'den yavaşsa rampa yok. Durmuş halden başlatma ilk periyodun sonunu bekler
+  (`max(hedef delay, 1000 µs)`, en çok 60 ms); bu sürede ana döngü durur, komut yanıtı ve durum satırı o kadar gecikir.
+  Motorlar, encoder sayımı ve `step` darbeleri etkilenmez.
+- **Durdurma ANINDA:** `assist` `dir:stop`, `stop`, `reset`, `bye` rampasız keser.
+- Status `assist` / `adelay` alanları komut edilen değerleri gösterir (`rot`/`rdelay` mantığıyla aynı).
+- RPM → delay çevrimi `rot` ile aynı formül (RPi tarafında hesaplanır); `darbe_per_tur` 2. TB6600'ün
+  S1-S3 DIP ayarıyla birebir aynı olmalı.
 
 ## `bye` — bağlantı koptuğunda LED'i yavaş moda döndür (22-09-2026 eklendi)
 

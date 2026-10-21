@@ -63,6 +63,8 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 #define ROT_PUL_GPIO_Port GPIOA
 #define ROT_DIR_Pin GPIO_PIN_1
 #define ROT_DIR_GPIO_Port GPIOA
+#define ASSIST_PUL_Pin GPIO_PIN_0
+#define ASSIST_PUL_GPIO_Port GPIOB
 #define DC_IB1_Pin GPIO_PIN_9
 #define DC_IB1_GPIO_Port GPIOB
 #define T_NRST_Pin GPIO_PIN_2
@@ -73,6 +75,8 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 #define T_VCP_RX_GPIO_Port GPIOA
 #define DIR_Pin GPIO_PIN_1
 #define DIR_GPIO_Port GPIOB
+#define ASSIST_DIR_Pin GPIO_PIN_2
+#define ASSIST_DIR_GPIO_Port GPIOB
 #define LD3_Pin GPIO_PIN_6
 #define LD3_GPIO_Port GPIOC
 #define STEP_Pin GPIO_PIN_10
