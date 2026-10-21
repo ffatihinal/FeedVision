@@ -31,8 +31,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 import psutil
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Literal
 
@@ -49,6 +50,7 @@ import vision_raw_log
 import vision_settings_store
 from feed_totalizer import totalizer as feed_totalizer
 from image_preprocess import apply_clahe
+from motion_monitor import motion_monitor
 from rule_engine import evaluate_rules
 from screen_calibration import (
     compute_warp_matrix,
@@ -59,7 +61,7 @@ from screen_calibration import (
     warp_roi_rect,
 )
 from screen_reader import TESSEROCR_AVAILABLE, average_color_hsv, average_color_rgb, crop_roi, crop_roi_quad, read_roi
-from serial_bridge import bridge
+from serial_bridge import bridge, make_assist_command
 from vision import CAMERA_NUMS, STREAM_SIZE, vision
 
 VALID_CAM_IDS = set(CAMERA_NUMS)  # {"chamber", "ui_screen"}
@@ -102,9 +104,15 @@ _vision_raw_log_task: "asyncio.Task | None" = None
 # bağımsız DC testini etkilemesin diye SADECE bu endpoint'in kendi
 # oturumuna özel bir task, DC'nin genel durumuna dayanmıyor.
 _sync_watcher_task: "asyncio.Task | None" = None
-# Mevcut watcher'ın durdurmakla yükümlü olduğu dönüş motorları ("dc"/"rot") —
-# yeni feed-start eski watcher'ı iptal ederken bu küme yeni watcher'a devredilir.
+# Mevcut watcher'ın durdurmakla yükümlü olduğu yardımcı motorlar
+# ("dc"/"rot"/"assist") — yeni feed-start eski watcher'ı iptal ederken bu küme
+# yeni watcher'a devredilir.
 _sync_watcher_motors: set[str] = set()
+
+# Hareket durum lambası (21-10-2026): STM32 durum akışını ~10 Hz örnekleyip
+# encoder hareketini izleyen arka plan görevi (bkz. motion_monitor.py).
+MOTION_MONITOR_INTERVAL_S = 0.1
+_motion_monitor_task: "asyncio.Task | None" = None
 
 # 24-09-2026 saha bugı: /motor/feed-start SENKRON bir endpoint (def, async def
 # değil) — FastAPI/Starlette onu bir THREAD POOL işçi thread'inde çalıştırır
@@ -245,7 +253,7 @@ SERVER_START_TIME = time.time()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _rule_engine_task, _journal_task, _vision_raw_log_task, _main_event_loop
+    global _rule_engine_task, _journal_task, _vision_raw_log_task, _main_event_loop, _motion_monitor_task
     # /motor/feed-start (senkron endpoint, threadpool'da çalışır) bu ÇALIŞAN
     # loop referansına ihtiyaç duyar (bkz. _main_event_loop tanımı yukarıda) —
     # lifespan() kesinlikle loop'un kendi thread'inde çalıştığı için burada
@@ -260,7 +268,9 @@ async def lifespan(app: FastAPI):
     _rule_engine_task = asyncio.create_task(_rule_engine_loop())
     _journal_task = asyncio.create_task(_journal_loop())
     _vision_raw_log_task = asyncio.create_task(_vision_raw_log_loop())
+    _motion_monitor_task = asyncio.create_task(_motion_monitor_loop())
     yield
+    _motion_monitor_task.cancel()
     _rule_engine_task.cancel()
     _journal_task.cancel()
     _vision_raw_log_task.cancel()
@@ -270,6 +280,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="FeedVision RPi Core", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    """422 gövdesini JSON-güvenli hale getirir (21-10-2026). FastAPI'nin
+    varsayılan işleyicisi hata kaydına GİRDİ DEĞERİNİ de koyar; istemci JSON'da
+    NaN/Infinity gönderdiyse bu değer serileştirilemez ve 422 yerine 500 döner
+    ("Out of range float values are not JSON compliant"). Burada yalnızca alan
+    yolu + mesaj + tür döndürülür, girdi değeri eklenmez. Gövde biçimi
+    FastAPI'ninkiyle aynı: {"detail": [{"loc","msg","type"}, ...]}."""
+    detail = [
+        {"loc": list(err.get("loc", ())), "msg": str(err.get("msg", "")), "type": str(err.get("type", ""))}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 # Sistemsel journal ucu icin sabitler: unit adi disaridan verilemez (guvenlik),
 # istenen satir sayisina ust sinir var (asiri yuklenmeyi/CPU'yu bogmayi onlemek icin).
@@ -1123,6 +1148,22 @@ async def _journal_loop():
         await asyncio.sleep(JOURNAL_INTERVAL_S)
 
 
+async def _motion_monitor_loop():
+    """Arka planda ~10 Hz: STM32 durumunu (encoder + running) hareket izleyicisine
+    besler (bkz. motion_monitor.py). Hata olursa döngü ölmez, bir sonraki turda
+    yeniden dener (aynı hata her 0,1 sn log'u doldurmasın diye sadece ilkini yazar)."""
+    logged_error = False
+    while True:
+        try:
+            motion_monitor.observe(bridge.get_status(), bridge.is_connected, time.monotonic())
+            logged_error = False
+        except Exception:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
+            if not logged_error:
+                logging.getLogger("feedvision.motion_monitor").exception("Hareket izleme dongusunde beklenmeyen hata")
+                logged_error = True
+        await asyncio.sleep(MOTION_MONITOR_INTERVAL_S)
+
+
 async def _vision_raw_log_loop():
     """Arka planda sürekli çalışır: vision_raw_log.get_interval_s()'te bir
     (Admin'den ayarlanabilir), SADECE ROI-kaynaklı Kontrol Kriterlerinin
@@ -1163,12 +1204,17 @@ async def _vision_raw_log_loop():
 
 
 class MotionParamsPayload(BaseModel):
-    D_drive_mm: float | None = Field(default=None, gt=0)
-    D_wheel_dc_mm: float | None = Field(default=None, gt=0)
-    D_rod_mm: float | None = Field(default=None, gt=0)
-    RPM_MAX_NOLOAD: float | None = Field(default=None, gt=0)
-    D_wheel_rot_mm: float | None = Field(default=None, gt=0)
+    # allow_inf_nan=False: sonsuz/NaN çap kaydedilirse sonraki tüm hız hesapları bozulur (422).
+    D_drive_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    D_wheel_dc_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    D_rod_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    RPM_MAX_NOLOAD: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    D_wheel_rot_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     ROT_PPR: int | None = None  # izinli değer kontrolü endpoint'te (400 + Türkçe detail), bkz. set_motion_params
+    # Yardımcı çift (21-10-2026)
+    D_wheel_assist_mm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    ASSIST_PPR: int | None = None  # ROT_PPR ile aynı izinli değerler
+    assist_dir_invert: bool | None = None  # False: NEMA23 ileri iken assist "cw"; True: ters
 
 
 @app.get("/motion-params")
@@ -1191,8 +1237,35 @@ def set_motion_params(payload: MotionParamsPayload):
                 f"{', '.join(str(v) for v in motion_params.ALLOWED_ROT_PPR)}"
             ),
         )
+    if "ASSIST_PPR" in fields and fields["ASSIST_PPR"] not in motion_params.ALLOWED_ASSIST_PPR:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"ASSIST_PPR {fields['ASSIST_PPR']} geçersiz — 2. TB6600 etiket tablosundaki değerlerden biri olmalı: "
+                f"{', '.join(str(v) for v in motion_params.ALLOWED_ASSIST_PPR)}"
+            ),
+        )
     saved = motion_params.save_params(fields)
     return {"success": True, "params": saved}
+
+
+@app.get("/motion-limits")
+def get_motion_limits():
+    """Kanal bazlı izinli hız/mesafe aralıkları (geçerli hareket parametrelerinden
+    hesaplanır). Arayüz hız kutularına min/max koymak ve anlamlı hata göstermek
+    için kullanır; aynı sınırlar /motor/* ve /motor/feed-start'ta sunucu
+    tarafında da uygulanır (aralık dışı -> 400). Birimler: step_mms/assist_mms
+    mm/s, rot_rpm/dc_rpm çubuk RPM, distance_mm mm."""
+    params = motion_params.get_params()
+    return {
+        "limits": {
+            "step_mms": motion_calc.step_speed_limits_mms(params["D_drive_mm"]),
+            "distance_mm": motion_calc.step_distance_limits_mm(params["D_drive_mm"]),
+            "assist_mms": motion_calc.assist_speed_limits_mms(params["D_wheel_assist_mm"], params["ASSIST_PPR"]),
+            "rot_rpm": motion_calc.rot_rpm_limits(params["D_wheel_rot_mm"], params["D_rod_mm"], params["ROT_PPR"]),
+            "dc_rpm": motion_calc.dc_rpm_limits(params["D_wheel_dc_mm"], params["D_rod_mm"], params["RPM_MAX_NOLOAD"]),
+        }
+    }
 
 
 # ==============================================================================
@@ -1226,6 +1299,19 @@ class StepCommand(BaseModel):
     accel: int = Field(default=0, ge=0)  # kaç adımda hızlanıp/yavaşlanılacağı (0 = rampasız, sabit hız — eski davranış)
 
 
+def _command_ack(result: dict) -> tuple[bool, str | None]:
+    """bridge.send_command sonucundan (ok, neden): komut seri porta yazıldı,
+    zaman aşımı olmadı ve firmware `err` dönmedi mi? Başarısızsa Türkçe kısa neden."""
+    if not result.get("sent"):
+        return False, "komut seri porta yazılamadı (kontrol kartı bağlı değil)"
+    if result.get("timed_out"):
+        return False, "kontrol kartı komuta yanıt vermedi"
+    reply = result.get("reply") or {}
+    if "err" in reply:
+        return False, f"kontrol kartı komutu reddetti ({reply['err']})"
+    return True, None
+
+
 @app.post("/motor/step")
 def motor_step(c: StepCommand):
     global _last_step_dir
@@ -1236,7 +1322,10 @@ def motor_step(c: StepCommand):
     _last_step_dir = c.dir
     # send_command artık {"sent","raw_command","command","raw_reply","reply","timed_out"}
     # döndürüyor — UI hem gönderdiğimiz ham komutu hem STM32'nin ok/err yanıtını gösterebilsin diye.
-    return bridge.send_command({"cmd": "step", "dir": c.dir, "delay": c.delay, "steps": c.steps, "accel": c.accel})
+    result = bridge.send_command({"cmd": "step", "dir": c.dir, "delay": c.delay, "steps": c.steps, "accel": c.accel})
+    ok, reason = _command_ack(result)
+    motion_monitor.note_command(ok, reason, time.monotonic())
+    return result
 
 
 @app.post("/motor/stop")
@@ -1250,7 +1339,34 @@ def motor_stop():
     # motoru durdurmuş olur, bu satır sadece log gürültüsünü önler.
     if _sync_watcher_task is not None and not _sync_watcher_task.done():
         _sync_watcher_task.cancel()
+    motion_monitor.note_stop()
     return bridge.send_command({"cmd": "stop"})
+
+
+@app.post("/motor/stop-all")
+def motor_stop_all():
+    """Büyük kırmızı DUR: NEMA23 (step), yardımcı çift (assist), rotasyon çifti
+    (rot) ve DC'yi BİRBİRİNDEN BAĞIMSIZ durdurur — biri seri hatayla patlasa
+    diğerleri yine denenir (fail-safe). Firmware `stop` zaten step+rot+assist'i
+    keser; açık assist/rot stop'ları ek güvence, DC'yi ise yalnızca açık
+    `dc stop` durdurur. Çalışan feed-start watcher'ı da iptal edilir (DUR'dan
+    sonra boşuna fail-safe bekleyip log kirletmesin). Hiçbir durumda 5xx
+    dönmez: sonuç `results` içinde kanal kanal, `success` hepsi gittiyse true."""
+    if _sync_watcher_task is not None and not _sync_watcher_task.done():
+        _sync_watcher_task.cancel()
+    motion_monitor.note_stop()
+    results: dict = {}
+    for name, command in (
+        ("step", {"cmd": "stop"}),
+        ("assist", {"cmd": "assist", "dir": "stop"}),
+        ("rot", {"cmd": "rot", "dir": "stop"}),
+        ("dc", {"cmd": "dc", "dir": "stop"}),
+    ):
+        try:
+            results[name] = bridge.send_command(command)
+        except Exception as e:  # noqa: BLE001 — bir kanalın hatası diğerlerinin durdurulmasını engellemesin
+            results[name] = {"sent": False, "error": str(e), "command": command}
+    return {"success": all(r.get("sent") for r in results.values()), "results": results}
 
 
 class DcCommand(BaseModel):
@@ -1266,7 +1382,7 @@ def motor_dc(c: DcCommand):
 
 class RotCommand(BaseModel):
     dir: str  # "cw" / "ccw" / "stop" — "cw" = motorun mil ucuna bakınca saat yönü
-    rpm: float | None = None  # çubuk RPM'i — "stop" dışında zorunlu, >0
+    rpm: float | None = Field(default=None, allow_inf_nan=False)  # çubuk RPM'i — "stop" dışında zorunlu, >0
 
 
 @app.post("/motor/rot")
@@ -1296,7 +1412,7 @@ def motor_rot(c: RotCommand):
                 ppr=params["ROT_PPR"],
             )
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"NEMA17 RPM dönüşüm hatası: {e}")
+            raise HTTPException(status_code=400, detail=f"Rotasyon çifti — NEMA17 RPM dönüşüm hatası: {e}")
         command = {"cmd": "rot", "dir": c.dir, "delay": rot_calc["delay_us"]}
 
     try:
@@ -1308,8 +1424,55 @@ def motor_rot(c: RotCommand):
     return result
 
 
+class AssistCommand(BaseModel):
+    dir: str  # "cw" / "ccw" / "stop" — doğrudan motor yönü (NEMA23'ü izlemez)
+    speed_mms: float | None = Field(default=None, allow_inf_nan=False)  # çubuk yüzey hızı mm/s — "stop" dışında zorunlu, >0
+
+
+@app.post("/motor/assist")
+def motor_assist(c: AssistCommand):
+    """Yardımcı çifti (2× NEMA17 paralel + 2. TB6600) bağımsız başlatır/durdurur
+    — /motor/rot'un aynası. Girdi çubuk yüzey hızı (mm/s); ham
+    `{"cmd":"assist","dir":...,"delay":<µs>}` komutuna çevirme sunucuda yapılır
+    (bkz. motion_calc.compute_assist_command, D_wheel_assist_mm/ASSIST_PPR).
+    Buradaki `dir` doğrudan motor yönüdür; `assist_dir_invert` yalnızca
+    Besleme Başlat'taki "NEMA23'ü izle" yönüne uygulanır. Dönüşüm hatası ->
+    400, hiçbir şey gönderilmez. Yanıt /motor/rot ile aynı biçim + `assist_calc`."""
+    if c.dir not in ("cw", "ccw", "stop"):
+        raise HTTPException(status_code=400, detail=f"dir 'cw', 'ccw' veya 'stop' olmalı ('{c.dir}' geçersiz)")
+
+    assist_calc = None
+    try:
+        if c.dir == "stop":
+            command = make_assist_command("stop")
+        else:
+            if c.speed_mms is None:
+                raise HTTPException(status_code=400, detail="speed_mms zorunlu (dir 'cw'/'ccw' iken)")
+            params = motion_params.get_params()
+            try:
+                assist_calc = motion_calc.compute_assist_command(
+                    speed_mms=c.speed_mms,
+                    d_wheel_assist_mm=params["D_wheel_assist_mm"],
+                    ppr=params["ASSIST_PPR"],
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"Yardımcı çift hız dönüşüm hatası: {e}")
+            command = make_assist_command(c.dir, assist_calc["delay_us"])
+    except ValueError as e:  # make_assist_command savunma hattı (normalde hesapla zaten aralıkta)
+        raise HTTPException(status_code=400, detail=f"Yardımcı çift komut hatası: {e}")
+
+    try:
+        result = bridge.send_command(command)
+    except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
+        raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+    if assist_calc is not None:
+        result = {**result, "assist_calc": assist_calc}
+    return result
+
+
 @app.post("/motor/reset")
 def motor_reset():
+    motion_monitor.reset_samples()  # sayaçlar sıfırlanıyor: eski örnekler sahte "hareket" üretmesin
     return bridge.send_command({"cmd": "reset"})
 
 
@@ -1346,41 +1509,62 @@ _sync_watcher_logger = logging.getLogger("feedvision.sync_watcher")
 
 
 class FeedStartCommand(BaseModel):
-    dir: int  # step motor yönü — 0 veya 1
-    speed_mms: float = Field(gt=0)
-    distance_mm: float = Field(gt=0)
-    accel_mms2: float = Field(default=0, ge=0)
+    """Besleme Başlat isteği. NEMA23 (step) HER ZAMAN çalışır; yardımcı çift,
+    rotasyon çifti ve DC `use_*` ile açılır, her birinin KENDİ hız alanı vardır
+    (21-10-2026: tek ortak RPM kutusu hatası, backlog #120 madde 4).
+
+    YENİ (açık alanlar, arayüz bunu kullanır):
+      use_assist + assist_speed_mms  (yardımcı çift, mm/s çubuk yüzey hızı;
+                                      yön NEMA23'ü izler, assist_dir_invert'e tabi)
+      use_rot    + rot_rpm + rot_dir (rotasyon çifti, çubuk RPM; yön kendi seçimi)
+      use_dc     + dc_rpm  + dc_dir  (DC, çubuk RPM -> duty%)
+    ESKİ (geriye uyumlu, kullanımdan kalkıyor): rot_motor ("dc" varsayılan /
+    "nema17" / "both") + ortak `rpm` + (both'ta) `dc_speed_pct`. `use_*`
+    alanlarının HİÇBİRİ gönderilmezse ya da `rot_motor` verilirse eski yorum
+    geçerlidir. İkisini birlikte göndermek 400.
+    """
+
+    dir: int  # step motor yönü — 0 (ileri) veya 1 (geri)
+    speed_mms: float = Field(gt=0, allow_inf_nan=False)
+    distance_mm: float = Field(gt=0, allow_inf_nan=False)
+    accel_mms2: float = Field(default=0, ge=0, allow_inf_nan=False)
+
+    use_assist: bool | None = None
+    use_rot: bool | None = None
+    use_dc: bool | None = None
+    assist_speed_mms: float | None = Field(default=None, allow_inf_nan=False)
+    rot_rpm: float | None = Field(default=None, allow_inf_nan=False)
+    dc_rpm: float | None = Field(default=None, allow_inf_nan=False)
+    rot_dir: str = "cw"  # rotasyon çifti yönü: "cw" / "ccw" (dc_dir'den bağımsız)
     dc_dir: str = "forward"  # "forward" / "backward" — "stop" burada anlamsız, ayrıca reddedilir
+
+    # --- ESKİ biçim (geriye uyumlu) ---
     # rpm: "dc" modunda DC çubuk RPM'i (RPM->duty), "nema17" ve "both" modunda
-    # NEMA17 için çubuk RPM'i (05-10-2026).
-    rpm: float = Field(gt=0)
-    # Dönüş motoru seçimi (05-10-2026): "dc" (API varsayılanı — eski istemciler
-    # alan göndermese de davranış değişmez) / "nema17" / "both".
-    rot_motor: str = "dc"
-    rot_dir: str = "cw"  # NEMA17 yönü: "cw" / "ccw" (dc_dir'den bağımsız — tekerlekler çubuğun karşılıklı taraflarında olabilir)
-    # Yalnızca "both" modunda DC'nin HAM güç yüzdesi (zorunlu): RPM_MAX_NOLOAD
-    # henüz kalibre olmadığından iki motor RPM ile karıştırılmıyor.
-    dc_speed_pct: float | None = None
+    # rotasyon çifti için çubuk RPM'i (05-10-2026).
+    rpm: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    rot_motor: str | None = None  # None = eski biçim da değil; use_* yoksa "dc" sayılır
+    # Yalnızca eski "both" modunda DC'nin HAM güç yüzdesi (zorunlu).
+    dc_speed_pct: float | None = Field(default=None, allow_inf_nan=False)
 
 
-async def _sync_watcher(max_wait_s: float, stop_dc: bool = True, stop_rot: bool = False):
+async def _sync_watcher(max_wait_s: float, stop_dc: bool = True, stop_rot: bool = False, stop_assist: bool = False):
     """Step motorun running:0->1 (ARM) sonra running:1->0 (BİTİŞ) geçişini
-    izler, bitişte feed-start'ın KULLANDIĞI dönüş motor(lar)ını durdurur
-    (stop_dc: DC, stop_rot: NEMA17 — 05-10-2026; varsayılan eski davranış,
-    sadece DC). SADECE /motor/feed-start'ın kendi
+    izler, bitişte feed-start'ın KULLANDIĞI yardımcı motor(lar)ı durdurur
+    (stop_dc: DC, stop_rot: rotasyon çifti, stop_assist: yardımcı çift;
+    varsayılan eski davranış, sadece DC). SADECE /motor/feed-start'ın kendi
     oturumuna özel — bridge.get_status() genel/paylaşılan bir okuma olsa da,
     bu task'ın kendisi sadece bu fonksiyon çalışırken var oluyor ve YALNIZCA
     motor_feed_start() tarafından spawn ediliyor; admin panelindeki bağımsız
     "DC İleri/Geri/Dur" butonları bu task'tan habersiz, onu tetiklemez/
     etkilemez. Yeni bir /motor/feed-start çağrısı önceki task'ı cancel()
-    eder (bkz. motor_feed_start) — CancelledError burada YUTULMUYOR, DC
-    komutu göndermeden sessizce sonlanıyor (yeni çağrı zaten kendi step+dc
+    eder (bkz. motor_feed_start) — CancelledError burada YUTULMUYOR, motor
+    durdurma komutu göndermeden sessizce sonlanıyor (yeni çağrı zaten kendi
     komutlarını gönderiyor, üzerine binmesin diye).
 
     ÖNEMLİ (24-09-2026 saha düzeltmesi): ARM fazında running:1 hiç
-    gözlenemese bile fonksiyon DC'ye dokunmadan return ETMEZ — WAIT fazına
-    (fail-safe max_wait_s deadline'ıyla) HER DURUMDA geçilir, bridge'in
-    "dc stop" komutu bu fonksiyonun her çalışmasında en geç ARM_TIMEOUT +
+    gözlenemese bile fonksiyon motorlara dokunmadan return ETMEZ — WAIT fazına
+    (fail-safe max_wait_s deadline'ıyla) HER DURUMDA geçilir, durdurma
+    komutları bu fonksiyonun her çalışmasında en geç ARM_TIMEOUT +
     max_wait_s içinde kesin gönderilir. Eskiden ARM kaçırılırsa (kısa/hızlı
     bir hareket 100ms'lik poll aralığının arasından tamamen kaçabiliyor)
     DC sonsuza dek dönmeye devam ediyordu — bu garanti bunu ortadan kaldırır."""
@@ -1422,6 +1606,8 @@ async def _sync_watcher(max_wait_s: float, stop_dc: bool = True, stop_rot: bool 
             stop_commands.append({"cmd": "dc", "dir": "stop"})
         if stop_rot:
             stop_commands.append({"cmd": "rot", "dir": "stop"})
+        if stop_assist:
+            stop_commands.append({"cmd": "assist", "dir": "stop"})
         for stop_command in stop_commands:
             try:
                 bridge.send_command(stop_command)
@@ -1433,76 +1619,186 @@ async def _sync_watcher(max_wait_s: float, stop_dc: bool = True, stop_rot: bool 
         _sync_watcher_logger.exception("feed-start senkron izleyicisinde beklenmeyen hata")
 
 
-@app.post("/motor/feed-start")
-def motor_feed_start(c: FeedStartCommand):
-    """Step (mm/s,mm,mm/s²) + DC (RPM) parametrelerini TEK istekte alıp
-    fiziksel birimden ham komuta çevirir (bkz. motion_calc.py), step'i
-    başlatır; step "ok" DEĞİLSE DC'ye hiç dokunmadan hata döner (Fatih'in
-    açık talebi — DC'nin step'siz/anlamsız dönmeye başlaması istenmiyor).
+# Yardımcı motorların kanal adı -> arayüzde görünen Türkçe ad (uyarı/hata metinleri için).
+_AUX_LABELS = {"assist": "Yardımcı çift", "rot": "Rotasyon çifti", "dc": "DC"}
+# Hatada durdurma sırası: rot SONA bırakıldı (eski davranışla uyumlu: son komut rot stop).
+_AUX_STOP_ORDER = ("dc", "assist", "rot")
 
-    Dönüşüm hataları (ör. desteklenen hız/RPM aralığı dışı) HER İKİSİ DE
-    donanıma HİÇBİR komut gönderilmeden önce kontrol edilir — spesifikasyon
-    sırayı "step gönder, ok ise DC'yi çevir" olarak tarif etse de, RPM
-    dönüşümü geçersizse motorun zaten harekete geçmiş olması (sonra da
-    hiçbir zaman DC ile senkronlanmayacak yarım bir hareket) istenmeyen bir
-    yan etki — bu yüzden ikisi de ÖNCE hesaplanıp doğrulanıyor, donanıma
-    hiçbir şey gönderilmeden 400 ile reddedilebiliyor.
-    """
-    global _sync_watcher_task, _sync_watcher_motors, _last_step_dir
 
+def _resolve_aux_selection(c: "FeedStartCommand") -> dict:
+    """İstekten hangi yardımcı motorların hangi hızla çalışacağını çıkarır.
+    Dönen: {"use_assist","use_rot","use_dc","assist_speed_mms","rot_rpm","dc_rpm",
+    "dc_speed_pct"} — eski (rot_motor) ve yeni (use_*) biçimi tek biçime indirger.
+    Geçersiz birleşim/seçici -> 400 (donanıma hiçbir şey gönderilmeden)."""
     if c.dc_dir not in ("forward", "backward"):
         raise HTTPException(
             status_code=400,
             detail=f"dc_dir 'forward' veya 'backward' olmalı (senkron başlatmada '{c.dc_dir}' anlamsız)",
         )
-    if c.rot_motor not in ("dc", "nema17", "both"):
-        raise HTTPException(status_code=400, detail=f"rot_motor 'dc', 'nema17' veya 'both' olmalı ('{c.rot_motor}' geçersiz)")
-    if c.rot_dir not in ("cw", "ccw"):
-        raise HTTPException(status_code=400, detail=f"rot_dir 'cw' veya 'ccw' olmalı ('{c.rot_dir}' geçersiz)")
-    use_dc = c.rot_motor in ("dc", "both")
-    use_rot = c.rot_motor in ("nema17", "both")
-    if c.rot_motor == "both" and (c.dc_speed_pct is None or not 0 < c.dc_speed_pct <= 100):
+    new_style = any(v is not None for v in (c.use_assist, c.use_rot, c.use_dc))
+    if c.rot_motor is not None and new_style:
         raise HTTPException(
             status_code=400,
-            detail="rot_motor 'both' iken dc_speed_pct zorunlu ve 0'dan büyük, en fazla 100 olmalı (DC ham güç yüzdesi)",
+            detail="rot_motor (eski biçim) ile use_assist/use_rot/use_dc birlikte kullanılamaz",
         )
 
+    if not new_style:
+        # ESKİ biçim: rot_motor ("dc" varsayılan) + ortak rpm
+        mode = c.rot_motor if c.rot_motor is not None else "dc"
+        if mode not in ("dc", "nema17", "both"):
+            raise HTTPException(status_code=400, detail=f"rot_motor 'dc', 'nema17' veya 'both' olmalı ('{mode}' geçersiz)")
+        if c.rot_dir not in ("cw", "ccw"):
+            raise HTTPException(status_code=400, detail=f"rot_dir 'cw' veya 'ccw' olmalı ('{c.rot_dir}' geçersiz)")
+        if mode == "both" and (c.dc_speed_pct is None or not 0 < c.dc_speed_pct <= 100):
+            raise HTTPException(
+                status_code=400,
+                detail="rot_motor 'both' iken dc_speed_pct zorunlu ve 0'dan büyük, en fazla 100 olmalı (DC ham güç yüzdesi)",
+            )
+        if c.rpm is None:
+            raise HTTPException(status_code=422, detail="rpm zorunlu (eski biçim; yeni biçimde rot_rpm/dc_rpm kullanın)")
+        return {
+            "use_assist": False,
+            "use_rot": mode in ("nema17", "both"),
+            "use_dc": mode in ("dc", "both"),
+            "assist_speed_mms": None,
+            "rot_rpm": c.rpm,
+            "dc_rpm": c.rpm if mode == "dc" else None,
+            "dc_speed_pct": c.dc_speed_pct if mode == "both" else None,
+        }
+
+    if c.rot_dir not in ("cw", "ccw"):
+        raise HTTPException(status_code=400, detail=f"rot_dir 'cw' veya 'ccw' olmalı ('{c.rot_dir}' geçersiz)")
+    use_assist, use_rot, use_dc = bool(c.use_assist), bool(c.use_rot), bool(c.use_dc)
+    missing = [
+        name
+        for name, used, value in (
+            ("assist_speed_mms (Yardımcı çift hızı, mm/s)", use_assist, c.assist_speed_mms),
+            ("rot_rpm (Rotasyon çifti hızı, RPM)", use_rot, c.rot_rpm),
+            ("dc_rpm (DC hızı, RPM)", use_dc, c.dc_rpm),
+        )
+        if used and value is None
+    ]
+    if missing:
+        raise HTTPException(status_code=400, detail="Seçili motor için hız zorunlu: " + ", ".join(missing))
+    return {
+        "use_assist": use_assist,
+        "use_rot": use_rot,
+        "use_dc": use_dc,
+        "assist_speed_mms": c.assist_speed_mms if use_assist else None,
+        "rot_rpm": c.rot_rpm if use_rot else None,
+        "dc_rpm": c.dc_rpm if use_dc else None,
+        "dc_speed_pct": None,
+    }
+
+
+@app.post("/motor/feed-start")
+def motor_feed_start(c: FeedStartCommand):
+    """Besleme Başlat. NEMA23 (step: mm/s + mm + mm/s²) HER ZAMAN çalışır;
+    yanında yardımcı çift (mm/s), rotasyon çifti (RPM) ve DC (RPM) isteğe bağlı
+    açılır, hepsi KENDİ hızıyla (hız oranı/çarpanı/patinaj hesabı YOK). Fiziksel
+    birimden ham komuta çevirme motion_calc.py'de.
+
+    Süre mevcut mantıkla NEMA23'ten gelir (mesafe/hız); NEMA23 adımları bitince
+    _sync_watcher kullanılan diğer tüm motorları durdurur (assist dahil).
+
+    Dönüşüm hataları (aralık dışı hız vb.) TÜM kanallar için donanıma HİÇBİR
+    komut gönderilmeden ÖNCE kontrol edilir ve topluca tek 400 ile döner (hata
+    metninde kanal adı var); yarım başlamış hareket oluşmaz. NEMA23 komutu
+    "ok" DEĞİLSE diğer motorlara hiç dokunulmaz (Fatih'in açık talebi).
+
+    Seri port seviyesinde beklenmedik hata (exception) olursa: o ana kadar
+    başlatılan her şey (NEMA23 + yardımcı motorlar) best-effort durdurulur ve
+    502 döner. Komut gitti ama firmware reddetti/yanıt vermediyse (err/timeout)
+    hareket sürer, durum `warnings` listesinde Türkçe olarak döner.
+
+    Yanıt: success, step_calc, assist_calc/rot_calc/dc_calc (kullanılmayan None),
+    *_result (ham send_command sonucu), started (kanal listesi), assist_dir,
+    warnings.
+    """
+    global _sync_watcher_task, _sync_watcher_motors, _last_step_dir
+
+    if c.dir not in (0, 1):
+        raise HTTPException(status_code=400, detail=f"dir 0 (ileri) veya 1 (geri) olmalı ({c.dir} geçersiz)")
+    sel = _resolve_aux_selection(c)
+
     params = motion_params.get_params()
+    errors: list[str] = []
+
+    step_calc = None
     try:
         step_calc = motion_calc.compute_step_command(
             speed_mms=c.speed_mms, distance_mm=c.distance_mm, accel_mms2=c.accel_mms2, d_drive_mm=params["D_drive_mm"]
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Step dönüşüm hatası: {e}")
+        errors.append(f"Step dönüşüm hatası: {e}")
 
-    # "dc" modunda DC RPM->duty (eski davranış), "both"ta DC ham yüzdeyle
-    # çalışır (duty doğrudan dc_speed_pct), "nema17"de DC hiç kullanılmaz.
+    # Eski "both"ta DC ham yüzdeyle çalışır (duty doğrudan dc_speed_pct), diğer
+    # durumlarda DC çubuk RPM'inden duty'ye çevrilir.
     dc_calc = None
-    if c.rot_motor == "dc":
-        try:
-            dc_calc = motion_calc.compute_dc_duty(
-                rpm_rod=c.rpm,
-                d_wheel_dc_mm=params["D_wheel_dc_mm"],
-                d_rod_mm=params["D_rod_mm"],
-                rpm_max_noload=params["RPM_MAX_NOLOAD"],
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"DC RPM dönüşüm hatası: {e}")
-    elif c.rot_motor == "both":
-        dc_calc = {"duty": round(c.dc_speed_pct), "duty_exact": c.dc_speed_pct}
+    if sel["use_dc"]:
+        if sel["dc_speed_pct"] is not None:
+            dc_calc = {"duty": round(sel["dc_speed_pct"]), "duty_exact": sel["dc_speed_pct"]}
+        else:
+            try:
+                dc_calc = motion_calc.compute_dc_duty(
+                    rpm_rod=sel["dc_rpm"],
+                    d_wheel_dc_mm=params["D_wheel_dc_mm"],
+                    d_rod_mm=params["D_rod_mm"],
+                    rpm_max_noload=params["RPM_MAX_NOLOAD"],
+                )
+            except ValueError as e:
+                errors.append(f"DC RPM dönüşüm hatası: {e}")
 
     rot_calc = None
-    if use_rot:
+    if sel["use_rot"]:
         try:
             rot_calc = motion_calc.compute_rot_command(
-                rpm_rod=c.rpm,
+                rpm_rod=sel["rot_rpm"],
                 d_wheel_rot_mm=params["D_wheel_rot_mm"],
                 d_rod_mm=params["D_rod_mm"],
                 ppr=params["ROT_PPR"],
             )
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"NEMA17 RPM dönüşüm hatası: {e}")
+            errors.append(f"Rotasyon çifti — NEMA17 RPM dönüşüm hatası: {e}")
 
+    assist_calc = None
+    assist_dir = None
+    if sel["use_assist"]:
+        try:
+            assist_calc = motion_calc.compute_assist_command(
+                speed_mms=sel["assist_speed_mms"],
+                d_wheel_assist_mm=params["D_wheel_assist_mm"],
+                ppr=params["ASSIST_PPR"],
+            )
+        except ValueError as e:
+            errors.append(f"Yardımcı çift hız dönüşüm hatası: {e}")
+        # Yön NEMA23'ü izler: ileri (dir 0) -> cw, geri (dir 1) -> ccw; assist_dir_invert ters çevirir.
+        assist_dir = "cw" if (c.dir == 0) != bool(params["assist_dir_invert"]) else "ccw"
+
+    if errors:
+        raise HTTPException(status_code=400, detail=" | ".join(errors))
+
+    # Komutlar (gönderim sırası: yardımcı çift, rotasyon çifti, DC — hepsi NEMA23'ün
+    # hemen ardından arka arkaya, aralarında bekleme yok).
+    aux_commands: list[tuple[str, dict]] = []
+    if assist_calc is not None:
+        aux_commands.append(("assist", make_assist_command(assist_dir, assist_calc["delay_us"])))
+    if rot_calc is not None:
+        aux_commands.append(("rot", {"cmd": "rot", "dir": c.rot_dir, "delay": rot_calc["delay_us"]}))
+    if dc_calc is not None:
+        aux_commands.append(("dc", {"cmd": "dc", "dir": c.dc_dir, "speed": dc_calc["duty"]}))
+
+    # feed_totalizer'ın yön-farkındalıklı sayabilmesi için (bkz. _last_step_dir
+    # yorumu, /motor/step ile AYNI desen) — dönüşümler zaten geçerli, komut
+    # gönderilmeden hemen önce set ediliyor.
+    _last_step_dir = c.dir
+    step_command = {
+        "cmd": "step",
+        "dir": c.dir,
+        "delay": step_calc["delay_us"],
+        "steps": step_calc["steps"],
+        "accel": step_calc["accel_steps"],
+    }
     # bridge.send_command seri port seviyesinde beklenmedik bir şeyle
     # (timeout, bağlantı kopması, vb.) karşılaşırsa exception fırlatabilir —
     # bu, motion_calc'ın ValueError'ları gibi kontrollü değil, çıplak 500
@@ -1510,50 +1806,49 @@ def motor_feed_start(c: FeedStartCommand):
     # devreye girmez (24-09-2026 sahada gözlemlendi). Diğer ValueError
     # yakalama deseniyle tutarlı olacak şekilde 502 + açıklamalı detail'e
     # çevriliyor.
-    # feed_totalizer'ın yön-farkındalıklı sayabilmesi için (bkz. _last_step_dir
-    # yorumu, /motor/step ile AYNI desen) — dönüşümler zaten geçerli, komut
-    # gönderilmeden hemen önce set ediliyor.
-    _last_step_dir = c.dir
     try:
-        step_result = bridge.send_command(
-            {
-                "cmd": "step",
-                "dir": c.dir,
-                "delay": step_calc["delay_us"],
-                "steps": step_calc["steps"],
-                "accel": step_calc["accel_steps"],
-            }
-        )
+        step_result = bridge.send_command(step_command)
     except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
+        motion_monitor.note_command(False, f"seri port hatası ({e})", time.monotonic())
         raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
 
-    step_reply = step_result.get("reply") or {}
-    step_ok = bool(step_result.get("sent")) and not step_result.get("timed_out") and "err" not in step_reply
+    step_ok, step_reason = _command_ack(step_result)
+    motion_monitor.note_command(step_ok, step_reason, time.monotonic())
     if not step_ok:
         return {
             "success": False,
             "stage": "step",
+            "reason": step_reason,
             "step_calc": step_calc,
             "step_result": step_result,
         }
 
-    # Kullanılan dönüş motor(lar)ı: önce NEMA17, sonra DC. Biri seri hatayla
-    # patlarsa (502) daha önce başlatılmış motor kontrolsüz dönmesin diye
-    # best-effort durdurulur (watcher henüz spawn edilmedi).
-    rot_result = None
-    dc_result = None
+    # Seçili yardımcı motorlar NEMA23'ün hemen ardından başlatılır. Biri seri
+    # hatayla patlarsa (502) o ana kadar başlayan her şey best-effort durdurulur
+    # (watcher henüz spawn edilmedi): önce firmware `stop` (NEMA23 + rot + assist),
+    # sonra tek tek yardımcı motor stop'ları (DC'yi yalnızca açık `dc stop` keser).
+    aux_results: dict[str, dict] = {}
     try:
-        if use_rot:
-            rot_result = bridge.send_command({"cmd": "rot", "dir": c.rot_dir, "delay": rot_calc["delay_us"]})
-        if use_dc:
-            dc_result = bridge.send_command({"cmd": "dc", "dir": c.dc_dir, "speed": dc_calc["duty"]})
+        for name, command in aux_commands:
+            aux_results[name] = None  # patlayan motor da (komut yazılmış olabilir) durdurma listesine girsin
+            aux_results[name] = bridge.send_command(command)
     except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
-        if rot_result is not None:
+        stops = [{"cmd": "stop"}]
+        for name in _AUX_STOP_ORDER:
+            if name in aux_results:
+                stops.append({"cmd": name, "dir": "stop"})
+        for stop_command in stops:
             try:
-                bridge.send_command({"cmd": "rot", "dir": "stop"})
+                bridge.send_command(stop_command)
             except Exception:  # noqa: BLE001 — zaten hata yolundayız, ikinci hata asıl 502'yi gölgelemesin
-                _sync_watcher_logger.exception("feed-start: baslatilmis NEMA17 durdurulamadi")
+                _sync_watcher_logger.exception("feed-start: baslatilmis %s durdurulamadi", stop_command["cmd"])
         raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+
+    warnings: list[str] = []
+    for name, result in aux_results.items():
+        ok, reason = _command_ack(result)
+        if not ok:
+            warnings.append(f"{_AUX_LABELS[name]}: {reason}")
 
     # Yarış durumu (GÖREV 3 madde 5): yeni bir feed-start önceki watcher'ı
     # cancel() eder — _rule_engine_task.cancel() ile AYNI desen. cancel()/
@@ -1562,11 +1857,28 @@ def motor_feed_start(c: FeedStartCommand):
     # Önceki watcher hâlâ canlıysa iptal edilirken onun durdurmakla yükümlü
     # olduğu motorlar da yeni watcher'a devredilir (ör. önceki "both", yeni
     # "nema17": DC kontrolsüz dönmeye devam etmesin).
-    motors = {m for m, used in (("dc", use_dc), ("rot", use_rot)) if used}
+    motors = {name for name, _ in aux_commands}
     if _sync_watcher_task is not None and not _sync_watcher_task.done():
         motors |= _sync_watcher_motors
         _sync_watcher_task.cancel()
     _sync_watcher_motors = motors
+
+    response = {
+        "success": True,
+        "step_calc": step_calc,
+        "assist_calc": assist_calc,
+        "dc_calc": dc_calc,
+        "rot_calc": rot_calc,
+        "step_result": step_result,
+        "assist_result": aux_results.get("assist"),
+        "dc_result": aux_results.get("dc"),
+        "rot_result": aux_results.get("rot"),
+        "started": ["step", *[name for name, _ in aux_commands]],
+        "assist_dir": assist_dir,
+        "warnings": warnings,
+    }
+    if not motors:
+        return response  # yalnızca NEMA23: durdurulacak başka motor yok, watcher gerekmez
 
     # Savunma amaçlı (teorik olarak imkansız — lifespan startup her zaman
     # ilk istekten önce tamamlanır): _main_event_loop henüz set edilmemişse
@@ -1593,22 +1905,18 @@ def motor_feed_start(c: FeedStartCommand):
     # concurrent.futures.Future döner (asyncio.Task değil) ama .cancel()/
     # .done() aynı isimle çalışır, yukarıdaki/aşağıdaki (motor_stop, lifespan
     # shutdown) kullanımlar değişmeden çalışmaya devam eder.
-    # Sadece-DC (eski davranış) çağrısı BİREBİR eskisi gibi; NEMA17 devredeyse
+    # Sadece-DC (eski davranış) çağrısı BİREBİR eskisi gibi; diğer durumlarda
     # hangi motorların durdurulacağı açıkça iletilir.
-    watcher_kwargs = {} if motors == {"dc"} else {"stop_dc": "dc" in motors, "stop_rot": "rot" in motors}
+    if motors == {"dc"}:
+        watcher_kwargs = {}
+    else:
+        watcher_kwargs = {"stop_dc": "dc" in motors, "stop_rot": "rot" in motors}
+        if "assist" in motors:
+            watcher_kwargs["stop_assist"] = True
     _sync_watcher_task = asyncio.run_coroutine_threadsafe(
         _sync_watcher(max_wait_s, **watcher_kwargs), _main_event_loop
     )
-
-    return {
-        "success": True,
-        "step_calc": step_calc,
-        "dc_calc": dc_calc,
-        "rot_calc": rot_calc,
-        "step_result": step_result,
-        "dc_result": dc_result,
-        "rot_result": rot_result,
-    }
+    return response
 
 
 @app.websocket("/ws/status")
@@ -1634,6 +1942,9 @@ async def ws_status(websocket: WebSocket):
                     # WebSocket açmaya gerek yok).
                     "rule_violations": _current_violations,
                     "rule_skipped": _current_skipped,
+                    # Hareket durum lambası (21-10-2026): encoder'dan ölçülen çubuk
+                    # hareketi (bkz. motion_monitor.py) — Operatör + Admin aynı veriyi çizer.
+                    "motion": motion_monitor.snapshot(time.monotonic()),
                 }
             )
             await asyncio.sleep(0.1)

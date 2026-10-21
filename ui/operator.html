@@ -26,6 +26,12 @@
   motion_calc.py'de dönüşüm yapıyor; step bitince DC otomatik duruyor).
   Aşağıdaki ham Step/DC panelleri KALDIRILMADI (ileri seviye/hata ayıklama
   için) — bu yeni panel onların YANINA eklendi, yerine geçmedi.
+
+  6 motorlu sistem (21-10-2026): Besleme Başlat artık NEMA23 (her zaman) +
+  isteğe bağlı Yardımcı çift / Rotasyon çifti / DC; her motorun KENDİ hız kutusu
+  var, kısa yol düğmeleri sadece kutucukları işaretler. Panelin HTML'i ve mantığı
+  shared.js'te (Operatör + Admin ortak); bağımsız Yardımcı çift / Rotasyon çifti
+  panelleri ve Besleme panelindeki hareket durum lambası da orada.
 -->
 <html lang="tr">
 <head>
@@ -124,7 +130,7 @@
        geliyordu). Kopyalanması mantıklı çıktı alanları aşağıda hariç tutulur.
        Canvas'ın kendi touch-action:none kuralı korunur (ROI çizimi). */
     body { touch-action: manipulation; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
-    input, textarea, select, pre, code, [contenteditable], .selectable, #console, #feed-start-result, #stop-status { -webkit-user-select: text; user-select: text; }
+    input, textarea, select, pre, code, [contenteditable], .selectable, #console, #feed-start-result, #stop-status, #motion-lamp-diag { -webkit-user-select: text; user-select: text; }
   </style>
 </head>
 <body>
@@ -161,53 +167,15 @@
        mm, mm/s², RPM) TEK butonla step+DC senkron başlatma. Aşağıdaki ham
        Step Motor/DC Motor panelleri (ileri seviye/hata ayıklama) YERİNE
        değil, YANINA eklendi. -->
-  <div class="panel" id="feed-start-panel">
-    <h2>Besleme Başlat</h2>
-    <div class="row-group">
-      <label>Step Yön:</label>
-      <select id="feed-step-dir"><option value="1">Geri</option><option value="0">İleri</option></select>
-      <label>Hız (mm/s):</label>
-      <input id="feed-speed" type="number" value="1" min="0.1" step="0.001">
-      <label>Mesafe (mm):</label>
-      <input id="feed-distance" type="number" value="50" min="0.1" step="0.1">
-      <label>İvme (mm/s²):</label>
-      <input id="feed-accel" type="number" value="0" min="0" step="0.1" disabled>
-      <label style="display:flex;align-items:center;gap:4px;">
-        <input type="checkbox" id="feed-accel-enable" onchange="toggleFeedAccelEnabled()">
-        İvme kullan
-      </label>
-    </div>
-    <div class="row-group">
-      <label>Dönüş Motoru:</label>
-      <select id="feed-rot-motor" onchange="onFeedRotMotorChange()">
-        <option value="nema17">NEMA17</option><option value="dc">DC</option><option value="both">İkisi birden</option>
-      </select>
-      <span id="feed-rot-nema-fields" style="display:contents">
-        <label>NEMA17 Yön:</label>
-        <select id="feed-rot-dir"><option value="cw">Saat Yönü</option><option value="ccw">Saat Yönünün Tersi</option></select>
-      </span>
-      <span id="feed-rot-dc-fields" style="display:none">
-        <label>DC Yön:</label>
-        <select id="feed-dc-dir"><option value="forward">Saat Yönü</option><option value="backward">Saat Yönünün Tersi</option></select>
-      </span>
-      <label id="feed-rpm-label">Çubuk Hızı (RPM):</label>
-      <input id="feed-rpm" type="number" value="10" min="0.1" step="0.1">
-      <span id="feed-rot-dc-pct-fields" style="display:none">
-        <label>DC Güç (%):</label>
-        <input id="feed-dc-speed-pct" type="number" min="1" max="100" step="1" placeholder="1-100">
-      </span>
-      <button id="feed-start-btn" onclick="sendFeedStart()">Besleme Başlat</button>
-      <!-- 24-09-2026 eklendi (Madde 3, saha bulgusu): panelin yakınında
-           kısayol — aşağıdaki büyük DURDUR ile AYNI fonksiyonu (emergencyStop,
-           step+DC birlikte) çağırıyor, yeni bir endpoint/mantık yok. -->
-      <button data-no-drag-scroll id="feed-start-stop-btn" onclick="emergencyStop()">Dur</button>
-    </div>
-    <div id="feed-start-result"></div>
-  </div>
+  <!-- İçerik shared.js initControlPanels() ile doldurulur (Operatör + Admin ortak HTML):
+       NEMA23 her zaman çalışır; Yardımcı çift / Rotasyon çifti / DC kutucukla seçilir,
+       her birinin kendi hız kutusu var; kısa yol düğmeleri sadece kutucukları işaretler;
+       hareket durum lambası + yardımcı motor etiketleri panelin altında. -->
+  <div class="panel" id="feed-start-panel"></div>
 
   <!-- 4) Step motor kontrolü (ham/µs-adım, ileri seviye) -->
   <div class="panel">
-    <h2>Step Motor</h2>
+    <h2>NEMA23 (Step Motor) — ham kontrol</h2>
     <div class="row-group">
       <label>Yön:</label>
       <select id="step-dir"><option value="1">Geri</option><option value="0">İleri</option></select>
@@ -250,20 +218,10 @@
     </div>
   </div>
 
-  <!-- Dönüş Motoru (NEMA17) bağımsız kontrolü (05-10-2026) — DC Motor
-       paneli gibi: RPM + yön butonları, hesaplanan µs/hız kapasitesi %. -->
-  <div class="panel" id="rot-panel">
-    <h2>Dönüş Motoru (NEMA17)</h2>
-    <div class="row-group">
-      <label>Çubuk Hızı (RPM):</label>
-      <input id="rot-rpm" type="number" value="10" min="0.1" step="0.1">
-      <button onclick="sendRot('cw', 'Saat Yönü', logCmdResult)">Saat Yönü</button>
-      <button onclick="sendRot('ccw', 'Saat Yönünün Tersi', logCmdResult)">Saat Yönünün Tersi</button>
-      <button data-no-drag-scroll onclick="sendRot('stop', 'Dur', logCmdResult)">Dur</button>
-    </div>
-    <div id="rot-speed-info" style="font-size:12.5px;color:#888;margin-top:6px"></div>
-    <div style="font-size:13px;color:#aaa;margin-top:6px">Durum: <span id="rot-live-status">—</span></div>
-  </div>
+  <!-- Yardımcı çift ve Rotasyon çifti bağımsız kontrolü (21-10-2026) — Besleme Başlat'a
+       girmeden tek başına başlat/durdur; içerik shared.js'ten (iki panel aynı yapıda). -->
+  <div class="panel" id="assist-panel"></div>
+  <div class="panel" id="rot-panel"></div>
 
   <!-- 7) Encoder bilgileri + sıfırlama -->
   <div class="panel">
@@ -335,7 +293,6 @@
       if (stepBtn) stepBtn.disabled = !!status.running;
       const feedBtn = document.getElementById("feed-start-btn");
       if (feedBtn) feedBtn.disabled = !!status.running;
-      renderRotStatus(status, "rot-live-status");
     }
 
     let previousConnectionState = null;
@@ -362,31 +319,10 @@
     }
 
     async function emergencyStop() {
-      // Step + DC + NEMA17 BİRLİKTE, anında durdurur (bkz. /motor/stop +
-      // /motor/dc dir=stop + /motor/rot dir=stop; firmware stop zaten rot'u da
-      // durdurur, açık rot stop çağrısı ek güvence — 05-10-2026) — bu davranış Kontrol Kriterleri/Step At
-      // değişikliklerinden BAĞIMSIZ, dokunulmadı (15-09-2026 regresyon testiyle
-      // ayrıca doğrulandı).
-      const statusEl = document.getElementById("stop-status");
-      statusEl.textContent = "Durduruluyor…";
-      try {
-        await fetch("/motor/stop", { method: "POST" });
-        await fetch("/motor/dc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dir: "stop" }),
-        });
-        await fetch("/motor/rot", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dir: "stop" }),
-        });
-        statusEl.textContent = "Durduruldu.";
-        logToConsole("DURDUR", "Step + DC + NEMA17 motoru durdur", "Komutlar gönderildi.", false);
-      } catch (e) {
-        statusEl.textContent = `Durdurma komutu gönderilemedi: ${e.message}`;
-        logToConsole("DURDUR", "Step + DC + NEMA17 motoru durdur", `Ağ hatası: ${e.message}`, true);
-      }
+      // NEMA23 + Yardımcı çift + Rotasyon çifti + DC BİRLİKTE, anında durdurur
+      // (tek istek /motor/stop-all; sunucu dört kanalı bağımsız durdurur, bkz.
+      // shared.js stopAllMotors). Kontrol Kriterleri/Step At değişikliklerinden BAĞIMSIZ.
+      await stopAllMotors();
     }
 
     // --- Seri port ---
@@ -440,84 +376,8 @@
       logToConsole(buttonName, buttonName, resultText, !!isError);
     }
 
-    // --- Besleme Başlat (23-09-2026) — mm/s+mm+mm/s²+RPM'i backend'e
-    // olduğu gibi gönderir, dönüşüm (delay_us/steps/accel_steps/duty%)
-    // SUNUCUDA (motion_calc.py) yapılır — kullanıcı ham birim hiç görmez.
-    // Backend hem step+DC hem watcher'ı tek istekte yönetiyor (bkz. POST
-    // /motor/feed-start main.py docstring'i).
-    async function sendFeedStart() {
-      if (lastStatus && lastStatus.running) {
-        renderFeedStartResult("Hareket bitmeden yeni besleme başlatılamaz. Hareketi durdurun veya bitmesini bekleyin.", true);
-        return;
-      }
-      const dir = parseInt(document.getElementById("feed-step-dir").value);
-      const speed_mms = Number(document.getElementById("feed-speed").value);
-      const distance_mm = Number(document.getElementById("feed-distance").value);
-      // İvme tik'i işaretli değilse input disabled olsa da değerini OKUMUYORUZ,
-      // her zaman 0 gönderiyoruz (backend accel_mms2<=0 => rampasız yorumluyor).
-      const accel_mms2 = document.getElementById("feed-accel-enable").checked
-        ? Number(document.getElementById("feed-accel").value) || 0
-        : 0;
-      const rpm = Number(document.getElementById("feed-rpm").value);
-      if (!(speed_mms > 0) || !(distance_mm > 0) || !(rpm > 0)) {
-        renderFeedStartResult("Geçersiz değer — hız, mesafe ve RPM 0'dan büyük olmalı, gönderilmedi.", true);
-        return;
-      }
-      const rotFields = collectFeedRotFields();  // shared.js — rot_motor/rot_dir/dc_dir/dc_speed_pct
-      if (rotFields.error) {
-        renderFeedStartResult(rotFields.error, true);
-        return;
-      }
-      let response;
-      try {
-        response = await fetch("/motor/feed-start", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dir, speed_mms, distance_mm, accel_mms2, rpm, ...rotFields.fields }),
-        });
-      } catch (e) {
-        renderFeedStartResult(`Ağ hatası: ${e.message}`, true);
-        logToConsole("Besleme Başlat", "POST /motor/feed-start", `Ağ hatası: ${e.message}`, true);
-        return;
-      }
-      let data;
-      try {
-        data = await response.json();
-      } catch {
-        data = null;
-      }
-      if (!response.ok) {
-        const detail = data?.detail ?? `sunucu ${response.status}`;
-        renderFeedStartResult(`Reddedildi: ${detail}`, true);
-        logToConsole("Besleme Başlat", "POST /motor/feed-start", `Reddedildi: ${detail}`, true);
-        return;
-      }
-      if (!data.success) {
-        renderFeedStartResult(`Step motoru başlatılamadı (${data.stage}) — dönüş motoruna hiç dokunulmadı.`, true);
-        logToConsole("Besleme Başlat", "POST /motor/feed-start", "Step başarısız, dönüş motoru gönderilmedi.", true);
-        return;
-      }
-      const sc = data.step_calc;
-      const rotFailure = describeRotFailure(data.rot_result);
-      renderFeedStartResult(
-        `Başlatıldı — step: ${sc.steps} adım, ${sc.delay_us}µs gecikme, ${sc.accel_steps} adım rampa | ` +
-        formatFeedStartRotSummary(data, rotFields.fields) +
-        (rotFailure ? `\n⚠ ${rotFailure}` : ""),
-        !!rotFailure,
-      );
-      renderFeedSpeedInfo("feed-speed-info", speed_mms, sc);
-      if (data.rot_calc) renderRotSpeedInfo("rot-speed-info", rpm, data.rot_calc);
-      logToConsole("Besleme Başlat", "POST /motor/feed-start",
-        `steps=${sc.steps} delay_us=${sc.delay_us} accel_steps=${sc.accel_steps}` +
-        (data.dc_calc ? ` duty=${data.dc_calc.duty}` : "") +
-        (data.rot_calc ? ` rot_delay_us=${data.rot_calc.delay_us}` : ""), !!rotFailure);
-    }
-
-    function renderFeedStartResult(text, isError) {
-      const el = document.getElementById("feed-start-result");
-      el.textContent = text;
-      el.classList.toggle("error", !!isError);
-      el.classList.toggle("success", !isError);
-    }
+    // Besleme Başlat gönderimi ve doğrulaması artık shared.js'te (sendFeedStart) —
+    // Operatör ve Admin aynı kodu kullanıyor.
 
     async function sendStep() {
       // Buton zaten hareket halindeyken disabled oluyor (renderStatus), ama
@@ -625,7 +485,7 @@
     }
 
     loadWheelDiameters();
-    initFeedRotMotorSelect();
+    initControlPanels();  // shared.js: Besleme Başlat + Rotasyon/Yardımcı çift panelleri, izinli hız aralıkları
     refreshPorts();
     startStatusWebSocket(onStatusMessage);
   </script>

@@ -34,6 +34,11 @@ STEPS_PER_REV = 25600
 # bilmesi gerekiyor). main.c değişirse burası da elle güncellenmeli.
 STEP_MIN_DELAY_US = 20  # main.c STEP_MIN_DELAY_US (tepe hız, DM556 200kHz limitine göre 4x güvenlik payı)
 STEP_MAX_DELAY_US = 60000  # main.c STEP_MAX_DELAY_US (timer'ın 16-bit sayıcı tavanı)
+# Firmware JSON ayrıştırıcısı komut sayılarını int32 okur: "steps" bu sınırı aşarsa taşar.
+STEP_MAX_STEPS = 2_000_000_000
+# Tek bir besleme komutunun işletme üst sınırı (yazım hatası koruması: 1e9 mm gibi
+# bir girdi sessizce kabul edilip saatlerce sürecek bir hareket başlatmasın).
+STEP_MAX_DISTANCE_MM = 100_000
 STEP_RAMP_START_DELAY_US = 2000  # main.c STEP_RAMP_START_DELAY_US (rampa başlangıç/bitiş gecikmesi)
 
 # NEMA17 dönüş ekseni (TB6600) sınırları — firmware/Core/Src/main.c'deki
@@ -41,6 +46,12 @@ STEP_RAMP_START_DELAY_US = 2000  # main.c STEP_RAMP_START_DELAY_US (rampa başla
 # sözleşmesi, 05-10-2026). main.c'de değişirse burası da elle güncellenmeli.
 ROT_MIN_DELAY_US = 100  # main.c ROT_MIN_DELAY_US (tepe hız, iki darbe arası en kısa süre)
 ROT_MAX_DELAY_US = 60000  # main.c ROT_MAX_DELAY_US (timer'ın 16-bit sayıcı tavanı)
+
+# Yardımcı çift (2× NEMA17 paralel, 2. TB6600, LPTIM1) sınırları — firmware
+# ASSIST_MIN_DELAY_US / ASSIST_MAX_DELAY_US ile BİREBİR EŞİT (docs/protocol.md
+# "Yardımcı çift assist", 21-10-2026). main.c'de değişirse burası da elle güncellenmeli.
+ASSIST_MIN_DELAY_US = 100  # tepe hız (10 kHz darbe)
+ASSIST_MAX_DELAY_US = 60000
 
 
 def mm_per_step(d_drive_mm: float) -> float:
@@ -75,22 +86,33 @@ def compute_step_command(speed_mms: float, distance_mm: float, accel_mms2: float
     kaçta kaçı" bilgisini görebilmesi için (JS'de DUPLICATE hesaplanmasın diye
     burada hesaplanıp response'a ekleniyor).
     """
-    if speed_mms <= 0:
+    # `not x > 0` (x <= 0 yerine): NaN'ı da yakalar; sonsuzlar aşağıda ayrıca elenir.
+    if not speed_mms > 0:
         raise ValueError("Hız (mm/s) 0'dan büyük olmalı")
-    if distance_mm <= 0:
+    if not distance_mm > 0:
         raise ValueError("Mesafe (mm) 0'dan büyük olmalı")
-    if d_drive_mm <= 0:
+    if not d_drive_mm > 0:
         raise ValueError("Tahrik tekerleği çapı (mm) 0'dan büyük olmalı")
+    if not math.isfinite(speed_mms) or not math.isfinite(distance_mm):
+        raise ValueError("Hız ve mesafe sonlu bir sayı olmalı")
 
     mps = mm_per_step(d_drive_mm)
 
+    # round() öncesi: devasa mesafe (1e308) bölümde sonsuza taşıp OverflowError vermesin
+    if distance_mm > STEP_MAX_DISTANCE_MM:
+        raise ValueError(f"Mesafe ({distance_mm} mm) çok büyük (en fazla {min(STEP_MAX_DISTANCE_MM, STEP_MAX_STEPS * mps):.0f} mm)")
     steps = round(distance_mm / mps)
     if steps <= 0:
         raise ValueError(
             f"Mesafe ({distance_mm} mm) bu teker çapıyla en az bir mikroadıma karşılık gelmiyor, çok küçük"
         )
+    if steps > STEP_MAX_STEPS or distance_mm > STEP_MAX_DISTANCE_MM:
+        max_mm = min(STEP_MAX_DISTANCE_MM, STEP_MAX_STEPS * mps)
+        raise ValueError(f"Mesafe ({distance_mm} mm) çok büyük (en fazla {max_mm:.0f} mm)")
 
-    delay_us = round(1_000_000 * mps / speed_mms)
+    delay_exact = 1_000_000 * mps / speed_mms
+    # Aşırı küçük hızda bölüm sonsuza taşabilir (round(inf) OverflowError verirdi)
+    delay_us = round(delay_exact) if math.isfinite(delay_exact) else STEP_MAX_DELAY_US + 1
     if delay_us < STEP_MIN_DELAY_US or delay_us > STEP_MAX_DELAY_US:
         min_speed = 1_000_000 * mps / STEP_MAX_DELAY_US
         max_speed = 1_000_000 * mps / STEP_MIN_DELAY_US
@@ -141,7 +163,7 @@ def compute_dc_duty(rpm_rod: float, d_wheel_dc_mm: float, d_rod_mm: float, rpm_m
     aynı gerekçeyle step tarafında da server-side reddediliyor (bkz.
     compute_step_command docstring'i).
     """
-    if rpm_rod <= 0:
+    if not rpm_rod > 0:
         raise ValueError("RPM 0'dan büyük olmalı")
     if d_wheel_dc_mm <= 0:
         raise ValueError("DC teker çapı (mm) 0'dan büyük olmalı")
@@ -151,6 +173,8 @@ def compute_dc_duty(rpm_rod: float, d_wheel_dc_mm: float, d_rod_mm: float, rpm_m
         raise ValueError("RPM_MAX_NOLOAD 0'dan büyük olmalı")
 
     duty_exact = rpm_rod * 100 * d_rod_mm / (rpm_max_noload * d_wheel_dc_mm)
+    if not math.isfinite(duty_exact):
+        raise ValueError(f"İstenen RPM ({rpm_rod}) sonlu bir sayı olmalı")
     duty = round(duty_exact)
 
     if duty < 1:
@@ -222,3 +246,113 @@ def compute_rot_command(rpm_rod: float, d_wheel_rot_mm: float, d_rod_mm: float, 
         "pulses_per_s": pulses_per_s,
         "speed_pct_of_max": speed_pct_of_max,
     }
+
+
+def compute_assist_command(speed_mms: float, d_wheel_assist_mm: float, ppr: float) -> dict:
+    """İstenen çubuk yüzey hızı (mm/s) -> yardımcı çift darbe gecikmesi (µs,
+    firmware `{"cmd":"assist","delay":...}`). `compute_rot_command`'ın aynası;
+    fark: giriş çubuk RPM'i değil, çubuğun yüzey hızı (mm/s). Sürtünme
+    tahriki, tekerlek çevresi = çubuk yüzey yolu:
+
+        wheel_rpm    = v / (pi × D_wheel_assist) × 60
+        pulses_per_s = wheel_rpm / 60 × ppr
+        delay_us     = round(1e6 / pulses_per_s)
+
+    `ppr` = 2. TB6600 darbe/tur (DIP switch ile aynı, bkz. motion_params.ASSIST_PPR).
+    Hız oranı/patinaj payı YOK: her motor kendi kutusundaki hızla gider.
+
+    `delay_us` [ASSIST_MIN_DELAY_US, ASSIST_MAX_DELAY_US] dışına çıkarsa
+    SESSİZCE KIRPILMAZ (firmware kırpar, ama burada operatöre net bir hata
+    verilir): desteklenen min/max mm/s ile açıklayıcı ValueError.
+
+    Dönen `speed_pct_of_max`: istenen darbe hızının ASSIST_MIN_DELAY_US'teki
+    (tepe) darbe hızına oranı, % (compute_rot_command ile aynı mantık).
+    """
+    if not speed_mms > 0:
+        raise ValueError("Hız (mm/s) 0'dan büyük olmalı")
+    if not d_wheel_assist_mm > 0:
+        raise ValueError("Yardımcı çift teker çapı (mm) 0'dan büyük olmalı")
+    if not ppr > 0:
+        raise ValueError("ASSIST_PPR (darbe/tur) 0'dan büyük olmalı")
+
+    wheel_rpm = speed_mms / (math.pi * d_wheel_assist_mm) * 60
+    pulses_per_s = wheel_rpm / 60 * ppr
+
+    # pulses_per_s alt taşmayla 0'a düşerse (aşırı küçük hız) bölme hatası
+    # yerine aralık dışı hatasına düşsün.
+    delay_exact = 1_000_000 / pulses_per_s if pulses_per_s > 0 else math.inf
+    delay_us = round(delay_exact) if math.isfinite(delay_exact) else None
+
+    if delay_us is None or delay_us < ASSIST_MIN_DELAY_US or delay_us > ASSIST_MAX_DELAY_US:
+        min_mms, max_mms = _assist_speed_bounds_mms(d_wheel_assist_mm, ppr)
+        raise ValueError(
+            f"İstenen hız ({speed_mms} mm/s) bu ayarlarla desteklenen aralığın dışında "
+            f"(min ~{min_mms:.3f} mm/s, max ~{max_mms:.1f} mm/s)"
+        )
+
+    max_pulses_per_s = 1_000_000 / ASSIST_MIN_DELAY_US
+    speed_pct_of_max = pulses_per_s / max_pulses_per_s * 100
+
+    return {
+        "delay_us": delay_us,
+        "wheel_rpm": wheel_rpm,
+        "pulses_per_s": pulses_per_s,
+        "speed_pct_of_max": speed_pct_of_max,
+    }
+
+
+def _assist_speed_bounds_mms(d_wheel_assist_mm: float, ppr: float) -> tuple[float, float]:
+    """Yardımcı çiftin desteklenen (min, max) çubuk yüzey hızı, mm/s —
+    delay_us = ASSIST_MAX_DELAY_US / ASSIST_MIN_DELAY_US uçlarına karşılık gelir."""
+    mm_per_pulse = math.pi * d_wheel_assist_mm / ppr
+    return (
+        (1_000_000 / ASSIST_MAX_DELAY_US) * mm_per_pulse,
+        (1_000_000 / ASSIST_MIN_DELAY_US) * mm_per_pulse,
+    )
+
+
+# --------------------------------------------------------------------------
+#  KANAL BAZLI İZİNLİ HIZ ARALIKLARI (21-10-2026) — arayüzün hız kutularına
+#  min/max koymak ve anlamlı hata göstermek için. Sunucu aynı sınırları
+#  compute_*_command içinde zaten uyguluyor (4xx); bu fonksiyonlar yalnızca
+#  aynı sınırları DÜZ SAYI olarak dışarı verir (JS'de formül kopyalanmasın diye).
+#  Alt sınır yukarı, üst sınır aşağı yuvarlanır: gösterilen uç değerler
+#  kesinlikle kabul edilir.
+# --------------------------------------------------------------------------
+
+def _round_range(lo: float, hi: float, digits: int = 3) -> dict:
+    factor = 10**digits
+    return {"min": math.ceil(lo * factor) / factor, "max": math.floor(hi * factor) / factor}
+
+
+def step_speed_limits_mms(d_drive_mm: float) -> dict:
+    """NEMA23 desteklenen hız aralığı (mm/s) — delay STEP_MAX/STEP_MIN uçları."""
+    mps = mm_per_step(d_drive_mm)
+    return _round_range(1_000_000 * mps / STEP_MAX_DELAY_US, 1_000_000 * mps / STEP_MIN_DELAY_US)
+
+
+def step_distance_limits_mm(d_drive_mm: float) -> dict:
+    """NEMA23 desteklenen mesafe aralığı (mm): en az 1 mikroadım, en çok
+    işletme sınırı (STEP_MAX_DISTANCE_MM; firmware adım sayacı sınırından küçükse)."""
+    mps = mm_per_step(d_drive_mm)
+    return _round_range(mps, min(STEP_MAX_DISTANCE_MM, STEP_MAX_STEPS * mps))
+
+
+def rot_rpm_limits(d_wheel_rot_mm: float, d_rod_mm: float, ppr: float) -> dict:
+    """Rotasyon çiftinin desteklenen çubuk RPM aralığı."""
+    rod_rpm_per_pps = 60 / ppr * d_wheel_rot_mm / d_rod_mm
+    return _round_range(
+        (1_000_000 / ROT_MAX_DELAY_US) * rod_rpm_per_pps,
+        (1_000_000 / ROT_MIN_DELAY_US) * rod_rpm_per_pps,
+    )
+
+
+def assist_speed_limits_mms(d_wheel_assist_mm: float, ppr: float) -> dict:
+    """Yardımcı çiftin desteklenen çubuk yüzey hızı aralığı (mm/s)."""
+    return _round_range(*_assist_speed_bounds_mms(d_wheel_assist_mm, ppr))
+
+
+def dc_rpm_limits(d_wheel_dc_mm: float, d_rod_mm: float, rpm_max_noload: float) -> dict:
+    """DC motorun desteklenen çubuk RPM aralığı: duty %1 .. %100 (bkz. compute_dc_duty)."""
+    rpm_per_duty_pct = rpm_max_noload * d_wheel_dc_mm / (100 * d_rod_mm)
+    return _round_range(1 * rpm_per_duty_pct, 100 * rpm_per_duty_pct)

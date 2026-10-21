@@ -109,3 +109,15 @@ def _reset_roi_read_cache():
     main.reset_roi_read_cache()
     yield
     main.reset_roi_read_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_motion_monitor():
+    """motion_monitor.motion_monitor (21-10-2026, hareket durum lambası) modül
+    seviyesinde tek örnek: bir testin bıraktığı komut hatası/örnekler sonraki
+    teste sızmasın. Her testten önce VE sonra sıfırlanır."""
+    import motion_monitor
+
+    motion_monitor.motion_monitor.__init__()
+    yield
+    motion_monitor.motion_monitor.__init__()

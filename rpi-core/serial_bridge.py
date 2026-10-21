@@ -24,6 +24,8 @@ from typing import Optional
 import serial
 from serial.tools import list_ports
 
+import motion_calc
+
 BAUD = 115200
 
 # Port fiziksel olarak açılabilir ama karşı taraf STM32 olmayabilir (Mac'in
@@ -48,6 +50,37 @@ RECONNECT_BACKOFF_S = 3.0
 RECONNECT_MAX_ATTEMPTS = 5
 
 _logger = logging.getLogger("feedvision.serial_bridge")
+
+# Durum satırında motor kanallarını anlatan alanlar (docs/protocol.md). Köprü
+# durum satırını olduğu gibi saklar (alan filtrelemez); bu liste yalnızca
+# "hangi alanlar motor durumudur" bilgisini tek yerde tutar. `rot`/`assist`:
+# 0 dur, 1 cw, 2 ccw; `rdelay`/`adelay`: komut edilen darbe periyodu µs.
+MOTOR_STATUS_FIELDS = ("running", "dc", "dcSpeed", "rot", "rdelay", "assist", "adelay")
+
+ASSIST_DIRS = ("cw", "ccw", "stop")
+
+
+def make_assist_command(direction: str, delay_us: int | None = None) -> dict:
+    """Yardımcı çift (2× NEMA17 paralel, 2. TB6600) firmware komutunu kurar:
+    `{"cmd":"assist","dir":"cw"|"ccw","delay":<µs>}` ya da `{"cmd":"assist","dir":"stop"}`
+    (docs/protocol.md). `rot` komutunun aynası.
+
+    Firmware aralık dışı delay'i sessizce kırpar; bu yardımcı ise kırpmaz,
+    ValueError verir (komutu çağıran taraf — main.py — zaten 400'e çevirir).
+    Böylece yanlış hesaplanmış bir değer sessizce başka bir hıza dönüşmez.
+    """
+    if direction not in ASSIST_DIRS:
+        raise ValueError(f"assist dir 'cw', 'ccw' veya 'stop' olmalı ('{direction}' geçersiz)")
+    if direction == "stop":
+        return {"cmd": "assist", "dir": "stop"}
+    if isinstance(delay_us, bool) or not isinstance(delay_us, int):
+        raise ValueError("assist delay (µs) tam sayı olmalı")
+    if not motion_calc.ASSIST_MIN_DELAY_US <= delay_us <= motion_calc.ASSIST_MAX_DELAY_US:
+        raise ValueError(
+            f"assist delay {delay_us} µs aralık dışı "
+            f"({motion_calc.ASSIST_MIN_DELAY_US}..{motion_calc.ASSIST_MAX_DELAY_US})"
+        )
+    return {"cmd": "assist", "dir": direction, "delay": delay_us}
 
 
 class STM32Bridge:

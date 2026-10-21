@@ -22,6 +22,7 @@ dosyada sessizce varsayılanlara dönme, tek paylaşılan JSON dosyası).
 """
 
 import json
+import math
 import threading
 from pathlib import Path
 
@@ -36,32 +37,46 @@ _lock = threading.Lock()
 # parametre — DM556'da koddaki varsayım ile DIP uyuşmayınca 32 kat hata
 # yaşandı (05-10-2026), bu tuzak tekrarlanmasın diye.
 ALLOWED_ROT_PPR: tuple[int, ...] = (200, 400, 800, 1600, 3200, 6400)
+# Yardımcı çiftin TB6600'ü (#2) de aynı etiket tablosunu kullanır.
+ALLOWED_ASSIST_PPR: tuple[int, ...] = ALLOWED_ROT_PPR
+# Sürücü darbe/tur alanları ve izinli değerleri
+_PPR_FIELDS: dict[str, tuple[int, ...]] = {"ROT_PPR": ALLOWED_ROT_PPR, "ASSIST_PPR": ALLOWED_ASSIST_PPR}
+# Mantıksal (bool) alanlar
+_BOOL_FIELDS: frozenset[str] = frozenset({"assist_dir_invert"})
 
 # Sahada henüz kesinleşmemiş/tahmini değerler için varsayılanlar (23-09-2026
 # spesifikasyonu) — Admin panelinden değiştirilebilir; buradaki değerler
 # SADECE dosya hiç yoksa veya bir alan eksikse kullanılır.
-DEFAULTS: dict[str, float | int] = {
+DEFAULTS: dict[str, float | int | bool] = {
     "D_drive_mm": 52.0,  # tahrik tekerleği (step+DC, özdeş) çapı — sahada kesin efektif değer teyit edilecek
     "D_wheel_dc_mm": 52.0,  # DC motorun sürtünme tekeri çapı — D_drive ile aynı beklenir, ayrı alan
     "D_rod_mm": 10.0,  # besleme çubuğu çapı — mevcut stok, ileride değişebilir
     "RPM_MAX_NOLOAD": 100.0,  # DC motor milinin %100 duty'deki tahmini boşta dönüş hızı — PLACEHOLDER, sahada takometreyle ölçülecek
     "D_wheel_rot_mm": 52.0,  # NEMA17 dönüş ekseni sürtünme tekeri çapı — DC tekerlekle aynı varsayım, sahada teyit edilecek
     "ROT_PPR": 3200,  # TB6600 darbe/tur (1/16 mikroadım) — DIP switch ile aynı olmalı, yalnızca ALLOWED_ROT_PPR değerleri
+    "D_wheel_assist_mm": 13.0,  # yardımcı çift sürtünme tekeri çapı — sahada teyit edilecek
+    "ASSIST_PPR": 3200,  # 2. TB6600 darbe/tur — DIP switch ile aynı olmalı, yalnızca ALLOWED_ASSIST_PPR değerleri
+    "assist_dir_invert": False,  # False: NEMA23 ileri iken assist "cw"; True: ters ("ccw")
 }
 
 
-def _valid_param_value(key: str, value) -> float | int | None:
+def _valid_param_value(key: str, value) -> float | int | bool | None:
     """Alan için geçerli bir değerse normalize edilmiş halini, değilse None
-    döner. ROT_PPR yalnızca ALLOWED_ROT_PPR değerlerini (int olarak) kabul
-    eder; diğer alanlar 0'dan büyük sayı. bool sayı sayılmaz."""
+    döner. *_PPR alanları yalnızca izinli değerleri (int olarak) kabul eder;
+    mantıksal alanlar yalnızca bool; diğer alanlar 0'dan büyük, SONLU sayı.
+    bool sayı sayılmaz (mantıksal alanlar hariç)."""
+    if key in _BOOL_FIELDS:
+        return value if isinstance(value, bool) else None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if key == "ROT_PPR":
-        return int(value) if value in ALLOWED_ROT_PPR else None
+    if key in _PPR_FIELDS:
+        return int(value) if value in _PPR_FIELDS[key] else None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return float(value) if value > 0 else None
 
 
-def _read_all() -> dict[str, float | int]:
+def _read_all() -> dict[str, float | int | bool]:
     """motion_params.json'un tamamını okur. Dosya yoksa/bozuksa/bir alan
     eksikse o alan(lar) için DEFAULTS kullanılır (servis hiçbir zaman
     eksik/None bir parametreyle komut hesaplamaya çalışmasın diye)."""
@@ -82,7 +97,7 @@ def _read_all() -> dict[str, float | int]:
     return merged
 
 
-def get_params() -> dict[str, float | int]:
+def get_params() -> dict[str, float | int | bool]:
     """Şu an geçerli TÜM hareket parametrelerini döner (eksik alanlar
     DEFAULTS ile tamamlanmış olarak — çağıran taraf hiçbir zaman None/eksik
     alan görmez)."""
@@ -90,10 +105,10 @@ def get_params() -> dict[str, float | int]:
         return _read_all()
 
 
-def save_params(params: dict[str, float | int]) -> dict[str, float | int]:
+def save_params(params: dict[str, float | int | bool]) -> dict[str, float | int | bool]:
     """Verilen alanları kaydeder (kısmi güncelleme — DEFAULTS anahtarları
     dışındaki alanlar yok sayılır, eksik bırakılan alanlar eski değerinde
-    kalır; geçersiz değer — ör. ROT_PPR izinli listede değilse — sessizce yok
+    kalır; geçersiz değer — ör. ROT_PPR/ASSIST_PPR izinli listede değilse — sessizce yok
     sayılır, API katmanı main.py bunu 400 ile önceden reddeder). Atomik
     yazım: önce .tmp'ye yaz, sonra rename (roi_store.py ile aynı desen)."""
     with _lock:
