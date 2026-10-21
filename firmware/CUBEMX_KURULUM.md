@@ -248,8 +248,8 @@ DM556'da ENA boşta bırakılırsa sürücü sürekli aktif kalır — test içi
 3. **Encoder PPR:** koddaki `ENC_PPR` = 600. Encoder etiketinde yazan değerle karşılaştır.
 4. **Step darbe genişliği:** DM556 datasheet'i "en yüksek frekans cevabı 200 kHz" diyor
    (yani en kısa darbe periyodu 5 µs). Kod güvenlik için alt sınırı **20 µs**'de tutuyor.
-   İlk çalıştırmada osiloskopla PUL+ sinyaline bakıp darbenin düzgün göründüğünü teyit et
-   — 3.3V ile optokuplör sürüyoruz, kenarlar beklenenden yavaş çıkabilir.
+   İlk çalıştırmada motor düzgün dönüyor mu (ses/titreşim), düşük hızda adım atlıyor mu diye bak
+   — 3.3V ile optokuplör sürüyoruz, kenarlar yavaş çıkarsa motor titreyip adım atlayabilir.
 5. **Motor titriyor ama dönmüyorsa:** motor faz kabloları (A+/A-/B+/B-) yanlış eşleşmiştir.
 
 ---
@@ -340,7 +340,7 @@ DIV64 + ENDOFPERIOD + PCLK1, PB0 `ASSIST_PUL` AF5, PB2 `ASSIST_DIR` çıktı ola
 **Kablolama, switch ayarları ve pin gerekçesi:** vault'ta `pinout_referans.md` (TB6600 bölümü, 2. sürücü). Komut/durum
 formatı: `docs/protocol.md` "Yardımcı çift" bölümü.
 
-**Osiloskopsuz saha doğrulaması (ilk güç verme):**
+**Saha doğrulaması (ilk güç verme):**
 1. 2. TB6600'ü ve **tek** NEMA17'yi bağla (ikincisini sonra ekle). `{"cmd":"assist","dir":"cw","delay":2000}` gönder → yanıt `{"ok":"assist"}`,
    durum satırında `"assist":1,"adelay":2000`, motor yavaş (1/16'da ~9 dev/dk) ve sorunsuz dönmeli.
 2. Hız değiştir: `delay` 1000 → 500 → 2000 (çalışırken tekrar gönder). Motor takılmadan, ses/titreşim sıçraması olmadan geçmeli.

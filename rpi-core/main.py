@@ -1148,19 +1148,53 @@ async def _journal_loop():
         await asyncio.sleep(JOURNAL_INTERVAL_S)
 
 
+def _status_fault_text(status: dict) -> str | None:
+    """Durum satırında firmware hata göstergesi varsa (fault/err/error alanı sıfırdan farklı)
+    kısa metni, yoksa None. Mevcut protokolde böyle bir alan yok; firmware ileride eklerse
+    ya da bir hata satırı durum akışına karışırsa HATA yolu devreye girer."""
+    for key in ("fault", "err", "error"):
+        value = status.get(key)
+        if value not in (None, 0, False, "", "0"):
+            return f"durum satırında hata göstergesi {key}={value}"
+    return None
+
+
 async def _motion_monitor_loop():
-    """Arka planda ~10 Hz: STM32 durumunu (encoder + running) hareket izleyicisine
-    besler (bkz. motion_monitor.py). Hata olursa döngü ölmez, bir sonraki turda
-    yeniden dener (aynı hata her 0,1 sn log'u doldurmasın diye sadece ilkini yazar)."""
-    logged_error = False
+    """Arka planda ~10 Hz: STM32 durumunu (encoder + running) hareket izleyicisine besler
+    (bkz. motion_monitor.py) ve HATA koşullarını gözler (21-10-2026):
+      - besleme sürerken seri bağlantı koptu,
+      - durum satırında firmware hata göstergesi belirdi,
+      - bu döngünün kendisinde beklenmedik exception.
+    Hepsinde _trigger_fault: tüm motorlar durdurulur, sebep arayüze/log'a yazılır.
+    NOT: encoder-hareket-yok (kırmızı lamba) HATA SAYILMAZ, otomatik durdurma yok."""
+    loop_failed = False
+    prev_connected = False
+    prev_active = False
+    prev_status_fault = None
     while True:
         try:
-            motion_monitor.observe(bridge.get_status(), bridge.is_connected, time.monotonic())
-            logged_error = False
-        except Exception:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
-            if not logged_error:
+            status = bridge.get_status()
+            connected = bridge.is_connected
+            motion_monitor.observe(status, connected, time.monotonic())
+            watcher_active = _sync_watcher_task is not None and not _sync_watcher_task.done()
+            active = watcher_active or bool(status.get("running"))
+            if prev_connected and not connected and prev_active:
+                _trigger_fault("Seri bağlantı", "besleme sürerken kontrol kartı bağlantısı koptu")
+                active = False
+            status_fault = _status_fault_text(status) if connected else None
+            if status_fault and status_fault != prev_status_fault:
+                _trigger_fault("Kontrol kartı", status_fault)
+            prev_status_fault = status_fault
+            prev_connected, prev_active = connected, active
+            loop_failed = False
+        except Exception as e:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
+            if not loop_failed:  # aynı hata her 0,1 sn'de tekrar tekrar tetiklenmesin
+                loop_failed = True
                 logging.getLogger("feedvision.motion_monitor").exception("Hareket izleme dongusunde beklenmeyen hata")
-                logged_error = True
+                try:
+                    _trigger_fault("Hareket izleme döngüsü", f"beklenmeyen hata: {e}")
+                except Exception:  # noqa: BLE001 — HATA yolu bile patlarsa döngü yine ölmesin
+                    logging.getLogger("feedvision.motion_monitor").exception("HATA yolu da basarisiz")
         await asyncio.sleep(MOTION_MONITOR_INTERVAL_S)
 
 
@@ -1299,6 +1333,16 @@ class StepCommand(BaseModel):
     accel: int = Field(default=0, ge=0)  # kaç adımda hızlanıp/yavaşlanılacağı (0 = rampasız, sabit hız — eski davranış)
 
 
+def _with_fault_on_failure(result: dict, channel: str) -> dict:
+    """Bağımsız panel komutu için: firmware err ya da zaman aşımı döndüyse HATA yolunu çalıştırır
+    (tüm motorlar durur) ve yanıta `fault` ekler. `sent:false` (kart bağlı değil) HATA sayılmaz —
+    komut hiç gitmedi, durdurulacak bir şey başlamadı. Durdurma komutlarında çağrılmaz."""
+    if result.get("sent") and (result.get("timed_out") or "err" in (result.get("reply") or {})):
+        fault = _trigger_fault(_MOTOR_NAMES[channel], _fault_detail(result))
+        return {**result, "fault": fault}
+    return result
+
+
 def _command_ack(result: dict) -> tuple[bool, str | None]:
     """bridge.send_command sonucundan (ok, neden): komut seri porta yazıldı,
     zaman aşımı olmadı ve firmware `err` dönmedi mi? Başarısızsa Türkçe kısa neden."""
@@ -1312,6 +1356,75 @@ def _command_ack(result: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+_motor_fault_logger = logging.getLogger("feedvision.motor_fault")
+
+# Durdurma sırası (tüm kanallar bağımsız; rot SONA bırakıldı — eski davranışla uyumlu):
+# firmware `stop` step+rot+assist'i keser, açık dc/assist/rot stop'ları ek güvence
+# (DC'yi yalnızca açık `dc stop` durdurur).
+_STOP_ALL_COMMANDS = (
+    ("step", {"cmd": "stop"}),
+    ("dc", {"cmd": "dc", "dir": "stop"}),
+    ("assist", {"cmd": "assist", "dir": "stop"}),
+    ("rot", {"cmd": "rot", "dir": "stop"}),
+)
+
+_MOTOR_NAMES = {
+    "step": "NEMA23 step",
+    "assist": "Yardımcı çift (assist)",
+    "rot": "Rotasyon çifti (rot)",
+    "dc": "DC",
+}
+
+
+def _stop_all_channels() -> dict:
+    """4 kanala BAĞIMSIZ stop gönderir; biri exception verse ya da yanıt vermese de
+    diğerleri yine denenir. Çalışan feed-start watcher'ı iptal edilir. Asla exception
+    fırlatmaz. Dönen: kanal -> bridge.send_command sonucu ({"sent": False, "error": ...} hata halinde)."""
+    if _sync_watcher_task is not None and not _sync_watcher_task.done():
+        _sync_watcher_task.cancel()
+    results: dict = {}
+    for name, command in _STOP_ALL_COMMANDS:
+        try:
+            results[name] = bridge.send_command(command)
+        except Exception as e:  # noqa: BLE001 — bir kanalın hatası diğerlerinin durdurulmasını engellemesin
+            results[name] = {"sent": False, "error": str(e), "command": command}
+    return results
+
+
+def _fault_detail(result: dict) -> str:
+    """Başarısız bir komut sonucunu (firmware yanıtı ya da hata) tek cümlelik nedene çevirir."""
+    if result is None:
+        return "komut gönderimi sırasında hata"
+    if not result.get("sent"):
+        return "komut gönderilemedi (kontrol kartı bağlı değil)"
+    if result.get("timed_out"):
+        return "kontrol kartı komuta yanıt vermedi (timeout)"
+    reply = result.get("reply") or {}
+    if "err" in reply:
+        return str(result.get("raw_reply") or json.dumps(reply, ensure_ascii=False))
+    return "beklenmeyen yanıt"
+
+
+def _trigger_fault(motor: str, detail: str, stop_all: bool = True) -> dict:
+    """HATA yolu (21-10-2026, Fatih kararı): bir motor komutu err/timeout/exception verdiyse,
+    seri bağlantı koptuysa ya da izleyici beklenmedik hata aldıysa TÜM motorlar durdurulur
+    (stop-all mantığı, hata olsa da diğer kanallara devam), watcher iptal edilir, lamba kırmızı +
+    arayüz banner'ı/konsol satırı için HATA kaydı tutulur ve aynı satır sistem log'una yazılır.
+
+    stop_all=False: hiçbir motor başlatılmamış durum (ör. NEMA23 komutu daha ilk adımda reddedildi) —
+    durdurma gönderilmez, satır "hiçbir motor başlatılmadı" der. Asla exception fırlatmaz."""
+    if stop_all:
+        results = _stop_all_channels()
+        line = f"[HATA] Tüm motorlar durduruldu. Sebep: {motor}: {detail}"
+        failed = [name for name, r in results.items() if not r.get("sent")]
+        if failed:
+            line += f" (durdurma komutu gitmeyen kanallar: {', '.join(_MOTOR_NAMES[n] for n in failed)})"
+    else:
+        line = f"[HATA] Besleme başlatılamadı, hiçbir motor başlatılmadı. Sebep: {motor}: {detail}"
+    _motor_fault_logger.error(line)
+    return motion_monitor.note_fault(line, motor, detail, stopped_all=stop_all)
+
+
 @app.post("/motor/step")
 def motor_step(c: StepCommand):
     global _last_step_dir
@@ -1322,10 +1435,14 @@ def motor_step(c: StepCommand):
     _last_step_dir = c.dir
     # send_command artık {"sent","raw_command","command","raw_reply","reply","timed_out"}
     # döndürüyor — UI hem gönderdiğimiz ham komutu hem STM32'nin ok/err yanıtını gösterebilsin diye.
-    result = bridge.send_command({"cmd": "step", "dir": c.dir, "delay": c.delay, "steps": c.steps, "accel": c.accel})
+    try:
+        result = bridge.send_command({"cmd": "step", "dir": c.dir, "delay": c.delay, "steps": c.steps, "accel": c.accel})
+    except Exception as e:  # noqa: BLE001 — seri port hatası: tüm motorları durdur, 502
+        fault = _trigger_fault(_MOTOR_NAMES["step"], f"seri port hatası: {e}")
+        raise HTTPException(status_code=502, detail=f"{fault['line']} (STM32 ile haberleşme hatası: {e})")
     ok, reason = _command_ack(result)
     motion_monitor.note_command(ok, reason, time.monotonic())
-    return result
+    return _with_fault_on_failure(result, "step")
 
 
 @app.post("/motor/stop")
@@ -1351,21 +1468,10 @@ def motor_stop_all():
     keser; açık assist/rot stop'ları ek güvence, DC'yi ise yalnızca açık
     `dc stop` durdurur. Çalışan feed-start watcher'ı da iptal edilir (DUR'dan
     sonra boşuna fail-safe bekleyip log kirletmesin). Hiçbir durumda 5xx
-    dönmez: sonuç `results` içinde kanal kanal, `success` hepsi gittiyse true."""
-    if _sync_watcher_task is not None and not _sync_watcher_task.done():
-        _sync_watcher_task.cancel()
-    motion_monitor.note_stop()
-    results: dict = {}
-    for name, command in (
-        ("step", {"cmd": "stop"}),
-        ("assist", {"cmd": "assist", "dir": "stop"}),
-        ("rot", {"cmd": "rot", "dir": "stop"}),
-        ("dc", {"cmd": "dc", "dir": "stop"}),
-    ):
-        try:
-            results[name] = bridge.send_command(command)
-        except Exception as e:  # noqa: BLE001 — bir kanalın hatası diğerlerinin durdurulmasını engellemesin
-            results[name] = {"sent": False, "error": str(e), "command": command}
+    dönmez: sonuç `results` içinde kanal kanal, `success` hepsi gittiyse true.
+    Operatörün Dur'u olduğu için varsa HATA durumu (lamba/banner) da temizlenir."""
+    motion_monitor.note_stop()  # operatörün Dur'u: HATA durumu da kalkar
+    results = _stop_all_channels()
     return {"success": all(r.get("sent") for r in results.values()), "results": results}
 
 
@@ -1377,7 +1483,14 @@ class DcCommand(BaseModel):
 @app.post("/motor/dc")
 def motor_dc(c: DcCommand):
     speed = max(0, min(100, c.speed))
-    return bridge.send_command({"cmd": "dc", "dir": c.dir, "speed": speed})
+    try:
+        result = bridge.send_command({"cmd": "dc", "dir": c.dir, "speed": speed})
+    except Exception as e:  # noqa: BLE001 — seri port hatası: tüm motorları durdur, 502
+        if c.dir == "stop":
+            raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+        fault = _trigger_fault(_MOTOR_NAMES["dc"], f"seri port hatası: {e}")
+        raise HTTPException(status_code=502, detail=f"{fault['line']} (STM32 ile haberleşme hatası: {e})")
+    return result if c.dir == "stop" else _with_fault_on_failure(result, "dc")
 
 
 class RotCommand(BaseModel):
@@ -1418,7 +1531,12 @@ def motor_rot(c: RotCommand):
     try:
         result = bridge.send_command(command)
     except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
-        raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+        if c.dir == "stop":
+            raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+        fault = _trigger_fault(_MOTOR_NAMES["rot"], f"seri port hatası: {e}")
+        raise HTTPException(status_code=502, detail=f"{fault['line']} (STM32 ile haberleşme hatası: {e})")
+    if c.dir != "stop":
+        result = _with_fault_on_failure(result, "rot")
     if rot_calc is not None:
         result = {**result, "rot_calc": rot_calc}
     return result
@@ -1464,7 +1582,12 @@ def motor_assist(c: AssistCommand):
     try:
         result = bridge.send_command(command)
     except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
-        raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+        if c.dir == "stop":
+            raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+        fault = _trigger_fault(_MOTOR_NAMES["assist"], f"seri port hatası: {e}")
+        raise HTTPException(status_code=502, detail=f"{fault['line']} (STM32 ile haberleşme hatası: {e})")
+    if c.dir != "stop":
+        result = _with_fault_on_failure(result, "assist")
     if assist_calc is not None:
         result = {**result, "assist_calc": assist_calc}
     return result
@@ -1598,6 +1721,10 @@ async def _sync_watcher(max_wait_s: float, stop_dc: bool = True, stop_rot: bool 
                 "fail-safe durdurma gonderiliyor",
                 max_wait_s,
             )
+            # Fail-safe süresi doldu: bu bir HATA — yalnızca yardımcı motorları değil TÜM
+            # motorları (NEMA23 dahil) durdur ve nedeni arayüze/log'a yaz.
+            _trigger_fault(_MOTOR_NAMES["step"], f"{max_wait_s:.0f} sn içinde bitmedi (bağlantı kopmuş olabilir)")
+            return
 
         # Her motorun durdurma komutu BİRBİRİNDEN BAĞIMSIZ denenir: biri seri
         # hatayla patlasa da diğeri yine durdurulsun (fail-safe).
@@ -1615,8 +1742,9 @@ async def _sync_watcher(max_wait_s: float, stop_dc: bool = True, stop_rot: bool 
                 _sync_watcher_logger.exception("feed-start: %s durdurma komutu gonderilemedi", stop_command["cmd"])
     except asyncio.CancelledError:
         raise
-    except Exception:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
+    except Exception as e:  # noqa: BLE001 — arka plan görevi hicbir hatada tamamen olmemeli
         _sync_watcher_logger.exception("feed-start senkron izleyicisinde beklenmeyen hata")
+        _trigger_fault("Besleme izleyicisi", f"beklenmeyen hata: {e}")
 
 
 # Yardımcı motorların kanal adı -> arayüzde görünen Türkçe ad (uyarı/hata metinleri için).
@@ -1810,45 +1938,56 @@ def motor_feed_start(c: FeedStartCommand):
         step_result = bridge.send_command(step_command)
     except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
         motion_monitor.note_command(False, f"seri port hatası ({e})", time.monotonic())
-        raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+        # Hiçbir motor başlatılmadı (NEMA23 komutu daha ilk adımda patladı): durdurma gönderilmez.
+        fault = _trigger_fault(_MOTOR_NAMES["step"], f"seri port hatası: {e}", stop_all=False)
+        raise HTTPException(status_code=502, detail=f"{fault['line']} (STM32 ile haberleşme hatası: {e})")
 
     step_ok, step_reason = _command_ack(step_result)
     motion_monitor.note_command(step_ok, step_reason, time.monotonic())
     if not step_ok:
+        fault = _trigger_fault(_MOTOR_NAMES["step"], _fault_detail(step_result), stop_all=False)
         return {
             "success": False,
             "stage": "step",
             "reason": step_reason,
+            "fault": fault,
             "step_calc": step_calc,
             "step_result": step_result,
         }
 
-    # Seçili yardımcı motorlar NEMA23'ün hemen ardından başlatılır. Biri seri
-    # hatayla patlarsa (502) o ana kadar başlayan her şey best-effort durdurulur
-    # (watcher henüz spawn edilmedi): önce firmware `stop` (NEMA23 + rot + assist),
-    # sonra tek tek yardımcı motor stop'ları (DC'yi yalnızca açık `dc stop` keser).
+    # Seçili yardımcı motorlar NEMA23'ün hemen ardından başlatılır. HATA (21-10-2026):
+    # bunlardan biri firmware'den err/timeout/ok-olmayan yanıt alır ya da seri hatayla patlarsa
+    # TÜM motorlar (NEMA23 dahil) durdurulur, kalan motorlar hiç başlatılmaz, sebep arayüze/log'a yazılır.
     aux_results: dict[str, dict] = {}
-    try:
-        for name, command in aux_commands:
-            aux_results[name] = None  # patlayan motor da (komut yazılmış olabilir) durdurma listesine girsin
+    for name, command in aux_commands:
+        try:
             aux_results[name] = bridge.send_command(command)
-    except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
-        stops = [{"cmd": "stop"}]
-        for name in _AUX_STOP_ORDER:
-            if name in aux_results:
-                stops.append({"cmd": name, "dir": "stop"})
-        for stop_command in stops:
-            try:
-                bridge.send_command(stop_command)
-            except Exception:  # noqa: BLE001 — zaten hata yolundayız, ikinci hata asıl 502'yi gölgelemesin
-                _sync_watcher_logger.exception("feed-start: baslatilmis %s durdurulamadi", stop_command["cmd"])
-        raise HTTPException(status_code=502, detail=f"STM32 ile haberleşme hatası: {e}")
+        except Exception as e:  # noqa: BLE001 — donanım/seri port hatası, HTTPException'a çevriliyor
+            fault = _trigger_fault(_MOTOR_NAMES[name], f"seri port hatası: {e}")
+            raise HTTPException(status_code=502, detail=f"{fault['line']} (STM32 ile haberleşme hatası: {e})")
+        ok, _reason = _command_ack(aux_results[name])
+        if not ok:
+            fault = _trigger_fault(_MOTOR_NAMES[name], _fault_detail(aux_results[name]))
+            return {
+                "success": False,
+                "stage": name,
+                "reason": fault["detail"],
+                "failed_motor": name,
+                "fault": fault,
+                "step_calc": step_calc,
+                "assist_calc": assist_calc,
+                "rot_calc": rot_calc,
+                "dc_calc": dc_calc,
+                "step_result": step_result,
+                "assist_result": aux_results.get("assist"),
+                "rot_result": aux_results.get("rot"),
+                "dc_result": aux_results.get("dc"),
+                "started": [],
+                "warnings": [],
+            }
 
     warnings: list[str] = []
-    for name, result in aux_results.items():
-        ok, reason = _command_ack(result)
-        if not ok:
-            warnings.append(f"{_AUX_LABELS[name]}: {reason}")
+    motion_monitor.clear_fault()  # yeni besleme eksiksiz başladı: önceki HATA durumu kalkar
 
     # Yarış durumu (GÖREV 3 madde 5): yeni bir feed-start önceki watcher'ı
     # cancel() eder — _rule_engine_task.cancel() ile AYNI desen. cancel()/

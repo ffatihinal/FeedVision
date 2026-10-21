@@ -42,7 +42,9 @@ class FakeBridge:
         self.last_error = None
         self.start_running = start_running
         self.raise_on: set = set()
-        self.reply_for: dict = {}
+        self.reply_for: dict = {}  # cmd -> yanıt (yalnızca başlatma komutlarına; durdurmalara uygulanmaz)
+        self.timeout_for: set = set()  # cmd -> yanıt gelmedi (timed_out)
+        self.unsent_for: set = set()  # cmd -> seri porta yazılamadı (sent:false)
         self.connected_for_send = True
         self._lock = threading.Lock()
 
@@ -63,7 +65,12 @@ class FakeBridge:
             raise TimeoutError("seri port yanit vermedi")
         if not self.connected_for_send:
             return {"sent": False, "raw_command": None, "command": command, "raw_reply": None, "reply": None, "timed_out": False}
-        reply = self.reply_for.get(command.get("cmd"), {"ok": command.get("cmd")})
+        is_stop = command.get("cmd") == "stop" or command.get("dir") == "stop"
+        if not is_stop and command.get("cmd") in self.unsent_for:
+            return {"sent": False, "raw_command": None, "command": command, "raw_reply": None, "reply": None, "timed_out": False}
+        if not is_stop and command.get("cmd") in self.timeout_for:
+            return {"sent": True, "raw_command": "...", "command": command, "raw_reply": None, "reply": None, "timed_out": True}
+        reply = {"ok": command.get("cmd")} if is_stop else self.reply_for.get(command.get("cmd"), {"ok": command.get("cmd")})
         if command.get("cmd") == "step" and self.start_running and "err" not in reply:
             self.status = {**self.status, "running": 1}
         return {
@@ -450,9 +457,11 @@ class TestFeedStartFailures:
         r = _feed(client, **COMBOS["all_with_dc"][0])
         assert r.status_code == 502
         assert main._sync_watcher_task is None
-        assert bridge.names() == ["step", "assist", "stop", "assist"]  # step, patlayan assist, sonra durdurmalar
-        assert bridge.sent_commands[-1] == {"cmd": "assist", "dir": "stop"}
-        assert bridge.cmds("rot") == [] and bridge.cmds("dc") == []  # henüz başlamamıştı
+        # step, patlayan assist, sonra 4 kanala bağımsız stop (rot son)
+        assert bridge.names() == ["step", "assist", "stop", "dc", "assist", "rot"]
+        assert bridge.sent_commands[-1] == {"cmd": "rot", "dir": "stop"}
+        assert "[HATA] Tüm motorlar durduruldu. Sebep: Yardımcı çift (assist)" in r.json()["detail"]
+        assert len(bridge.cmds("rot")) == 1 and len(bridge.cmds("dc")) == 1  # yalnızca stop'lar; başlamamıştı
 
     def test_dc_exception_after_assist_and_rot_started_stops_them(self, api):
         client, bridge = api
@@ -466,23 +475,18 @@ class TestFeedStartFailures:
         assert {"cmd": "dc", "dir": "stop"} in tail
         assert main._sync_watcher_task is None
 
-    def test_firmware_error_on_assist_keeps_running_but_warns(self, api):
+    def test_firmware_error_on_assist_stops_all_motors(self, api):
+        """Eski davranış (uyarı + NEMA23 sürer) kaldırıldı: aux err -> TÜM motorlar durur."""
         client, bridge = api
         bridge.reply_for["assist"] = {"err": "assist timer fault"}
         r = _feed(client, **COMBOS["nema23_assist_rot"][0])
         assert r.status_code == 200
         body = r.json()
-        assert body["success"] is True
-        assert len(body["warnings"]) == 1 and "Yardımcı çift" in body["warnings"][0] and "assist timer fault" in body["warnings"][0]
-        assert body["assist_result"]["reply"] == {"err": "assist timer fault"}
-        assert body["rot_result"]["reply"] == {"ok": "rot"}
+        assert body["success"] is False and body["stage"] == "assist" and body["failed_motor"] == "assist"
+        assert "assist timer fault" in body["fault"]["line"]
+        assert bridge.names() == ["step", "assist", "stop", "dc", "assist", "rot"]  # rot hiç başlatılmadı
+        assert main._sync_watcher_task is None
 
-    def test_failed_aux_is_still_stopped_at_end(self, api):
-        client, bridge = api
-        bridge.reply_for["rot"] = {"err": "invalid dir"}
-        assert _feed(client, **COMBOS["nema23_rot"][0]).status_code == 200
-        bridge.finish_step()
-        assert _wait_for(lambda: {"cmd": "rot", "dir": "stop"} in bridge.sent_commands)
 
 
 # --------------------------------------------------------------------------
@@ -494,9 +498,9 @@ class TestStopAll:
         assert r.json()["success"] is True
         assert bridge.sent_commands == [
             {"cmd": "stop"},
+            {"cmd": "dc", "dir": "stop"},
             {"cmd": "assist", "dir": "stop"},
             {"cmd": "rot", "dir": "stop"},
-            {"cmd": "dc", "dir": "stop"},
         ]
         assert set(r.json()["results"]) == {"step", "assist", "rot", "dc"}
 
@@ -729,9 +733,12 @@ class TestStatusStream:
         _feed(client, **COMBOS["only_nema23"][0])
         import motion_monitor
 
+        # Sahte köprü bağlı görünüyor ama komutu yazamıyor (sent:false): HATA kaydı + "komut gitmedi" nedeni
         snap = motion_monitor.motion_monitor.snapshot(time.monotonic())
-        # Sahte köprü bağlı görünüyor ama komutu yazamıyor (sent:false): "komut gitmedi" teşhisi
-        assert snap["diag"] == "cmd_not_sent" and "bağlı değil" in snap["reason"]
+        assert snap["diag"] == "fault" and "bağlı değil" in snap["reason"]
+        motion_monitor.motion_monitor.note_stop()
+        motion_monitor.motion_monitor.note_command(False, "kontrol kartı bağlı değil", time.monotonic())
+        assert motion_monitor.motion_monitor.snapshot(time.monotonic())["diag"] == "cmd_not_sent"
 
     def test_stop_clears_not_sent_diag(self, api):
         client, bridge = api
@@ -871,7 +878,9 @@ class TestWatcherHandoverWithAssist:
             self._cmd(use_assist=True, assist_speed_mms=10.0),
             self._cmd(),
         )
-        assert recording_watcher[-1] == {"stop_dc": False, "stop_rot": False, "stop_assist": True}
+        assert len(recording_watcher) == 2  # iki oturum da gerçekten watcher başlattı (devir ölçülüyor)
+        assert recording_watcher[0] == {"stop_dc": False, "stop_rot": False, "stop_assist": True}
+        assert recording_watcher[1] == {"stop_dc": False, "stop_rot": False, "stop_assist": True}
 
     def test_legacy_dc_only_still_calls_watcher_without_arguments(self, isolated_motion_params_config, monkeypatch, recording_watcher):
         self._run(monkeypatch, main.FeedStartCommand(dir=1, speed_mms=5.0, distance_mm=100.0, rpm=10.0))
@@ -927,3 +936,333 @@ class TestLegacyFeedStartStillWorks:
         client, bridge = api
         r = _feed(client)  # use_* da yok, rpm de yok
         assert r.status_code == 422 and bridge.sent_commands == []
+
+
+# ==========================================================================
+#  HATA YOLU (21-10-2026, Fatih kararı): bir hata olursa TÜM motorlar durur,
+#  sebep konsol satırında / uyarı kutusunda / sistem log'unda açıkça yazar.
+# ==========================================================================
+STOP_ALL_SEQUENCE = [
+    {"cmd": "stop"},
+    {"cmd": "dc", "dir": "stop"},
+    {"cmd": "assist", "dir": "stop"},
+    {"cmd": "rot", "dir": "stop"},
+]
+ALL_MOTORS = COMBOS["all_with_dc"][0]
+
+
+def _stops(bridge):
+    """Gönderilen durdurma komutları (başlatmalar hariç)."""
+    return [c for c in bridge.sent_commands if c.get("cmd") == "stop" or c.get("dir") == "stop"]
+
+
+def _all_four_stopped(bridge):
+    s = _stops(bridge)
+    return all(cmd in s for cmd in STOP_ALL_SEQUENCE)
+
+
+def _motion(client):
+    with client.websocket_connect("/ws/status") as ws:
+        return ws.receive_json()["motion"]
+
+
+class TestFeedStartFaultStopsEverything:
+    @pytest.mark.parametrize("channel, field", [("assist", "assist"), ("rot", "rot"), ("dc", "dc")])
+    @pytest.mark.parametrize("kind", ["err", "timeout", "unsent"])
+    def test_aux_failure_stops_all_four_channels(self, api, channel, field, kind, caplog):
+        client, bridge = api
+        if kind == "err":
+            bridge.reply_for[channel] = {"err": "invalid dir"}
+        elif kind == "timeout":
+            bridge.timeout_for.add(channel)
+        else:
+            bridge.unsent_for.add(channel)
+        with caplog.at_level("ERROR", logger="feedvision.motor_fault"):
+            r = _feed(client, **ALL_MOTORS)
+        assert r.status_code == 200, r.text  # 5xx yok
+        body = r.json()
+        assert body["success"] is False and body["failed_motor"] == channel
+        assert _all_four_stopped(bridge)
+        assert main._sync_watcher_task is None
+        line = body["fault"]["line"]
+        assert line.startswith("[HATA] Tüm motorlar durduruldu. Sebep: ")
+        assert main._MOTOR_NAMES[channel] in line
+        expected_reason = {"err": "invalid dir", "timeout": "timeout", "unsent": "bağlı değil"}[kind]
+        assert expected_reason in line
+        # sistem log'una aynı satır
+        assert any(rec.getMessage() == line for rec in caplog.records)
+        # sonraki motorlar hiç başlatılmadı
+        order = ["assist", "rot", "dc"]
+        for later in order[order.index(channel) + 1:]:
+            assert [c for c in bridge.sent_commands if c.get("cmd") == later and c.get("dir") != "stop"] == []
+
+    def test_example_console_line_for_assist_timer_fault(self, api):
+        client, bridge = api
+        bridge.reply_for["assist"] = {"err": "assist timer fault"}
+        line = _feed(client, **ALL_MOTORS).json()["fault"]["line"]
+        assert line == "[HATA] Tüm motorlar durduruldu. Sebep: Yardımcı çift (assist): {'err': 'assist timer fault'}"
+
+    @pytest.mark.parametrize("channel", ["assist", "rot", "dc"])
+    def test_aux_exception_is_502_with_reason_and_all_stopped(self, api, channel):
+        client, bridge = api
+        direction = {"assist": "cw", "rot": "cw", "dc": "forward"}[channel]
+        bridge.raise_on = {(channel, direction)}
+        r = _feed(client, **ALL_MOTORS)
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert "[HATA] Tüm motorlar durduruldu. Sebep: " + main._MOTOR_NAMES[channel] in detail
+        assert "seri port yanit vermedi" in detail
+        assert _all_four_stopped(bridge) and main._sync_watcher_task is None
+
+    @pytest.mark.parametrize("kind", ["err", "timeout", "unsent"])
+    def test_step_failure_nothing_started_so_no_stop_but_fault_recorded(self, api, kind):
+        client, bridge = api
+        if kind == "err":
+            bridge.reply_for["step"] = {"err": "steps must be > 0"}
+        elif kind == "timeout":
+            bridge.timeout_for.add("step")
+        else:
+            bridge.unsent_for.add("step")
+        r = _feed(client, **ALL_MOTORS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is False and body["stage"] == "step"
+        assert body["fault"]["line"].startswith("[HATA] Besleme başlatılamadı, hiçbir motor başlatılmadı. Sebep: NEMA23 step: ")
+        assert bridge.names() == ["step"]  # hiçbir şey başlamadı, durdurma gerekmedi
+        m = _motion(client)
+        assert m["state"] == "fault" and m["fault"]["line"] == body["fault"]["line"]
+
+    def test_step_exception_502_with_reason(self, api):
+        client, bridge = api
+        bridge.raise_on = {("step", 0)}
+        r = _feed(client, **ALL_MOTORS)
+        assert r.status_code == 502 and "Sebep: NEMA23 step: seri port hatası" in r.json()["detail"]
+        assert bridge.names() == ["step"]
+
+    def test_one_stop_failing_does_not_stop_the_others_and_is_listed(self, api):
+        client, bridge = api
+        bridge.reply_for["rot"] = {"err": "x"}
+        bridge.raise_on = {("dc", "stop")}
+        r = _feed(client, **ALL_MOTORS)
+        assert r.status_code == 200
+        assert all(cmd in bridge.sent_commands for cmd in STOP_ALL_SEQUENCE)  # dc stop patlasa da rot stop dahil hepsi denendi
+        line = r.json()["fault"]["line"]
+        assert "durdurma komutu gitmeyen kanallar: DC" in line
+
+    def test_state_lamp_and_banner_data_persist_until_stop(self, api):
+        client, bridge = api
+        bridge.timeout_for.add("rot")
+        line = _feed(client, **ALL_MOTORS).json()["fault"]["line"]
+        m = _motion(client)
+        assert m["state"] == "fault" and m["diag"] == "fault" and m["reason"] == line
+        assert m["fault"]["id"] >= 1 and m["fault"]["stopped_all"] is True
+        assert _motion(client)["fault"]["line"] == line  # tekrar bakınca da duruyor
+        assert client.post("/motor/stop-all").status_code == 200  # operatörün Dur'u
+        assert _motion(client)["fault"] is None
+        assert _motion(client)["state"] != "fault"
+
+    def test_successful_new_feed_clears_previous_fault(self, api):
+        client, bridge = api
+        bridge.timeout_for.add("dc")
+        _feed(client, **ALL_MOTORS)
+        assert _motion(client)["fault"] is not None
+        bridge.timeout_for.clear()
+        bridge.finish_step()
+        assert _feed(client, **ALL_MOTORS).json()["success"] is True
+        assert _motion(client)["fault"] is None
+
+    def test_each_new_fault_gets_a_new_id_so_console_logs_once_per_fault(self, api):
+        client, bridge = api
+        bridge.timeout_for.add("assist")
+        _feed(client, **ALL_MOTORS)
+        first = _motion(client)["fault"]["id"]
+        client.post("/motor/stop-all")
+        bridge.finish_step()
+        _feed(client, **ALL_MOTORS)
+        assert _motion(client)["fault"]["id"] == first + 1
+
+
+class TestIndependentPanelsFault:
+    @pytest.mark.parametrize(
+        "channel, endpoint, body",
+        [
+            ("assist", "/motor/assist", {"dir": "cw", "speed_mms": 10.0}),
+            ("rot", "/motor/rot", {"dir": "cw", "rpm": 10.0}),
+            ("dc", "/motor/dc", {"dir": "forward", "speed": 50}),
+            ("step", "/motor/step", {"dir": 0, "delay": 500, "steps": 100}),
+        ],
+    )
+    @pytest.mark.parametrize("kind", ["err", "timeout"])
+    def test_err_or_timeout_stops_all_four(self, api, channel, endpoint, body, kind, caplog):
+        client, bridge = api
+        if kind == "err":
+            bridge.reply_for[channel] = {"err": "invalid dir"}
+        else:
+            bridge.timeout_for.add(channel)
+        with caplog.at_level("ERROR", logger="feedvision.motor_fault"):
+            r = client.post(endpoint, json=body)
+        assert r.status_code == 200, r.text  # 5xx yok
+        fault = r.json()["fault"]
+        assert fault["line"].startswith("[HATA] Tüm motorlar durduruldu. Sebep: " + main._MOTOR_NAMES[channel] + ": ")
+        assert ("invalid dir" if kind == "err" else "timeout") in fault["line"]
+        assert _all_four_stopped(bridge)
+        assert any(rec.getMessage() == fault["line"] for rec in caplog.records)
+        assert _motion(client)["state"] == "fault"
+
+    @pytest.mark.parametrize(
+        "channel, endpoint, body, raise_key",
+        [
+            ("assist", "/motor/assist", {"dir": "cw", "speed_mms": 10.0}, ("assist", "cw")),
+            ("rot", "/motor/rot", {"dir": "cw", "rpm": 10.0}, ("rot", "cw")),
+            ("dc", "/motor/dc", {"dir": "forward", "speed": 50}, ("dc", "forward")),
+            ("step", "/motor/step", {"dir": 0, "delay": 500, "steps": 100}, ("step", 0)),
+        ],
+    )
+    def test_exception_is_502_with_reason_and_stops_all(self, api, channel, endpoint, body, raise_key):
+        client, bridge = api
+        bridge.raise_on = {raise_key}
+        r = client.post(endpoint, json=body)
+        assert r.status_code == 502
+        assert "Sebep: " + main._MOTOR_NAMES[channel] + ": seri port hatası" in r.json()["detail"]
+        assert _all_four_stopped(bridge)
+
+    @pytest.mark.parametrize(
+        "endpoint, body",
+        [
+            ("/motor/assist", {"dir": "stop"}),
+            ("/motor/rot", {"dir": "stop"}),
+            ("/motor/dc", {"dir": "stop"}),
+        ],
+    )
+    def test_stop_commands_never_trigger_the_fault_path(self, api, endpoint, body):
+        client, bridge = api
+        for name in ("assist", "rot", "dc"):
+            bridge.reply_for[name] = {"err": "x"}  # durdurmalara uygulanmaz ama kural açık olsun
+        r = client.post(endpoint, json=body)
+        assert r.status_code == 200 and "fault" not in r.json()
+        assert len(bridge.sent_commands) == 1  # tek komut, stop-all zinciri yok
+
+    def test_stop_command_exception_is_plain_502_not_a_fault_loop(self, api):
+        client, bridge = api
+        bridge.raise_on = {("rot", "stop")}
+        r = client.post("/motor/rot", json={"dir": "stop"})
+        assert r.status_code == 502 and "[HATA]" not in r.json()["detail"]
+        assert len(bridge.sent_commands) == 1
+
+    def test_not_connected_is_not_a_fault(self, api):
+        client, bridge = api
+        bridge.connected_for_send = False
+        r = client.post("/motor/assist", json={"dir": "cw", "speed_mms": 10.0})
+        assert r.status_code == 200 and r.json()["sent"] is False and "fault" not in r.json()
+        assert len(bridge.sent_commands) == 1
+
+    def test_ok_reply_is_not_a_fault(self, api):
+        client, bridge = api
+        r = client.post("/motor/dc", json={"dir": "forward", "speed": 50})
+        assert r.status_code == 200 and "fault" not in r.json()
+        assert _motion(client)["fault"] is None
+
+
+class TestBackgroundFaultSources:
+    def test_firmware_fault_indicator_in_status_line_stops_all(self, api, caplog):
+        client, bridge = api
+        with caplog.at_level("ERROR", logger="feedvision.motor_fault"):
+            bridge.status = {**bridge.status, "fault": 1}
+            assert _wait_for(lambda: _all_four_stopped(bridge))
+        m = _motion(client)
+        assert m["state"] == "fault"
+        assert "Sebep: Kontrol kartı: durum satırında hata göstergesi fault=1" in m["fault"]["line"]
+        assert any("fault=1" in rec.getMessage() for rec in caplog.records)
+        # aynı gösterge sürerken tekrar tekrar durdurma/log üretmez
+        n = len(bridge.sent_commands)
+        time.sleep(0.4)
+        assert len(bridge.sent_commands) == n
+
+    def test_status_field_zero_is_not_a_fault(self, api):
+        client, bridge = api
+        bridge.status = {**bridge.status, "fault": 0, "err": 0}
+        time.sleep(0.4)
+        assert bridge.sent_commands == [] and _motion(client)["fault"] is None
+
+    def test_serial_loss_during_feed_stops_all_and_cancels_watcher(self, api, caplog):
+        client, bridge = api
+        assert _feed(client, **ALL_MOTORS).status_code == 200
+        task = main._sync_watcher_task
+        time.sleep(0.25)  # döngü "bağlı + besleme aktif" durumunu görsün
+        bridge.sent_commands.clear()
+        bridge.is_connected = False  # kablo çekildi
+        assert _wait_for(lambda: _all_four_stopped(bridge))
+        assert _wait_for(task.done)
+        m = _motion(client)
+        assert m["state"] == "fault"
+        assert "Sebep: Seri bağlantı: besleme sürerken kontrol kartı bağlantısı koptu" in m["fault"]["line"]
+
+    def test_serial_loss_when_idle_is_not_a_fault(self, api):
+        client, bridge = api
+        time.sleep(0.25)
+        bridge.is_connected = False
+        time.sleep(0.4)
+        assert bridge.sent_commands == [] and _motion(client)["fault"] is None
+
+    def test_monitor_loop_unexpected_exception_stops_all_once(self, api, monkeypatch):
+        client, bridge = api
+        calls = {"n": 0}
+
+        def boom(*a, **k):
+            calls["n"] += 1
+            raise RuntimeError("izleme patladı")
+
+        monkeypatch.setattr(main.motion_monitor, "observe", boom)
+        assert _wait_for(lambda: _all_four_stopped(bridge))
+        time.sleep(0.4)
+        assert calls["n"] > 2  # döngü yaşamaya devam ediyor
+        assert len(_stops(bridge)) == 4  # ama hata yolu bir kez çalıştı (spam yok)
+        m = main.motion_monitor.snapshot(time.monotonic())
+        assert "Sebep: Hareket izleme döngüsü: beklenmeyen hata: izleme patladı" in m["fault"]["line"]
+
+    def test_watcher_unexpected_exception_stops_all(self, monkeypatch):
+        bridge = FakeBridge()
+        monkeypatch.setattr(main, "bridge", bridge)
+        monkeypatch.setattr(main, "FEED_SYNC_ARM_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(main, "FEED_SYNC_POLL_INTERVAL_S", 0.01)
+
+        def broken_status():
+            raise RuntimeError("durum okunamadı")
+
+        monkeypatch.setattr(bridge, "get_status", broken_status)
+        asyncio.run(main._sync_watcher(0.2, stop_dc=True, stop_rot=True, stop_assist=True))
+        assert all(cmd in bridge.sent_commands for cmd in STOP_ALL_SEQUENCE)
+        line = main.motion_monitor.snapshot(time.monotonic())["fault"]["line"]
+        assert "Sebep: Besleme izleyicisi: beklenmeyen hata: durum okunamadı" in line
+
+    def test_watcher_failsafe_timeout_stops_all_including_nema23(self, monkeypatch):
+        bridge = FakeBridge()
+        bridge.status = {"running": 1}  # hiç bitmiyor
+        monkeypatch.setattr(main, "bridge", bridge)
+        monkeypatch.setattr(main, "FEED_SYNC_ARM_TIMEOUT_S", 0.02)
+        monkeypatch.setattr(main, "FEED_SYNC_POLL_INTERVAL_S", 0.01)
+        asyncio.run(main._sync_watcher(0.05, stop_dc=True, stop_rot=False, stop_assist=True))
+        assert all(cmd in bridge.sent_commands for cmd in STOP_ALL_SEQUENCE)  # NEMA23 `stop` dahil
+        assert "Sebep: NEMA23 step: " in main.motion_monitor.snapshot(time.monotonic())["fault"]["line"]
+
+    def test_fault_path_itself_never_raises(self, monkeypatch):
+        bridge = FakeBridge()
+        bridge.raise_on = {("stop", None), ("dc", "stop"), ("assist", "stop"), ("rot", "stop")}
+        monkeypatch.setattr(main, "bridge", bridge)
+        fault = main._trigger_fault("DC", "deneme")
+        assert fault["line"].startswith("[HATA] Tüm motorlar durduruldu. Sebep: DC: deneme")
+        assert len(bridge.sent_commands) == 4  # hepsi denendi
+
+
+class TestEncoderStallIsNotAFault:
+    def test_stall_lamp_red_but_no_automatic_stop(self, api, monkeypatch):
+        client, bridge = api
+        import motion_monitor
+
+        monkeypatch.setattr(motion_monitor.motion_monitor, "stall_timeout_s", 0.3)
+        monkeypatch.setattr(motion_monitor.motion_monitor, "window_s", 0.3)
+        assert _feed(client, **COMBOS["nema23_assist"][0]).status_code == 200  # running:1, encoder sabit
+        assert _wait_for(lambda: _motion(client)["state"] == "stalled", timeout=3)
+        time.sleep(0.4)
+        assert _stops(bridge) == []  # otomatik durdurma YOK
+        assert _motion(client)["fault"] is None and _motion(client)["diag"] == "stalled"

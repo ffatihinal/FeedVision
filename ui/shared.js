@@ -363,7 +363,10 @@ function injectSharedStyles() {
     .fv-lamp { width: 34px; height: 34px; border-radius: 50%; flex: none; background: #555; box-shadow: inset 0 0 6px #0008; }
     .fv-lamp-idle { background: #555; }
     .fv-lamp-starting { background: #e0a800; box-shadow: 0 0 10px #e0a80088; }
-    .fv-lamp-stalled { background: #e03; box-shadow: 0 0 14px #e03a; }
+    .fv-lamp-stalled, .fv-lamp-fault { background: #e03; box-shadow: 0 0 14px #e03a; }
+    #motor-fault-banner { display: none; align-items: flex-start; gap: 12px; background: #8e1b1b; color: #fff; border: 2px solid #f55; border-radius: 10px; padding: 12px 14px; font-weight: 700; font-size: 15px; margin-bottom: 12px; }
+    #motor-fault-banner .fv-fault-text { flex: 1; white-space: pre-wrap; }
+    #motor-fault-banner button { background: #5c1010; color: #fff; padding: 4px 12px; font-size: 18px; line-height: 1; }
     .fv-lamp-moving { background: #2ecc71; box-shadow: 0 0 14px #2ecc7188; animation: fv-lamp-pulse var(--fv-period, 1s) ease-in-out infinite; }
     @keyframes fv-lamp-pulse { 0%, 100% { opacity: .35; } 50% { opacity: var(--fv-peak, 1); } }
     #motion-lamp-title { font-size: 14px; font-weight: 700; color: #ddd; }
@@ -625,7 +628,10 @@ async function sendAux(kind, dir, label) {
   }
   const calc = data[k.calcKey];
   const infoEl = elById(k.infoId);
-  if (calc && infoEl) {
+  if (data.fault) {
+    // Firmware err/timeout: sunucu tüm motorları durdurdu; sebep banner/konsolda, burada da görünsün.
+    if (infoEl) infoEl.textContent = data.fault.line;
+  } else if (calc && infoEl) {
     const unit = kind === "rot" ? "RPM" : "mm/s";
     infoEl.textContent = `Girilen ${body[k.bodyField]} ${unit} → ${calc.delay_us} µs gecikmeli darbe → hız kapasitesinin %${calc.speed_pct_of_max.toFixed(1)}'i`;
   }
@@ -729,9 +735,8 @@ async function sendFeedStart() {
     return;
   }
   if (!data.success) {
-    renderFeedStartResult(
-      `NEMA23 başlatılamadı (${data.reason || data.stage}) — diğer motorlara hiç dokunulmadı.`, true);
-    logToConsole("Besleme Başlat", "POST /motor/feed-start", "NEMA23 başarısız, diğer motorlar gönderilmedi.", true);
+    // Konsol satırı ve kırmızı uyarı kutusu /ws/status'taki motion.fault ile gelir (tek kaynak, çift satır yok).
+    renderFeedStartResult(data.fault ? data.fault.line : `Besleme başlatılamadı (${data.reason || data.stage}).`, true);
     return;
   }
 
@@ -796,6 +801,7 @@ const LAMP_TITLES = {
   moving: "Encoder hareketi var.",
   moving_no_step: "Encoder hareketi var (NEMA23 komutu yok — diğer motorlar ya da elle).",
   stalled: "Komut gitti ama hareket yok — kablaj, sürücü veya mekanik kontrol edin.",
+  fault: "HATA — tüm motorlar durduruldu.",
 };
 
 function renderMotionLamp(motion) {
@@ -805,6 +811,7 @@ function renderMotionLamp(motion) {
   lamp.className = `fv-lamp fv-lamp-${m.state}`;
   let text = LAMP_TITLES[m.diag] || LAMP_TITLES.idle;
   if (m.diag === "cmd_not_sent" && m.reason) text = `Komut gitmedi (kod/bağlantı): ${m.reason}.`;
+  if (m.diag === "fault" && m.reason) text = m.reason;
   if (m.state === "moving") {
     // Çubuk hızı (mm/s): iki encoder'dan hızlı olan. Nabız hızı ve parlaklık ölçülen hıza
     // orantılı; hız aralığı çok geniş (~0,1 – 300 mm/s) olduğu için logaritmik ölçek
@@ -819,7 +826,7 @@ function renderMotionLamp(motion) {
   const diagEl = elById("motion-lamp-diag");
   if (diagEl) {
     diagEl.textContent = text;
-    diagEl.className = m.diag === "stalled" ? "bad" : (m.diag === "cmd_not_sent" || m.diag === "disconnected" ? "warn" : "");
+    diagEl.className = (m.diag === "stalled" || m.diag === "fault") ? "bad" : (m.diag === "cmd_not_sent" || m.diag === "disconnected" ? "warn" : "");
   }
 }
 
@@ -851,4 +858,71 @@ function renderLiveMotorViews(data) {
   renderPairStatuses(data.status);
   renderMotionLamp(data.motion);
   renderAuxChips(data.status);
+  renderFaultBanner(data.motion && data.motion.fault);
+}
+
+// --------------------------------------------------------------------------
+//  HATA durumu (21-10-2026): bir motor komutu err/timeout/exception verirse, seri bağlantı
+//  koparsa ya da izleme hata alırsa sunucu TÜM motorları durdurur ve /ws/status içinde
+//  motion.fault gönderir. Burada: konsola tek satır ("[HATA] Tüm motorlar durduruldu.
+//  Sebep: ...") + sayfanın üstünde, Dur'a basılana kadar (ya da elle kapatılana kadar)
+//  duran kırmızı uyarı kutusu. Operatör ve Admin'de aynı.
+// --------------------------------------------------------------------------
+let lastLoggedFaultId = null;
+let dismissedFaultId = null;
+
+// logToConsole'dan farkı: "Buton — Görev — Sonuç" biçimi yok, verilen metin olduğu gibi tek satır.
+function logConsoleLine(text, isError) {
+  const box = elById("console");
+  if (!box) {
+    (isError ? console.error : console.log)(text);
+    return;
+  }
+  const line = document.createElement("div");
+  line.className = "line";
+  line.appendChild(makeConsoleSpan("time", `[${new Date().toLocaleTimeString("tr-TR")}]`));
+  line.appendChild(document.createTextNode(" "));
+  line.appendChild(makeConsoleSpan(isError ? "error" : "result", text));
+  box.appendChild(line);
+  while (box.children.length > CONSOLE_MAX_LINES) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+function ensureFaultBanner() {
+  let banner = elById("motor-fault-banner");
+  if (banner) return banner;
+  banner = document.createElement("div");
+  banner.id = "motor-fault-banner";
+  const text = document.createElement("span");
+  text.className = "fv-fault-text";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.title = "Uyarıyı kapat";
+  close.textContent = "×";
+  close.onclick = () => {
+    if (banner.dataset.faultId) dismissedFaultId = Number(banner.dataset.faultId);
+    banner.style.display = "none";
+  };
+  banner.appendChild(text);
+  banner.appendChild(close);
+  document.body.insertBefore(banner, document.body.firstChild);
+  return banner;
+}
+
+function renderFaultBanner(fault) {
+  if (!fault) {
+    const existing = elById("motor-fault-banner");
+    if (existing) { existing.style.display = "none"; existing.dataset.faultId = ""; }
+    dismissedFaultId = null;
+    lastLoggedFaultId = null;
+    return;
+  }
+  if (fault.id !== lastLoggedFaultId) {
+    lastLoggedFaultId = fault.id;
+    logConsoleLine(fault.line, true);  // her yeni HATA için konsola tek satır
+  }
+  const banner = ensureFaultBanner();
+  banner.dataset.faultId = String(fault.id);
+  banner.querySelector(".fv-fault-text").textContent = fault.line;
+  banner.style.display = fault.id === dismissedFaultId ? "none" : "flex";
 }

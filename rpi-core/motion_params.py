@@ -51,7 +51,7 @@ DEFAULTS: dict[str, float | int | bool] = {
     "D_drive_mm": 52.0,  # tahrik tekerleği (step+DC, özdeş) çapı — sahada kesin efektif değer teyit edilecek
     "D_wheel_dc_mm": 52.0,  # DC motorun sürtünme tekeri çapı — D_drive ile aynı beklenir, ayrı alan
     "D_rod_mm": 10.0,  # besleme çubuğu çapı — mevcut stok, ileride değişebilir
-    "RPM_MAX_NOLOAD": 100.0,  # DC motor milinin %100 duty'deki tahmini boşta dönüş hızı — PLACEHOLDER, sahada takometreyle ölçülecek
+    "RPM_MAX_NOLOAD": 100.0,  # DC motor milinin %100 duty'deki tahmini boşta dönüş hızı — PLACEHOLDER, sahada %100 duty'de arayüzdeki encoder hızından okunup güncellenecek
     "D_wheel_rot_mm": 52.0,  # NEMA17 dönüş ekseni sürtünme tekeri çapı — DC tekerlekle aynı varsayım, sahada teyit edilecek
     "ROT_PPR": 3200,  # TB6600 darbe/tur (1/16 mikroadım) — DIP switch ile aynı olmalı, yalnızca ALLOWED_ROT_PPR değerleri
     "D_wheel_assist_mm": 13.0,  # yardımcı çift sürtünme tekeri çapı — sahada teyit edilecek

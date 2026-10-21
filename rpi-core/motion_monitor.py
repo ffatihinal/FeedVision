@@ -17,8 +17,12 @@ Durumlar (`state`):
   starting  amber  — komut onaylandı (running=1), hareket henüz görülmedi, süre dolmadı
   moving    yeşil  — encoder hareketi var
   stalled   kırmızı— running=1 ama STALL_TIMEOUT_S boyunca encoder hareketi yok
+              (HATA SAYILMAZ, otomatik durdurma yok; sadece gösterge)
+  fault     kırmızı— bir HATA oluştu ve tüm motorlar durduruldu (21-10-2026,
+              bkz. main._trigger_fault); operatör Dur'a basana ya da yeni bir
+              besleme başarıyla başlayana kadar kalır
 `diag` (teşhis kodu, arayüz metne çevirir): idle, disconnected, cmd_not_sent,
-starting, moving, moving_no_step, stalled.
+starting, moving, moving_no_step, stalled, fault.
 
 Saf mantık: zaman dışarıdan verilir (`now`, saniye), bridge/FastAPI'ye
 bağımlılığı yok -> sahte saatle deterministik test edilir.
@@ -52,6 +56,8 @@ class MotionMonitor:
         self._running_since: Optional[float] = None
         self._last_motion_at: Optional[float] = None
         self._cmd_failure: Optional[dict] = None  # {"at", "reason"}
+        self._fault: Optional[dict] = None  # {"id","line","motor","detail","stopped_all"}
+        self._fault_seq = 0
 
     # ---- girişler ------------------------------------------------------
     def reset_samples(self) -> None:
@@ -67,9 +73,23 @@ class MotionMonitor:
             self._cmd_failure = None if ok else {"at": now, "reason": reason or "bilinmeyen neden"}
 
     def note_stop(self) -> None:
-        """Operatör Dur'a bastı: eski komut hatası ekranda kalmasın."""
+        """Operatör Dur'a bastı: eski komut hatası ve HATA durumu ekranda kalmasın."""
         with self._lock:
             self._cmd_failure = None
+            self._fault = None
+
+    def note_fault(self, line: str, motor: str, detail: str, stopped_all: bool) -> dict:
+        """Bir HATA kaydeder (lamba kırmızı + banner + konsol satırı). Her kayıt yeni bir
+        `id` alır; arayüz yeni id'yi görünce konsola bir kez yazar. Dönen sözlük arayüze gider."""
+        with self._lock:
+            self._fault_seq += 1
+            self._fault = {"id": self._fault_seq, "line": line, "motor": motor, "detail": detail, "stopped_all": stopped_all}
+            return dict(self._fault)
+
+    def clear_fault(self) -> None:
+        """Yeni bir besleme başarıyla başladı: eski HATA durumu kalkar."""
+        with self._lock:
+            self._fault = None
 
     def observe(self, status: dict, connected: bool, now: float) -> None:
         """Bir durum örneği işler (arka plan döngüsü ~10 Hz çağırır)."""
@@ -123,7 +143,9 @@ class MotionMonitor:
                 failure = None
                 self._cmd_failure = None
 
-            if not self._connected:
+            if self._fault is not None:
+                state, diag = "fault", "fault"
+            elif not self._connected:
                 state, diag = "idle", "disconnected"
             elif self._running:
                 if moving:
@@ -147,7 +169,11 @@ class MotionMonitor:
             return {
                 "state": state,
                 "diag": diag,
-                "reason": failure["reason"] if (failure is not None and diag == "cmd_not_sent") else None,
+                "reason": (
+                    self._fault["line"] if diag == "fault"
+                    else failure["reason"] if (failure is not None and diag == "cmd_not_sent") else None
+                ),
+                "fault": dict(self._fault) if self._fault is not None else None,
                 "running": self._running,
                 "enc1_cps": round(enc1_cps, 2),
                 "enc2_cps": round(enc2_cps, 2),
