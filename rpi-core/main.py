@@ -1148,6 +1148,23 @@ async def _journal_loop():
         await asyncio.sleep(JOURNAL_INTERVAL_S)
 
 
+def _retry_stop_after_reconnect() -> None:
+    """Bağlantı geri geldi ve bir HATA hâlâ aktifse (operatör Dur'a basmadı): stop-all'u bir kez daha
+    dener (yalnızca "Motorlar durdurulamadı" HATA'sında) — kopma anında stop gidememiş olabilir (motor kontrolsüz dönüyor olabilir). En az bir kanala
+    gittiyse HATA kaydı "durduruldu"ya güncellenir (yeni id: konsola da yeni satır düşer)."""
+    fault = motion_monitor.snapshot(time.monotonic()).get("fault")
+    # Yalnızca "stop gidemedi" HATA'sında: stop zaten gittiyse ya da hiçbir motor başlatılmadıysa
+    # (stopped_all False ama "Besleme başlatılamadı" varyantı) yeniden denemek anlamsız.
+    if not fault or fault["stopped_all"] or "Motorlar durdurulamadı" not in fault["line"]:
+        return
+    results = _stop_all_channels()
+    if not any(r.get("sent") for r in results.values()):
+        return
+    line = f"[HATA] Tüm motorlar durduruldu (bağlantı geri geldi, stop yeniden gönderildi). Sebep: {fault['motor']}: {fault['detail']}"
+    _motor_fault_logger.error(line)
+    motion_monitor.note_fault(line, fault["motor"], fault["detail"], stopped_all=True)
+
+
 def _status_fault_text(status: dict) -> str | None:
     """Durum satırında firmware hata göstergesi varsa (fault/err/error alanı sıfırdan farklı)
     kısa metni, yoksa None. Mevcut protokolde böyle bir alan yok; firmware ileride eklerse
@@ -1178,9 +1195,12 @@ async def _motion_monitor_loop():
             motion_monitor.observe(status, connected, time.monotonic())
             watcher_active = _sync_watcher_task is not None and not _sync_watcher_task.done()
             active = watcher_active or bool(status.get("running"))
-            if prev_connected and not connected and prev_active:
+            if prev_connected and not connected and prev_active and not getattr(bridge, "intentional_disconnect", False):
+                # Beklenmedik kopma (kablo/USB). Operatörün bilerek kestiği bağlantı HATA sayılmaz.
                 _trigger_fault("Seri bağlantı", "besleme sürerken kontrol kartı bağlantısı koptu")
                 active = False
+            if connected and not prev_connected:
+                _retry_stop_after_reconnect()
             status_fault = _status_fault_text(status) if connected else None
             if status_fault and status_fault != prev_status_fault:
                 _trigger_fault("Kontrol kartı", status_fault)
@@ -1322,8 +1342,12 @@ def connect_serial(port: str):
 
 @app.post("/serial/disconnect")
 def disconnect_serial():
+    """Operatörün bilerek bağlantıyı kesmesi. ÖNCE 4 kanala stop gönderilir (bağlantı hâlâ açıkken;
+    firmware `bye` yalnızca rot/assist'i durdurur, step'i ve DC'yi durdurmaz), SONRA bağlantı kapanır.
+    Bu kesinti HATA sayılmaz (bridge.intentional_disconnect), banner/konsol satırı üretmez."""
+    stop_results = _stop_all_channels()
     bridge.disconnect()
-    return {"success": True}
+    return {"success": True, "stopped": all(r.get("sent") for r in stop_results.values())}
 
 
 class StepCommand(BaseModel):
@@ -1335,9 +1359,12 @@ class StepCommand(BaseModel):
 
 def _with_fault_on_failure(result: dict, channel: str) -> dict:
     """Bağımsız panel komutu için: firmware err ya da zaman aşımı döndüyse HATA yolunu çalıştırır
-    (tüm motorlar durur) ve yanıta `fault` ekler. `sent:false` (kart bağlı değil) HATA sayılmaz —
-    komut hiç gitmedi, durdurulacak bir şey başlamadı. Durdurma komutlarında çağrılmaz."""
-    if result.get("sent") and (result.get("timed_out") or "err" in (result.get("reply") or {})):
+    (tüm motorlar durur) ve yanıta `fault` ekler. Port yazma hatası da (raw_command dolu ama sent:false:
+    port bağlı, yazma başarısız) HATA sayılır — feed-start ile tutarlı. `raw_command` boşsa ("kart bağlı
+    değil", komut hiç hazırlanmadı) HATA sayılmaz: durdurulacak bir şey başlamadı. Durdurma
+    komutlarında çağrılmaz."""
+    write_failed = not result.get("sent") and result.get("raw_command") is not None
+    if write_failed or (result.get("sent") and (result.get("timed_out") or "err" in (result.get("reply") or {}))):
         fault = _trigger_fault(_MOTOR_NAMES[channel], _fault_detail(result))
         return {**result, "fault": fault}
     return result
@@ -1396,6 +1423,10 @@ def _fault_detail(result: dict) -> str:
     if result is None:
         return "komut gönderimi sırasında hata"
     if not result.get("sent"):
+        if result.get("raw_command") is not None:
+            # Port bağlı ama yazma başarısız (kablo/USB hatası): komutun kendisi hazırlanmıştı
+            last_error = getattr(bridge, "last_error", None)
+            return "komut seri porta yazılamadı (port yazma hatası" + (f": {last_error}" if last_error else "") + ")"
         return "komut gönderilemedi (kontrol kartı bağlı değil)"
     if result.get("timed_out"):
         return "kontrol kartı komuta yanıt vermedi (timeout)"
@@ -1413,16 +1444,22 @@ def _trigger_fault(motor: str, detail: str, stop_all: bool = True) -> dict:
 
     stop_all=False: hiçbir motor başlatılmamış durum (ör. NEMA23 komutu daha ilk adımda reddedildi) —
     durdurma gönderilmez, satır "hiçbir motor başlatılmadı" der. Asla exception fırlatmaz."""
+    stopped = stop_all
     if stop_all:
         results = _stop_all_channels()
-        line = f"[HATA] Tüm motorlar durduruldu. Sebep: {motor}: {detail}"
         failed = [name for name, r in results.items() if not r.get("sent")]
-        if failed:
-            line += f" (durdurma komutu gitmeyen kanallar: {', '.join(_MOTOR_NAMES[n] for n in failed)})"
+        if len(failed) == len(results):
+            # Hiçbir kanala stop gidemedi (bağlantı yok): "durduruldu" demek yalan olurdu.
+            stopped = False
+            line = f"[HATA] Motorlar durdurulamadı (kontrol kartına ulaşılamıyor). Sebep: {motor}: {detail}"
+        else:
+            line = f"[HATA] Tüm motorlar durduruldu. Sebep: {motor}: {detail}"
+            if failed:
+                line += f" (durdurma komutu gitmeyen kanallar: {', '.join(_MOTOR_NAMES[n] for n in failed)})"
     else:
         line = f"[HATA] Besleme başlatılamadı, hiçbir motor başlatılmadı. Sebep: {motor}: {detail}"
     _motor_fault_logger.error(line)
-    return motion_monitor.note_fault(line, motor, detail, stopped_all=stop_all)
+    return motion_monitor.note_fault(line, motor, detail, stopped_all=stopped)
 
 
 @app.post("/motor/step")
@@ -1747,6 +1784,20 @@ async def _sync_watcher(max_wait_s: float, stop_dc: bool = True, stop_rot: bool 
         _trigger_fault("Besleme izleyicisi", f"beklenmeyen hata: {e}")
 
 
+def _feed_fail_safe_timeout_s(step_calc: dict) -> float:
+    """Watcher'ın "NEMA23 bitmedi" fail-safe süresi. Tahmin firmware'in GERÇEK hareket süresinden
+    (rampa dahil, bkz. motion_calc.estimate_step_duration_s) hesaplanır; eskiden distance/speed
+    kullanılıyordu ve ivme açıkken rampa süresini hesaba katmadığı için sağlıklı bir besleme
+    NEMA23 dahil kesiliyordu (21-10-2026 tester bulgusu)."""
+    estimated_duration_s = motion_calc.estimate_step_duration_s(
+        step_calc["steps"], step_calc["delay_us"], step_calc["accel_steps"]
+    )
+    return max(
+        FEED_SYNC_WAIT_MIN_TIMEOUT_S,
+        estimated_duration_s * FEED_SYNC_WAIT_SAFETY_FACTOR + FEED_SYNC_WAIT_SAFETY_MARGIN_S,
+    )
+
+
 # Yardımcı motorların kanal adı -> arayüzde görünen Türkçe ad (uyarı/hata metinleri için).
 _AUX_LABELS = {"assist": "Yardımcı çift", "rot": "Rotasyon çifti", "dc": "DC"}
 # Hatada durdurma sırası: rot SONA bırakıldı (eski davranışla uyumlu: son komut rot stop).
@@ -2030,11 +2081,7 @@ def motor_feed_start(c: FeedStartCommand):
             detail="Servis henüz hazır değil (event loop başlatılmadı) — besleme başlatıldı ama senkron izleme kurulamadı, birazdan tekrar deneyin",
         )
 
-    estimated_duration_s = c.distance_mm / c.speed_mms
-    max_wait_s = max(
-        FEED_SYNC_WAIT_MIN_TIMEOUT_S,
-        estimated_duration_s * FEED_SYNC_WAIT_SAFETY_FACTOR + FEED_SYNC_WAIT_SAFETY_MARGIN_S,
-    )
+    max_wait_s = _feed_fail_safe_timeout_s(step_calc)
     # asyncio.create_task DEĞİL: bu SENKRON endpoint (def, async def değil)
     # FastAPI'nin thread pool'unda çalışıyor, o thread'in kendi çalışan bir
     # event loop'u YOK — create_task orada "RuntimeError: no running event

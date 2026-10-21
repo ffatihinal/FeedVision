@@ -148,6 +148,25 @@ def compute_step_command(speed_mms: float, distance_mm: float, accel_mms2: float
     }
 
 
+def estimate_step_duration_s(steps: int, delay_us: int, accel_steps: int) -> float:
+    """NEMA23 hareketinin firmware'deki GERÇEK süresi (saniye) — fail-safe zaman aşımı hesabı için.
+
+    Firmware (main.c step_delay_for_remaining) rampayı ADIM bazında doğrusal kurar: ilk `accel_steps`
+    adımda darbe periyodu start_delay'den cruise_delay'e iner, son `accel_steps` adımda geri çıkar,
+    ortası sabit. start_delay = max(STEP_RAMP_START_DELAY_US, cruise_delay). Her darbe süresi = o
+    anki periyot, yani toplam:
+
+        süre = steps × cruise + accel_steps × (start − cruise)     [µs]
+
+    (iki rampanın her biri ortalama (start+cruise)/2 periyotla accel_steps adım sürer; rampasızken
+    ikinci terim 0). accel_steps firmware'deki gibi steps//2 ile sınırlanır. Basit mesafe/hız
+    (distance/speed) tahmini rampada ÇOK düşük kalır: 50 mm/s, 300 mm, 5 mm/s² ivmede ~6 sn yerine ~50 sn.
+    """
+    accel_steps = max(0, min(accel_steps, steps // 2))
+    start_delay_us = max(STEP_RAMP_START_DELAY_US, delay_us)
+    return (steps * delay_us + accel_steps * (start_delay_us - delay_us)) / 1_000_000
+
+
 def compute_dc_duty(rpm_rod: float, d_wheel_dc_mm: float, d_rod_mm: float, rpm_max_noload: float) -> dict:
     """İstenen besleme çubuğu RPM'i -> gerekli DC motor PWM duty% (Senaryo B,
     sürtünme tekerlek — Fatih onaylı):

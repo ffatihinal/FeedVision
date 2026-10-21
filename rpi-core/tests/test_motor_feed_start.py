@@ -253,7 +253,7 @@ class TestSuccessPath:
     def test_success_spawns_watcher_with_expected_max_wait(self, isolated_motion_params_config, monkeypatch, blocking_watcher):
         fake_bridge = FakeBridge(step_ok=True)
         monkeypatch.setattr(main, "bridge", fake_bridge)
-        cmd = _valid_command(speed_mms=5.0, distance_mm=100.0)  # 100/5=20s teorik -> 20*3+5=65s
+        cmd = _valid_command(speed_mms=5.0, distance_mm=100.0)  # firmware gerçek süresi (rampa dahil) 20.0128s -> *3+5 = 65.04s
 
         async def run():
             main._main_event_loop = asyncio.get_running_loop()  # bkz. _reset_main_event_loop
@@ -271,7 +271,8 @@ class TestSuccessPath:
                 await asyncio.wrap_future(main._sync_watcher_task)
 
         asyncio.run(run())
-        assert blocking_watcher == [65.0]
+        # (21-10-2026: tahmin artık rampa dahil firmware süresi; eskiden distance/speed=20s -> 65.0 idi)
+        assert blocking_watcher == [pytest.approx(65.04, abs=0.01)]
 
     def test_short_move_clamps_to_minimum_wait_timeout(self, isolated_motion_params_config, monkeypatch, blocking_watcher):
         fake_bridge = FakeBridge(step_ok=True)
@@ -333,9 +334,10 @@ class TestSuccessPath:
         asyncio.run(run())
         # İlk task'ın gövdesi Python sürümüne göre 0 ya da 1 kez çalışmış
         # olabilir (yukarıdaki not), ikinci task'ın gövdesi HER ZAMAN tam
-        # bir kez çalışır — yani liste [65.0] ya da [65.0, 65.0] olmalı,
+        # bir kez çalışır — yani liste 1 ya da 2 elemanlı ve hepsi ~65.04 olmalı,
         # başka hiçbir değer/uzunluk kabul edilemez.
-        assert blocking_watcher in ([65.0], [65.0, 65.0])
+        assert len(blocking_watcher) in (1, 2)
+        assert all(v == pytest.approx(65.04, abs=0.01) for v in blocking_watcher)
 
 
 class TestSyncWatcherAlwaysStopsDc:

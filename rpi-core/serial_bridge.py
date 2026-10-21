@@ -125,6 +125,13 @@ class STM32Bridge:
         age = self.get_status_age()
         return age is not None and age < CONNECTION_TIMEOUT_S
 
+    @property
+    def intentional_disconnect(self) -> bool:
+        """Operatör bilerek bağlantıyı kesti ("Bağlantıyı Kes") — beklenmedik kopma DEĞİL.
+        main.py bunu besleme sırasındaki "bağlantı koptu" HATA'sından ayırmak için okur;
+        sonraki connect() başarıyla port açınca False'a döner."""
+        return self._intentional_disconnect
+
     def list_available_ports(self) -> list[str]:
         """Mac/Pi'de o an takılı olan seri portların listesi (kullanıcı UI'dan seçsin diye)."""
         return [p.device for p in list_ports.comports()]
